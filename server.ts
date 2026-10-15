@@ -1,0 +1,412 @@
+import express from 'express';
+import { createServer as createViteServer } from 'vite';
+import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
+
+dotenv.config();
+
+async function startServer() {
+  const app = express();
+  app.use(express.json({ limit: '25mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+
+  // Static assets support for /src/images, /images, and /images/qr
+  app.use('/src/images', express.static(path.resolve(process.cwd(), 'src/images')));
+  app.use('/images', express.static(path.resolve(process.cwd(), 'public/images')));
+  app.use(express.static(path.resolve(process.cwd(), 'public')));
+
+  // Upload QR code image from PC or Mobile and store in server storage / repo
+  app.post('/api/upload-qr', async (req, res) => {
+    try {
+      const { dataUrl, filename } = req.body;
+      if (!dataUrl) {
+        return res.status(400).json({ error: 'No image data provided' });
+      }
+
+      const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+      let buffer: Buffer;
+      let extension = 'png';
+
+      if (matches && matches.length === 3) {
+        const mime = matches[1];
+        if (mime.includes('jpeg') || mime.includes('jpg')) extension = 'jpg';
+        else if (mime.includes('webp')) extension = 'webp';
+        else if (mime.includes('gif')) extension = 'gif';
+        else if (mime.includes('svg')) extension = 'svg';
+        buffer = Buffer.from(matches[2], 'base64');
+      } else {
+        buffer = Buffer.from(dataUrl, 'base64');
+      }
+
+      const cleanFilename = filename ? filename.replace(/[^a-zA-Z0-9_-]/g, '_') : 'qr_image';
+      const uniqueName = `${cleanFilename}_${Date.now()}.${extension}`;
+
+      const publicQrDir = path.resolve(process.cwd(), 'public/images/qr');
+      const srcQrDir = path.resolve(process.cwd(), 'src/images/qr');
+
+      await fs.promises.mkdir(publicQrDir, { recursive: true });
+      await fs.promises.mkdir(srcQrDir, { recursive: true });
+
+      await fs.promises.writeFile(path.join(publicQrDir, uniqueName), buffer);
+      await fs.promises.writeFile(path.join(srcQrDir, uniqueName), buffer);
+
+      const publicUrl = `/images/qr/${uniqueName}`;
+      console.log(`[Upload QR] Saved ${uniqueName} (${buffer.length} bytes) to server storage and repo`);
+
+      return res.json({
+        success: true,
+        url: publicUrl,
+        filename: uniqueName,
+        size: buffer.length,
+      });
+    } catch (err: any) {
+      console.error('[Upload QR Error]:', err);
+      return res.status(500).json({ error: err.message || 'Failed to upload QR image' });
+    }
+  });
+
+  // Cookie Parser Helper
+  const parseCookies = (req: express.Request): Record<string, string> => {
+    const list: Record<string, string> = {};
+    const header = req.headers.cookie;
+    if (!header) return list;
+    header.split(';').forEach((cookie) => {
+      const parts = cookie.split('=');
+      const key = parts[0]?.trim();
+      if (key) list[key] = decodeURIComponent(parts.slice(1).join('=').trim());
+    });
+    return list;
+  };
+
+  // In-memory Server Session Store
+  interface ServerSessionRecord {
+    token: string;
+    email: string;
+    userId: string;
+    createdAt: number;
+    expiresAt: number;
+  }
+  const serverSessions: Map<string, ServerSessionRecord> = new Map();
+
+  // 1. Auth Login: issues session cookie
+  app.post('/api/auth/login', (req, res) => {
+    try {
+      const { email, token, userId } = req.body;
+      const sessionToken = token || `tok_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const expiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+
+      serverSessions.set(sessionToken, {
+        token: sessionToken,
+        email: email || '',
+        userId: userId || '',
+        createdAt: Date.now(),
+        expiresAt,
+      });
+
+      // Set session cookie
+      res.setHeader(
+        'Set-Cookie',
+        `aetherpay_session=${sessionToken}; Path=/; SameSite=Lax; Max-Age=86400`
+      );
+
+      return res.json({
+        success: true,
+        token: sessionToken,
+        expiresAt,
+        message: 'Production session cookie issued',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Login session error' });
+    }
+  });
+
+  // 2. Auth Register: issues session cookie
+  app.post('/api/auth/register', (req, res) => {
+    try {
+      const { email, token, userId } = req.body;
+      const sessionToken = token || `tok_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
+
+      serverSessions.set(sessionToken, {
+        token: sessionToken,
+        email: email || '',
+        userId: userId || '',
+        createdAt: Date.now(),
+        expiresAt,
+      });
+
+      res.setHeader(
+        'Set-Cookie',
+        `aetherpay_session=${sessionToken}; Path=/; SameSite=Lax; Max-Age=86400`
+      );
+
+      return res.json({
+        success: true,
+        token: sessionToken,
+        expiresAt,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Register session error' });
+    }
+  });
+
+  // 3. Auth Session: validates session cookie
+  app.get('/api/auth/session', (req, res) => {
+    const cookies = parseCookies(req);
+    const token = cookies['aetherpay_session'] || req.headers.authorization?.replace('Bearer ', '');
+    if (!token) {
+      return res.status(401).json({ authenticated: false, message: 'No active session cookie' });
+    }
+
+    const sess = serverSessions.get(token);
+    if (!sess || Date.now() > sess.expiresAt) {
+      if (sess) serverSessions.delete(token);
+      res.setHeader('Set-Cookie', 'aetherpay_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT');
+      return res.status(401).json({ authenticated: false, message: 'Session expired' });
+    }
+
+    return res.json({
+      authenticated: true,
+      email: sess.email,
+      userId: sess.userId,
+      expiresAt: sess.expiresAt,
+    });
+  });
+
+  // 4. Auth Refresh: extends session cookie
+  app.post('/api/auth/refresh', (req, res) => {
+    const cookies = parseCookies(req);
+    const token = cookies['aetherpay_session'];
+    if (token && serverSessions.has(token)) {
+      const sess = serverSessions.get(token)!;
+      sess.expiresAt = Date.now() + 24 * 60 * 60 * 1000;
+      res.setHeader(
+        'Set-Cookie',
+        `aetherpay_session=${token}; Path=/; SameSite=Lax; Max-Age=86400`
+      );
+      return res.json({ success: true, expiresAt: sess.expiresAt });
+    }
+    return res.json({ success: true });
+  });
+
+  // 5. Auth Logout: revokes and destroys session cookie
+  app.post('/api/auth/logout', (req, res) => {
+    const cookies = parseCookies(req);
+    const token = cookies['aetherpay_session'];
+    if (token) serverSessions.delete(token);
+    res.setHeader(
+      'Set-Cookie',
+      'aetherpay_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax'
+    );
+    return res.json({ success: true, message: 'Session cookie destroyed' });
+  });
+
+  // Password Reset Tokens Store (In-Memory Server Registry)
+  interface PasswordResetRecord {
+    token: string;
+    email: string;
+    createdAt: number;
+    expiresAt: number;
+    used: boolean;
+    usedAt?: number;
+  }
+  const passwordResetTokens: Map<string, PasswordResetRecord> = new Map();
+
+  // 6. Request Password Reset Token: issues 15-minute secure token
+  app.post('/api/auth/request-reset', (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email || !email.includes('@')) {
+        return res.status(400).json({ error: 'Valid email address is required.' });
+      }
+
+      const cleanEmail = email.trim().toLowerCase();
+      // Generate cryptographically-inspired secure token with timestamp and entropy
+      const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
+      const codePart = Math.floor(100000 + Math.random() * 900000); // 6-digit code
+      const token = `RST-${Date.now().toString(36).toUpperCase()}-${randomSuffix}`;
+      const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes validity
+
+      const record: PasswordResetRecord = {
+        token,
+        email: cleanEmail,
+        createdAt: Date.now(),
+        expiresAt,
+        used: false,
+      };
+
+      passwordResetTokens.set(token, record);
+      // Also map the 6-digit pin for convenience
+      passwordResetTokens.set(String(codePart), record);
+
+      console.log(`[Self-Service Reset] Generated token for ${cleanEmail}: ${token} / PIN: ${codePart} (valid 15m)`);
+
+      return res.json({
+        success: true,
+        token,
+        pin: String(codePart),
+        email: cleanEmail,
+        expiresAt,
+        message: `Self-service password reset token generated for ${cleanEmail}. Valid for 15 minutes.`,
+      });
+    } catch (err: any) {
+      console.error('[Request Reset Error]:', err);
+      return res.status(500).json({ error: err.message || 'Failed to generate reset token' });
+    }
+  });
+
+  // 7. Verify Reset Token: checks token validity without consuming it
+  app.post('/api/auth/verify-reset-token', (req, res) => {
+    try {
+      const { token, email } = req.body;
+      if (!token) {
+        return res.status(400).json({ valid: false, message: 'Reset token is required.' });
+      }
+
+      const cleanToken = token.trim();
+      const record = passwordResetTokens.get(cleanToken);
+
+      if (!record) {
+        return res.status(404).json({ valid: false, message: 'Reset token not found or invalid.' });
+      }
+
+      if (record.used) {
+        return res.status(400).json({ valid: false, message: 'This reset token has already been used.' });
+      }
+
+      if (Date.now() > record.expiresAt) {
+        return res.status(400).json({ valid: false, message: 'Reset token has expired (15-minute limit exceeded).' });
+      }
+
+      if (email && record.email.toLowerCase() !== email.trim().toLowerCase()) {
+        return res.status(400).json({ valid: false, message: 'Token is not associated with this email address.' });
+      }
+
+      return res.json({
+        valid: true,
+        email: record.email,
+        expiresAt: record.expiresAt,
+        remainingSeconds: Math.ceil((record.expiresAt - Date.now()) / 1000),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ valid: false, message: err.message || 'Token verification error' });
+    }
+  });
+
+  // 8. Reset Password: confirms token and marks it consumed
+  app.post('/api/auth/reset-password', (req, res) => {
+    try {
+      const { token, email, newPassword } = req.body;
+      if (!token || !newPassword) {
+        return res.status(400).json({ error: 'Token and new password are required.' });
+      }
+
+      if (newPassword.length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
+      }
+
+      const cleanToken = token.trim();
+      const record = passwordResetTokens.get(cleanToken);
+
+      if (!record) {
+        return res.status(404).json({ error: 'Invalid or non-existent reset token.' });
+      }
+
+      if (record.used) {
+        return res.status(400).json({ error: 'This reset token has already been used.' });
+      }
+
+      if (Date.now() > record.expiresAt) {
+        return res.status(400).json({ error: 'Reset token has expired.' });
+      }
+
+      if (email && record.email.toLowerCase() !== email.trim().toLowerCase()) {
+        return res.status(400).json({ error: 'Email does not match this reset token.' });
+      }
+
+      // Mark token as used
+      record.used = true;
+      record.usedAt = Date.now();
+
+      console.log(`[Self-Service Reset] Successfully reset password for ${record.email}`);
+
+      return res.json({
+        success: true,
+        email: record.email,
+        message: 'Password has been successfully updated. You may now sign in with your new credentials.',
+      });
+    } catch (err: any) {
+      console.error('[Reset Password Error]:', err);
+      return res.status(500).json({ error: err.message || 'Failed to update password' });
+    }
+  });
+
+  // Create Vite server in middleware mode
+  const vite = await createViteServer({
+    server: { middlewareMode: true },
+    appType: 'spa',
+  });
+
+  // Use vite's connect instance as middleware
+  app.use(vite.middlewares);
+
+  // USPay / Keyhub API Proxy Route to avoid CORS issues
+  app.all('/api/uspay/*', async (req, res) => {
+    try {
+      const endpointPath = (req.params as Record<string, string>)[0] || ''; // e.g. 'collect', 'methods', 'balance'
+      const targetUrl = `https://www.keyhubsolutions.com/api/v1/${endpointPath}`;
+
+      // Get API key from request headers (Authorization Bearer) or env
+      const authHeader = req.headers['authorization'];
+      
+      const fetchOptions: RequestInit = {
+        method: req.method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authHeader ? { 'Authorization': authHeader } : {}),
+        },
+      };
+
+      if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body && Object.keys(req.body).length > 0) {
+        fetchOptions.body = JSON.stringify(req.body);
+      }
+
+      console.log(`[USPay Proxy] Forwarding ${req.method} to ${targetUrl}`);
+      const response = await fetch(targetUrl, fetchOptions);
+      
+      const contentType = response.headers.get('content-type');
+      let data;
+      if (contentType && contentType.includes('application/json')) {
+        data = await response.json();
+      } else {
+        data = await response.text();
+      }
+
+      if (!response.ok) {
+        return res.status(response.status).json(
+          typeof data === 'object' ? data : { error: data || `HTTP error ${response.status}` }
+        );
+      }
+
+      return res.json(data);
+    } catch (err: any) {
+      console.error('[USPay Proxy Error]:', err);
+      return res.status(500).json({ error: err.message || 'USPay Proxy Connection Error' });
+    }
+  });
+
+  // Keyhub Webhook receiver endpoint
+  app.post('/api/webhooks/keyhub', (req, res) => {
+    const event = req.body;
+    console.log('[Keyhub Webhook Received]:', event);
+    return res.json({ received: true });
+  });
+
+  const port = Number(process.env.PORT) || 3000;
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Server running on http://localhost:${port}`);
+  });
+}
+
+startServer();

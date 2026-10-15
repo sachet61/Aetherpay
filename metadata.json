@@ -1,0 +1,7 @@
+{
+  "name": "Swift Sweeps - Gaming Wallet & Sweepstakes Portal",
+  "description": "Enterprise-grade responsive sweepstakes gaming wallet, player portal, and real-time customer care operations system.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

@@ -1,0 +1,6 @@
+{
+  "summary": "Plan for implementing a secure, email-based, self-service password reset system using Firestore for token storage and server-side validation.",
+  "updatedAt": "2026-10-14T08:58:11.773206265Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

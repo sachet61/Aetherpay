@@ -1,0 +1,445 @@
+import React, { useState, useEffect } from 'react';
+import { useDataService } from './hooks/useDataService';
+import { dataService } from './services/dataService';
+import { TopNavbar } from './components/layout/TopNavbar';
+import { CustomerMobileNav } from './components/layout/CustomerMobileNav';
+import { StaffMobileNav } from './components/layout/StaffMobileNav';
+import { LegalContent } from './components/common/LegalContent';
+
+// Auth & Guest Landing
+import { AuthPage } from './pages/auth/AuthPage';
+import { SessionTimeoutWarningModal } from './components/common/SessionTimeoutWarningModal';
+import { StartupSplash } from './components/common/StartupSplash';
+import { LiveCashoutTicker } from './components/common/LiveCashoutTicker';
+
+
+// Customer Pages
+import { CustomerHome } from './pages/customer/CustomerHome';
+import { CustomerWallet } from './pages/customer/CustomerWallet';
+import { CustomerTopUp } from './pages/customer/CustomerTopUp';
+import { CustomerWithdrawal } from './pages/customer/CustomerWithdrawal';
+import { CustomerGameAccounts } from './pages/customer/CustomerGameAccounts';
+import { CustomerChat } from './pages/customer/CustomerChat';
+import { CustomerReferrals } from './pages/customer/CustomerReferrals';
+import { CustomerRules } from './pages/customer/CustomerRules';
+import { CustomerProfile } from './pages/customer/CustomerProfile';
+
+// Staff / Operations Pages
+import { AdminDashboard } from './pages/admin/AdminDashboard';
+import { AdminRequests } from './pages/admin/AdminRequests';
+import { AdminChat } from './pages/admin/AdminChat';
+import { AdminGameCatalog } from './pages/admin/AdminGameCatalog';
+import { AdminGameCredentials } from './pages/admin/AdminGameCredentials';
+import { AdminConfig } from './pages/admin/AdminConfig';
+import { AdminAudit } from './pages/admin/AdminAudit';
+
+import {
+  Gamepad2,
+  Gift,
+  FileText,
+  User,
+  X,
+  ShieldAlert,
+} from 'lucide-react';
+
+export default function App() {
+  const { currentUser, wallet, switchUser, logout } = useDataService();
+
+  const [currentHash, setCurrentHash] = useState<string>(window.location.hash);
+
+  useEffect(() => {
+    const handleHashChange = () => setCurrentHash(window.location.hash);
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
+
+  const getDefaultTab = (role?: string) => {
+    if (role === 'customer') return 'dashboard';
+    if (role === 'agent') return 'ops_chat';
+    if (role === 'admin') return 'ops_dashboard';
+    return 'dashboard';
+  };
+
+  const [activeTab, setActiveTab] = useState<string>(() =>
+    getDefaultTab(currentUser?.role)
+  );
+
+  const [tabMeta, setTabMeta] = useState<any>(null);
+  const [showMobileMoreDrawer, setShowMobileMoreDrawer] = useState(false);
+  const [isMobileChatActive, setIsMobileChatActive] = useState(false);
+  const [timeoutNotice, setTimeoutNotice] = useState<string | null>(null);
+
+  const handleLogout = (reason?: string) => {
+    logout();
+    if (reason === 'inactivity') {
+      setTimeoutNotice('Your session has timed out due to 15 minutes of inactivity. Please enter your credentials to resume.');
+    } else {
+      setTimeoutNotice(null);
+    }
+  };
+
+  // Sync tab when user changes (e.g. login/switch)
+  useEffect(() => {
+    if (currentUser) {
+      if (currentUser.role === 'customer' && activeTab.startsWith('ops_')) {
+        setActiveTab('dashboard');
+      } else if (currentUser.role !== 'customer' && !activeTab.startsWith('ops_')) {
+        setActiveTab(currentUser.role === 'agent' ? 'ops_chat' : 'ops_dashboard');
+      }
+    }
+  }, [currentUser?.id, currentUser?.role]);
+
+
+  if (currentHash === '#privacy') {
+    return <LegalContent initialTab="privacy" onBack={() => { window.location.hash = ''; setCurrentHash(''); }} />;
+  }
+  if (currentHash === '#data-deletion' || currentHash === '#datadeletion') {
+    return <LegalContent initialTab="deletion" onBack={() => { window.location.hash = ''; setCurrentHash(''); }} />;
+  }
+
+  const isCustomer = currentUser?.role === 'customer';
+  const isAgent = currentUser?.role === 'agent';
+  const isAdmin = currentUser?.role === 'admin';
+
+  // Default active tab based strictly on role
+
+  // If not logged in, render dedicated Auth & Landing Portal
+  if (!currentUser) {
+    return (
+      <>
+        <StartupSplash />
+        <AuthPage
+          key="auth"
+          onLoginSuccess={(user) => {
+            setTimeoutNotice(null);
+            setActiveTab(getDefaultTab(user.role));
+          }}
+          timeoutNotice={timeoutNotice}
+        />
+      </>
+    );
+  }
+
+  const activeWallet = wallet || dataService.getWallet(currentUser.id);
+
+  const handleSwitchUser = (userId: string) => {
+    switchUser(userId);
+    const targetUser = dataService.getUserById(userId);
+    if (targetUser) {
+      setIsMobileChatActive(false);
+      setActiveTab(getDefaultTab(targetUser.role));
+    }
+  };
+
+  const handleNavigateTab = (tab: string, meta?: any) => {
+    if (tab === 'menu') {
+      setShowMobileMoreDrawer(true);
+      return;
+    }
+
+    if (tab !== 'ops_chat') {
+      setIsMobileChatActive(false);
+    }
+
+    // Role-based route guard: agents cannot access Admin-exclusive routes
+    if (isAgent && (tab === 'ops_game_catalog' || tab === 'ops_config' || tab === 'ops_audit')) {
+      alert('Access Restricted: This configuration area is reserved for Platform Administrators.');
+      return;
+    }
+
+    setTabMeta(meta || null);
+    setActiveTab(tab);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  return (
+    <>
+      {/* Branded Startup Loading Screen with Logo Glow & Animated Progress Bar */}
+      <StartupSplash />
+
+      <div
+        className={`min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950 ${
+          isCustomer
+            ? 'pb-32 sm:pb-28'
+            : isMobileChatActive
+            ? 'pb-0'
+            : 'pb-24 md:pb-12'
+        }`}
+      >
+        {/* Session Inactivity Timeout Guard & Live Countdown Warning */}
+        <SessionTimeoutWarningModal onLogout={handleLogout} />
+
+        {/* Top Navbar with strict role-based views (No staff/customer mode toggle) */}
+        <TopNavbar
+          currentUser={currentUser}
+          wallet={activeWallet}
+          onSwitchUser={handleSwitchUser}
+          onLogout={() => handleLogout('manual')}
+          activeTab={activeTab}
+          onNavigateTab={handleNavigateTab}
+        />
+
+        {/* Continuous News-Style Horizontal Live Cashouts Marquee Ticker */}
+        {isCustomer && <LiveCashoutTicker />}
+
+        {/* Main Content Viewport */}
+        <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 w-full max-w-7xl mx-auto">
+
+
+
+        {/* CUSTOMER PORTAL VIEWS */}
+        {isCustomer && (
+          <>
+            {activeTab === 'dashboard' && (
+              <CustomerHome
+                currentUser={currentUser}
+                wallet={activeWallet}
+                onNavigateTab={handleNavigateTab}
+              />
+            )}
+
+            {activeTab === 'wallet' && (
+              <CustomerWallet
+                currentUser={currentUser}
+                wallet={activeWallet}
+                onNavigateTab={handleNavigateTab}
+              />
+            )}
+
+            {activeTab === 'topup' && (
+              <CustomerTopUp
+                currentUser={currentUser}
+                wallet={activeWallet}
+                onNavigateTab={handleNavigateTab}
+                prefilledAmount={tabMeta?.prefilledAmount}
+                preselectedGameCatalogId={tabMeta?.gameCatalogId}
+              />
+            )}
+
+            {activeTab === 'withdrawal' && (
+              <CustomerWithdrawal
+                currentUser={currentUser}
+                wallet={activeWallet}
+                onNavigateTab={handleNavigateTab}
+                prefilledAmount={tabMeta?.prefilledAmount}
+                preselectedGameCatalogId={tabMeta?.gameCatalogId}
+              />
+            )}
+
+            {activeTab === 'game_accounts' && (
+              <CustomerGameAccounts
+                currentUser={currentUser}
+                wallet={activeWallet}
+                onNavigateTab={handleNavigateTab}
+              />
+            )}
+
+            {activeTab === 'chat' && (
+              <CustomerChat
+                currentUser={currentUser}
+                onNavigateTab={handleNavigateTab}
+              />
+            )}
+
+            {activeTab === 'referrals' && (
+              <CustomerReferrals
+                currentUser={currentUser}
+                wallet={activeWallet}
+                onNavigateTab={handleNavigateTab}
+              />
+            )}
+
+            {activeTab === 'rules' && (
+              <CustomerRules onNavigateTab={handleNavigateTab} />
+            )}
+
+            {activeTab === 'privacy' && (
+              <LegalContent initialTab="privacy" onBack={() => handleNavigateTab('rules')} />
+            )}
+
+            {activeTab === 'data_deletion' && (
+              <LegalContent initialTab="deletion" onBack={() => handleNavigateTab('rules')} />
+            )}
+
+            {activeTab === 'profile' && (
+              <CustomerProfile
+                currentUser={currentUser}
+                wallet={activeWallet}
+                onNavigateTab={handleNavigateTab}
+                onSwitchUser={handleSwitchUser}
+                onLogout={logout}
+              />
+            )}
+          </>
+        )}
+
+        {/* CUSTOMER SUPPORT AGENT & ADMIN OPERATIONS */}
+        {!isCustomer && (
+          <>
+            {activeTab === 'ops_dashboard' && (
+              <AdminDashboard
+                currentUser={currentUser}
+                onNavigateTab={handleNavigateTab}
+              />
+            )}
+
+            {/* Master Game Catalog - Handled by Admin Account */}
+            {activeTab === 'ops_game_catalog' && (
+              <AdminGameCatalog currentUser={currentUser} />
+            )}
+
+            {/* Player Game IDs & Passwords - Handled by Customer Support & Admin */}
+            {activeTab === 'ops_game_credentials' && (
+              <AdminGameCredentials currentUser={currentUser} />
+            )}
+
+            {/* Requests Queue */}
+            {activeTab === 'ops_requests' && (
+              <AdminRequests
+                currentUser={currentUser}
+                initialFilter={tabMeta?.filter}
+                highlightId={tabMeta?.highlight}
+              />
+            )}
+
+            {/* Customer Support Inbox */}
+            {activeTab === 'ops_chat' && (
+              <AdminChat
+                currentUser={currentUser}
+                onNavigateTab={handleNavigateTab}
+                highlightConvId={tabMeta?.highlightConvId}
+                onActiveChatChange={(isOpen) => setIsMobileChatActive(isOpen)}
+              />
+            )}
+
+            {/* Admin Exclusive: Fees & Bonuses */}
+            {activeTab === 'ops_config' && (
+              isAdmin ? (
+                <AdminConfig currentUser={currentUser} />
+              ) : (
+                <div className="p-8 text-center rounded-2xl border border-amber-800 bg-amber-950/30 text-amber-300 space-y-2">
+                  <ShieldAlert className="w-8 h-8 mx-auto text-amber-400" />
+                  <h3 className="font-bold text-base">Admin Exclusive Area</h3>
+                  <p className="text-xs text-amber-400/80">Only Platform Administrators have permission to modify system fees, bonus rates, and payment gateways.</p>
+                </div>
+              )
+            )}
+
+            {/* Admin Exclusive: Audit Logs */}
+            {activeTab === 'ops_audit' && (
+              isAdmin ? (
+                <AdminAudit currentUser={currentUser} />
+              ) : (
+                <div className="p-8 text-center rounded-2xl border border-amber-800 bg-amber-950/30 text-amber-300 space-y-2">
+                  <ShieldAlert className="w-8 h-8 mx-auto text-amber-400" />
+                  <h3 className="font-bold text-base">Admin Exclusive Area</h3>
+                  <p className="text-xs text-amber-400/80">Only Platform Administrators have permission to review full system security audit logs.</p>
+                </div>
+              )
+            )}
+          </>
+        )}
+      </main>
+
+      {/* Persistent Android-Style Bottom Navigation for Customer */}
+      {isCustomer && (
+        <CustomerMobileNav
+          activeTab={activeTab}
+          onNavigateTab={handleNavigateTab}
+          currentUser={currentUser}
+        />
+      )}
+
+      {/* Persistent Android-Style Bottom Navigation for Staff (Hidden during full-screen mobile chat) */}
+      {!isCustomer && !isMobileChatActive && (
+        <StaffMobileNav
+          activeTab={activeTab}
+          onNavigateTab={handleNavigateTab}
+          currentUser={currentUser}
+        />
+      )}
+
+      {/* Mobile "More" Drawer / Bottom Sheet */}
+      {showMobileMoreDrawer && isCustomer && (
+        <div className="fixed inset-0 z-50 flex flex-col justify-end">
+          <div
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm"
+            onClick={() => setShowMobileMoreDrawer(false)}
+          />
+          <div className="relative w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-5 z-10 space-y-4 pb-safe animate-in slide-in-from-bottom duration-200">
+            <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto -mt-1 mb-2" />
+
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-white">More Services</h3>
+              <button
+                onClick={() => setShowMobileMoreDrawer(false)}
+                className="p-1 rounded-md text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <button
+                onClick={() => {
+                  setShowMobileMoreDrawer(false);
+                  handleNavigateTab('game_accounts');
+                }}
+                className="p-3.5 rounded-xl bg-[#0A0F1D] border border-amber-500/20 text-left flex items-center gap-3 hover:border-amber-500/50 transition-colors"
+              >
+                <Gamepad2 className="w-5 h-5 text-amber-400" />
+                <div>
+                  <div className="font-semibold text-white">Gaming IDs</div>
+                  <div className="text-[10px] text-slate-400">Fixed games &amp; logins</div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => {
+                  setShowMobileMoreDrawer(false);
+                  handleNavigateTab('referrals');
+                }}
+                className="p-3.5 rounded-xl bg-[#0A0F1D] border border-amber-500/20 text-left flex items-center gap-3 hover:border-amber-500/50 transition-colors"
+              >
+                <Gift className="w-5 h-5 text-amber-400" />
+                <div>
+                  <div className="font-semibold text-white">Referrals</div>
+                  <div className="text-[10px] text-slate-400">Earn $25 cash rewards</div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => {
+                  setShowMobileMoreDrawer(false);
+                  handleNavigateTab('rules');
+                }}
+                className="p-3.5 rounded-xl bg-[#0A0F1D] border border-amber-500/20 text-left flex items-center gap-3 hover:border-amber-500/50 transition-colors"
+              >
+                <FileText className="w-5 h-5 text-amber-400" />
+                <div>
+                  <div className="font-semibold text-white">Rules &amp; Policy</div>
+                  <div className="text-[10px] text-slate-400">Disclosures &amp; refunds</div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => {
+                  setShowMobileMoreDrawer(false);
+                  handleNavigateTab('profile');
+                }}
+                className="p-3.5 rounded-xl bg-[#0A0F1D] border border-amber-500/20 text-left flex items-center gap-3 hover:border-amber-500/50 transition-colors"
+              >
+                <User className="w-5 h-5 text-amber-400" />
+                <div>
+                  <div className="font-semibold text-white">Profile &amp; 2FA</div>
+                  <div className="text-[10px] text-slate-400">Security &amp; reset</div>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+    </>
+  );
+}

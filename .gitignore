@@ -1,0 +1,12 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Build results
+dist
+.output
+.next
+.vercel
+.env
+.env.local
