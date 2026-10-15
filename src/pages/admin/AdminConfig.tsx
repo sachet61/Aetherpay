@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { UserProfile, AppConfig, PaymentMethodType } from '../../types';
 import { dataService } from '../../services/dataService';
+import { getSupabaseConfig, testSupabaseConnection } from '../../services/supabaseClient';
 import {
   Settings,
   Save,
@@ -31,6 +32,8 @@ import {
   Smartphone,
   Monitor,
   Loader2,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 interface QrCodeUploadBoxProps {
@@ -341,27 +344,55 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
   const [isResettingFirestore, setIsResettingFirestore] = useState(false);
   const [firestoreNotice, setFirestoreNotice] = useState<string | null>(null);
 
-  const handleResetFirestore = async () => {
-    setIsResettingFirestore(true);
-    setFirestoreNotice(null);
+  // Supabase Integration & Migration state
+  const [isMigratingSupabase, setIsMigratingSupabase] = useState(false);
+  const [supabaseNotice, setSupabaseNotice] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
+  const [supabaseTestStatus, setSupabaseTestStatus] = useState<string | null>(null);
+  const [showSqlGuide, setShowSqlGuide] = useState(false);
+  const [copiedSql, setCopiedSql] = useState(false);
+  const supabaseConfig = getSupabaseConfig();
+
+  const handleMigrateToSupabase = async () => {
+    setIsMigratingSupabase(true);
+    setSupabaseNotice({ text: 'Starting migration: uploading all users, wallets, games, transactions, and messages to Supabase...', type: 'info' });
     try {
-      const res = await dataService.seedFirestoreWithPresets();
-      setFirestoreNotice(res.message);
-      dataService.logAudit({
-        actorId: currentUser.id,
-        actorName: currentUser.displayName,
-        actorRole: currentUser.role,
-        action: 'FIRESTORE_RESEEDED',
-        entityType: 'settings',
-        entityId: 'firestore',
-        details: 'Admin triggered complete reset and population of Firestore database with production demo presets.',
-      });
-      setTimeout(() => setFirestoreNotice(null), 5000);
-    } catch (e: any) {
-      setFirestoreNotice('Error populating Firestore: ' + (e?.message || String(e)));
+      const res = await dataService.migrateAllToSupabase();
+      if (res.success) {
+        setSupabaseNotice({ text: res.message, type: 'success' });
+      } else {
+        setSupabaseNotice({ text: res.message, type: 'error' });
+      }
+    } catch (err: any) {
+      setSupabaseNotice({ text: 'Migration error: ' + (err?.message || String(err)), type: 'error' });
     } finally {
-      setIsResettingFirestore(false);
+      setIsMigratingSupabase(false);
     }
+  };
+
+  const handleTestSupabase = async () => {
+    setSupabaseTestStatus('Checking Supabase connection...');
+    const res = await testSupabaseConnection();
+    setSupabaseTestStatus(res.message);
+    setTimeout(() => setSupabaseTestStatus(null), 8000);
+  };
+
+  const handleCopySqlSchema = async () => {
+    try {
+      const res = await fetch('/supabase_schema.sql');
+      const text = await res.text();
+      await navigator.clipboard.writeText(text);
+      setCopiedSql(true);
+      setTimeout(() => setCopiedSql(false), 2500);
+    } catch {
+      window.open('/supabase_schema.sql', '_blank');
+    }
+  };
+
+  const handleResetData = () => {
+    if (!window.confirm('Reset local cache & storage to fresh demo presets and sync to database?')) return;
+    dataService.resetToSeedData();
+    setSuccessNote('Demo preset data reset and synchronized successfully.');
+    setTimeout(() => setSuccessNote(null), 4000);
   };
 
   // Interactive Live Bonus Simulator state in Admin UI
@@ -452,73 +483,183 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
         </div>
       )}
 
-      {/* Production Firebase Firestore & Cloud Database Controls */}
-      <div className="p-6 rounded-2xl border border-blue-900/40 bg-gradient-to-br from-slate-900 to-slate-950 shadow-lg space-y-5">
+      {/* Supabase PostgreSQL & Cloud Database Controls */}
+      <div className="p-6 rounded-2xl border border-emerald-900/40 bg-gradient-to-br from-slate-900 to-slate-950 shadow-lg space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center justify-center font-bold">
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center justify-center font-bold">
               <Database className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-white">Google Cloud Firestore Database</h2>
-                <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  LIVE REAL-TIME SYNC
-                </span>
+                <h2 className="text-base font-bold text-white">Supabase (PostgreSQL) Database Integration</h2>
+                {supabaseConfig.isReady ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    CONNECTED TO SUPABASE
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                    LOCAL PERSISTENCE MODE (Awaiting .env)
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Database: <span className="font-mono text-slate-300">ai-studio-aetherpaygamingw-cee12a81-d889-4447-8929-7d17afe855ca</span> &bull; All platform data persisted in Firestore collections.
+                Host: <span className="font-mono text-slate-300">{supabaseConfig.url || 'In-Memory / Local Storage Fallback'}</span> &bull; 
+                {supabaseConfig.isReady ? ' Real-time polling active across all tables' : ' Unlimited writes, zero quota limits'}
               </p>
             </div>
           </div>
 
-          <button
-            type="button"
-            disabled={isResettingFirestore}
-            onClick={handleResetFirestore}
-            className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all shadow-md ${
-              isResettingFirestore
-                ? 'bg-slate-800 text-slate-400 cursor-not-allowed'
-                : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/20 active:scale-95'
-            }`}
-          >
-            <RotateCcw className={`w-4 h-4 ${isResettingFirestore ? 'animate-spin' : ''}`} />
-            <span>{isResettingFirestore ? 'Populating Firestore...' : 'Reset & Re-Seed Firestore'}</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={isMigratingSupabase}
+              onClick={handleMigrateToSupabase}
+              className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all shadow-md ${
+                isMigratingSupabase
+                  ? 'bg-slate-800 text-slate-400 cursor-not-allowed'
+                  : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/20 active:scale-95'
+              }`}
+            >
+              {isMigratingSupabase ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Upload className="w-4 h-4" />
+              )}
+              <span>{isMigratingSupabase ? 'Migrating Records...' : 'Migrate All Data to Supabase'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleTestSupabase}
+              className="px-3 py-2.5 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
+            >
+              Test Connection
+            </button>
+          </div>
         </div>
 
         {/* Live sync stats grid */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
           <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800/80">
-            <span className="text-[11px] text-slate-400">Users Collection</span>
+            <span className="text-[11px] text-slate-400">Users Table</span>
             <div className="text-lg font-mono font-bold text-white mt-0.5">
-              {dataService.getUsers().length} <span className="text-[10px] font-normal text-slate-500">docs</span>
+              {dataService.getUsers().length} <span className="text-[10px] font-normal text-slate-500">records</span>
             </div>
           </div>
 
           <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800/80">
             <span className="text-[11px] text-slate-400">Transactions Ledger</span>
             <div className="text-lg font-mono font-bold text-white mt-0.5">
-              {dataService.getTransactions().length} <span className="text-[10px] font-normal text-slate-500">docs</span>
+              {dataService.getTransactions().length} <span className="text-[10px] font-normal text-slate-500">records</span>
             </div>
           </div>
 
           <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800/80">
             <span className="text-[11px] text-slate-400">Game Catalog</span>
             <div className="text-lg font-mono font-bold text-white mt-0.5">
-              {dataService.getGameCatalog().length} <span className="text-[10px] font-normal text-slate-500">docs</span>
+              {dataService.getGameCatalog().length} <span className="text-[10px] font-normal text-slate-500">records</span>
             </div>
           </div>
 
           <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800/80">
-            <span className="text-[11px] text-slate-400">Storage Architecture</span>
+            <span className="text-[11px] text-slate-400">Messaging Engine</span>
             <div className="text-xs font-bold text-emerald-400 mt-1 flex items-center gap-1.5">
-              <Cloud className="w-3.5 h-3.5" />
-              <span>Zero LocalStorage</span>
+              <Zap className="w-3.5 h-3.5" />
+              <span>3s Interval Polling</span>
             </div>
           </div>
         </div>
+
+        {/* Supabase Notice banner */}
+        {supabaseNotice && (
+          <div
+            className={`p-3.5 rounded-xl text-xs flex items-center justify-between gap-3 ${
+              supabaseNotice.type === 'success'
+                ? 'bg-emerald-950/80 border border-emerald-700 text-emerald-200'
+                : supabaseNotice.type === 'error'
+                ? 'bg-rose-950/80 border border-rose-700 text-rose-200'
+                : 'bg-indigo-950/80 border border-indigo-700 text-indigo-200'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {supabaseNotice.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+              ) : supabaseNotice.type === 'error' ? (
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              ) : (
+                <Loader2 className="w-4 h-4 animate-spin shrink-0 text-indigo-400" />
+              )}
+              <span>{supabaseNotice.text}</span>
+            </div>
+            <button
+              onClick={() => setSupabaseNotice(null)}
+              className="text-slate-400 hover:text-white text-xs font-bold"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* Test Connection result */}
+        {supabaseTestStatus && (
+          <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 text-xs font-mono flex items-center gap-2">
+            <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span>{supabaseTestStatus}</span>
+          </div>
+        )}
+
+        {/* SQL Schema helper toggle */}
+        <div className="pt-2 border-t border-slate-800/60 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="text-slate-400">
+            Database schema file: <span className="font-mono text-emerald-400 font-semibold">/supabase_schema.sql</span> (14 tables, RLS policies, indexes)
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleCopySqlSchema}
+              className="px-2.5 py-1.5 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-700/80 text-emerald-300 font-semibold transition-colors flex items-center gap-1.5 shadow-sm"
+            >
+              {copiedSql ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-emerald-400" />}
+              <span>{copiedSql ? 'SQL Copied!' : 'Copy SQL Schema'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleResetData}
+              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 font-semibold transition-colors flex items-center gap-1.5"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+              <span>Reset &amp; Re-seed Presets</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowSqlGuide(!showSqlGuide)}
+              className="text-indigo-400 hover:text-indigo-300 font-semibold transition-colors flex items-center gap-1"
+            >
+              {showSqlGuide ? 'Hide Setup Guide' : 'View Supabase Setup Guide'}
+            </button>
+          </div>
+        </div>
+
+        {showSqlGuide && (
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-2.5">
+            <h4 className="font-bold text-white flex items-center gap-2">
+              <Database className="w-4 h-4 text-emerald-400" />
+              <span>How to connect your Supabase database:</span>
+            </h4>
+            <ol className="list-decimal list-inside space-y-1.5 text-slate-300 pl-1 leading-relaxed">
+              <li>Log in to your free Supabase project at <a href="https://supabase.com/dashboard" target="_blank" rel="noreferrer" className="text-emerald-400 underline">supabase.com/dashboard</a>.</li>
+              <li>Go to <strong>SQL Editor</strong> &rarr; Click <strong>New query</strong> &rarr; Paste and run the contents of <span className="font-mono text-indigo-300">/supabase_schema.sql</span>.</li>
+              <li>Under <strong>Project Settings &rarr; API</strong>, copy your <strong>Project URL</strong> and <strong>anon public API key</strong>.</li>
+              <li>Set <span className="font-mono text-amber-400">VITE_SUPABASE_URL</span> and <span className="font-mono text-amber-400">VITE_SUPABASE_ANON_KEY</span> in your environment variables.</li>
+              <li>Click <strong>&quot;Migrate All Data to Supabase&quot;</strong> above to upload all users, game accounts, wallets, and chat history.</li>
+            </ol>
+          </div>
+        )}
       </div>
 
       {/* Live Dynamic Bonus Simulator Card */}

@@ -89,7 +89,7 @@ export const LegalContent: React.FC<LegalContentProps> = ({ initialTab = 'privac
                 <h3 className="font-bold text-white text-base">2. Information We Collect</h3>
                 <p>We may collect, use, store and transfer different kinds of personal data about you which we have grouped together as follows:</p>
                 <ul className="list-disc pl-5 space-y-1 text-slate-300">
-                  <li><strong>Identity Data:</strong> Includes first name, last name, username or similar identifier, and profile picture (when logging in via Google or Facebook).</li>
+                  <li><strong>Identity Data:</strong> Includes first name, last name, username or gamer tag identifier.</li>
                   <li><strong>Contact Data:</strong> Includes email address, telephone numbers, and communication logs with customer support.</li>
                   <li><strong>Financial Data:</strong> Includes wallet balances, transaction history, top-up receipts, and withdrawal addresses.</li>
                   <li><strong>Technical Data:</strong> Includes internet protocol (IP) address, browser type and version, time zone setting, operating system and platform on devices used to access our platform.</li>
@@ -108,9 +108,9 @@ export const LegalContent: React.FC<LegalContentProps> = ({ initialTab = 'privac
               </section>
 
               <section className="space-y-2">
-                <h3 className="font-bold text-white text-base">4. Third-Party Logins (Google &amp; Facebook)</h3>
+                <h3 className="font-bold text-white text-base">4. Account Security &amp; Credentials</h3>
                 <p>
-                  When you choose to log in using third-party services such as Google or Facebook, we receive basic profile information permitted by your privacy settings on those platforms (such as your name, email address, and profile picture). We do not post anything to your social media timelines without your explicit permission.
+                  Your account credentials (email and password) are protected by secure authentication protocols. We do not sell your personal data or share private information with external marketing services.
                 </p>
               </section>
 
