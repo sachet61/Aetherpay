@@ -430,7 +430,7 @@ class AuthSessionService {
     return { success: true, session };
   }
 
-  // Establish an active session from verified Firebase Authentication
+  // Establish an active session from verified Supabase Authentication
   public createSessionForUser(
     userId: string,
     email: string,
@@ -480,6 +480,16 @@ class AuthSessionService {
     // Clear server session cookie
     fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
 
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
+  }
+
+  // Update profile attributes in active session
+  public updateUserProfile(profile: UserProfile): void {
+    if (this.activeSession && (this.activeSession.userId === profile.id || this.activeSession.email.toLowerCase() === profile.email.toLowerCase())) {
+      this.activeSession.displayName = profile.displayName;
+      this.activeSession.role = profile.role;
+      this.saveActiveSession();
+    }
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
   }
 

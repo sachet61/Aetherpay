@@ -31,9 +31,18 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({ currentUser
       case 'agent':
         return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">Support Agent</span>;
       default:
-        return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-950 text-indigo-300 border border-indigo-800">Verified Player</span>;
+        return currentUser.emailVerified ? (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">Verified Player</span>
+        ) : (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800 flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+            Unverified Player
+          </span>
+        );
     }
   };
+
+  const isVerified = currentUser.role !== 'customer' || Boolean(currentUser.emailVerified);
 
   return (
     <div className="relative inline-block text-left">
@@ -44,8 +53,8 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({ currentUser
       >
         <span className="flex items-center gap-1.5">
           <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${isVerified ? 'bg-emerald-400' : 'bg-amber-400'} opacity-75`}></span>
+            <span className={`relative inline-flex rounded-full h-2 w-2 ${isVerified ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
           </span>
           {getRoleIcon(currentUser.role)}
           <span className="font-semibold text-slate-100">{currentUser.displayName.split(' ')[0]}</span>

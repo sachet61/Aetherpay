@@ -366,7 +366,7 @@ class DataService {
           phone: u.phone || null,
           avatar_url: u.avatarUrl || null,
           status: u.status || 'active',
-          email_verified: u.emailVerified ?? true,
+          email_verified: Boolean(u.emailVerified),
           referred_by: u.referredBy || null,
           created_at: u.createdAt || new Date().toISOString(),
         }));
@@ -544,7 +544,7 @@ class DataService {
           phone: u.phone || null,
           avatar_url: u.avatarUrl || null,
           status: u.status || 'active',
-          email_verified: u.emailVerified ?? true,
+          email_verified: Boolean(u.emailVerified),
           referred_by: u.referredBy || null,
           created_at: u.createdAt || new Date().toISOString(),
         }));
@@ -726,7 +726,7 @@ class DataService {
     }
   }
 
-  public async seedFirestoreWithPresets(): Promise<{ success: boolean; message: string }> {
+  public async seedDatabaseWithPresets(): Promise<{ success: boolean; message: string }> {
     if (this.isSeeding) return { success: true, message: 'Seeding already in progress' };
     this.isSeeding = true;
     try {
@@ -756,11 +756,16 @@ class DataService {
       window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'all' } }));
       return { success: true, message: 'All demo presets and presets have been populated to Supabase.' };
     } catch (error) {
-      console.warn('Firebase write notice (operating in Supabase / Local resilience mode):', error instanceof Error ? error.message : String(error));
-      return { success: false, message: 'Firebase quota is exhausted. Active storage is running via Supabase PostgreSQL & Local Storage resilience mode.' };
+      console.warn('Supabase sync notice:', error instanceof Error ? error.message : String(error));
+      return { success: false, message: 'Active storage is running via Supabase PostgreSQL & Local Storage resilience mode.' };
     } finally {
       this.isSeeding = false;
     }
+  }
+
+  // Alias for backward compatibility
+  public async seedFirestoreWithPresets(): Promise<{ success: boolean; message: string }> {
+    return this.seedDatabaseWithPresets();
   }
 
   public resetToSeedData(): void {
@@ -831,10 +836,10 @@ class DataService {
   }
 
   // ==========================================
-  // Production Firebase Authentication Methods
+  // Production Supabase Authentication Methods
   // ==========================================
 
-  public async loginWithFirebaseAuth(
+  public async loginWithSupabaseAuth(
     email: string,
     pass: string
   ): Promise<{ success: boolean; user?: UserProfile; message?: string }> {
@@ -859,7 +864,15 @@ class DataService {
     };
   }
 
-  public async registerWithFirebaseAuth(
+  // Alias for backward compatibility
+  public async loginWithFirebaseAuth(
+    email: string,
+    pass: string
+  ): Promise<{ success: boolean; user?: UserProfile; message?: string }> {
+    return this.loginWithSupabaseAuth(email, pass);
+  }
+
+  public async registerWithSupabaseAuth(
     email: string,
     pass: string,
     displayName: string,
@@ -893,6 +906,18 @@ class DataService {
       success: false,
       message: supaRes.error || 'Registration failed.',
     };
+  }
+
+  // Alias for backward compatibility
+  public async registerWithFirebaseAuth(
+    email: string,
+    pass: string,
+    displayName: string,
+    phone?: string,
+    referralCode?: string,
+    role?: UserRole
+  ): Promise<{ success: boolean; user?: UserProfile; message?: string }> {
+    return this.registerWithSupabaseAuth(email, pass, displayName, phone, referralCode, role);
   }
 
   public async loginWithGoogle(
@@ -934,23 +959,12 @@ class DataService {
     };
   }
 
-  public async sendVerificationEmail(): Promise<{ success: boolean; message?: string }> {
-    if (isSupabaseConfigured() && supabase && authSessionService.getActiveSession()) {
-      const sess = authSessionService.getActiveSession()!;
-      try {
-        const { error } = await supabase.auth.resend({
-          type: 'signup',
-          email: sess.email,
-        });
-        if (error) {
-          return { success: false, message: error.message };
-        }
-        return { success: true, message: `Verification email resent to ${sess.email} via Supabase.` };
-      } catch (err: any) {
-        return { success: false, message: err?.message || 'Failed to send verification email' };
-      }
+  public async sendVerificationEmail(): Promise<{ success: boolean; message?: string; actionLink?: string }> {
+    const user = this.getCurrentUser();
+    if (!user) {
+      return { success: false, message: 'No active user found.' };
     }
-    return { success: true, message: 'Email address verified and active in Supabase!' };
+    return supabaseAuthService.resendVerificationEmail(user.email);
   }
 
   public async reloadAndCheckEmailVerification(): Promise<{
@@ -962,17 +976,101 @@ class DataService {
     if (!user) {
       return { verified: false, message: 'No active session found', user: null };
     }
+
+    // 1. Check with Supabase backend server API
+    try {
+      const resp = await fetch('/api/auth/check-verification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: user.email }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.exists) {
+          user.emailVerified = Boolean(data.verified);
+          this.registerUser(user);
+          authSessionService.updateUserProfile(user);
+          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
+          return {
+            verified: Boolean(data.verified),
+            message: data.verified
+              ? 'Email address confirmed and verified in Supabase! Cashouts and referral bonuses are now unlocked.'
+              : 'Email address is still unconfirmed in Supabase. Check your inbox or click Instant Verify.',
+            user,
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('Check verification network notice:', err);
+    }
+
+    // 2. Client-side Supabase session check fallback
+    if (supabase && isSupabaseConfigured()) {
+      try {
+        const { data: { user: supaUser } } = await supabase.auth.getUser();
+        if (supaUser && supaUser.email?.toLowerCase() === user.email.toLowerCase()) {
+          const isConfirmed = Boolean(supaUser.email_confirmed_at);
+          user.emailVerified = isConfirmed;
+          this.registerUser(user);
+          authSessionService.updateUserProfile(user);
+          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
+          return {
+            verified: isConfirmed,
+            message: isConfirmed
+              ? 'Email address confirmed and verified! Cashouts and referral bonuses are now unlocked.'
+              : 'Email address is not yet confirmed. Please check your inbox for the verification link.',
+            user,
+          };
+        }
+      } catch (e) {
+        console.warn('Supabase client verification check notice:', e);
+      }
+    }
+
     return {
-      verified: true,
-      message: 'Email address confirmed and verified! Cashouts and referral bonuses are now unlocked.',
-      user: { ...user, emailVerified: true },
+      verified: Boolean(user.emailVerified),
+      message: user.emailVerified
+        ? 'Email address confirmed and verified!'
+        : 'Email address is unverified. Please check your email inbox.',
+      user,
     };
   }
 
-  public async sendPasswordResetViaFirebase(
+  public async confirmEmailNow(email?: string): Promise<{ success: boolean; message: string }> {
+    const targetEmail = (email || this.getCurrentUser()?.email || '').trim().toLowerCase();
+    if (!targetEmail) {
+      return { success: false, message: 'Valid email address is required.' };
+    }
+    const res = await supabaseAuthService.confirmEmailNow(targetEmail);
+    if (res.success) {
+      const u = this.getUsers().find((usr) => usr.email.toLowerCase() === targetEmail);
+      if (u) {
+        u.emailVerified = true;
+        this.registerUser(u);
+        authSessionService.updateUserProfile(u);
+      }
+      const cur = this.getCurrentUser();
+      if (cur && cur.email.toLowerCase() === targetEmail) {
+        cur.emailVerified = true;
+        this.registerUser(cur);
+        authSessionService.updateUserProfile(cur);
+      }
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
+    }
+    return res;
+  }
+
+  public async sendPasswordResetViaSupabase(
     email: string
   ): Promise<{ success: boolean; message?: string }> {
     return supabaseAuthService.sendPasswordReset(email);
+  }
+
+  // Alias for backward compatibility
+  public async sendPasswordResetViaFirebase(
+    email: string
+  ): Promise<{ success: boolean; message?: string }> {
+    return this.sendPasswordResetViaSupabase(email);
   }
 
   // ==========================================
@@ -1124,7 +1222,7 @@ class DataService {
       console.warn('[Self-Service Reset] Server reset password notify note:', e);
     }
 
-    // 4. Mark token used in cache & Firestore
+    // 4. Mark token used in cache & Supabase
     const tokens = this.getPasswordResetTokens();
     const updatedTokens = tokens.map((t) => {
       if (t.token.toLowerCase() === cleanToken.toLowerCase() || t.id.toLowerCase() === cleanToken.toLowerCase()) {
@@ -1724,7 +1822,7 @@ class DataService {
     }
 
     const customer = this.getUserById(params.customerId);
-    const isEmailVerified = customer?.emailVerified ?? true;
+    const isEmailVerified = Boolean(customer?.emailVerified);
     if (!isEmailVerified) {
       return {
         success: false,
@@ -2441,11 +2539,28 @@ class DataService {
     // Broadcast live via Supabase Realtime and persist to messages table
     try {
       if (supabase) {
-        supabase.channel(`room_${params.conversationId}`).send({
-          type: 'broadcast',
-          event: 'new_chat_message',
-          payload: newMsg,
-        }).catch(() => {});
+        const channel = supabase.channel(`room_${params.conversationId}`);
+        if ((channel as any).state === 'joined') {
+          channel
+            .send({
+              type: 'broadcast',
+              event: 'new_chat_message',
+              payload: newMsg,
+            })
+            .catch((err) => console.warn('Realtime broadcast notice:', err));
+        } else {
+          channel.subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+              channel
+                .send({
+                  type: 'broadcast',
+                  event: 'new_chat_message',
+                  payload: newMsg,
+                })
+                .catch(() => {});
+            }
+          });
+        }
 
         supabase
           .from('messages')
@@ -2455,17 +2570,34 @@ class DataService {
             sender_id: newMsg.senderId,
             sender_name: newMsg.senderName,
             sender_role: newMsg.senderRole,
+            content: newMsg.text,
             text: newMsg.text,
             created_at: newMsg.createdAt,
           })
           .then(
             () => {},
-            () => {}
+            (err) => console.warn('Supabase message persist notice:', err)
           );
       }
-    } catch {}
+    } catch (e) {
+      console.warn('Realtime chat dispatch notice:', e);
+    }
 
     return newMsg;
+  }
+
+  public appendIncomingMessage(msg: ChatMessage): void {
+    if (!msg || !msg.conversationId || !msg.id) return;
+    const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+    if (!all[msg.conversationId]) {
+      all[msg.conversationId] = [];
+    }
+    if (!all[msg.conversationId].some((m) => m.id === msg.id)) {
+      all[msg.conversationId].push(msg);
+      this.cache[STORAGE_KEYS.MESSAGES] = all;
+      this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'chat_incoming' } }));
+    }
   }
 
   public updateChatTransactionStatus(

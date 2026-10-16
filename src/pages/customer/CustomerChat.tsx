@@ -43,6 +43,8 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
 
+  const channelRef = useRef<any>(null);
+
   // Initialize or load conversation
   useEffect(() => {
     const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
@@ -58,21 +60,30 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     };
 
     window.addEventListener('aetherpay_state_changed', handleSync);
+    window.addEventListener('storage', handleSync);
 
     // Supabase Realtime channel subscription for instant cross-tab/device messaging
     const channel = supabase.channel(`room_${conv.id}`)
       .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
         if (payload && payload.id) {
+          dataService.appendIncomingMessage(payload);
           setMessages((prev) => {
             if (prev.some((m) => m.id === payload.id)) return prev;
             return [...prev, payload];
           });
         }
       })
-      .subscribe();
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          channelRef.current = channel;
+        }
+      });
+
+    channelRef.current = channel;
 
     return () => {
       window.removeEventListener('aetherpay_state_changed', handleSync);
+      window.removeEventListener('storage', handleSync);
       supabase.removeChannel(channel);
     };
   }, [currentUser.id]);
@@ -86,7 +97,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     if (!inputText.trim() && !attachmentUrl) return;
     if (!conversation) return;
 
-    dataService.sendChatMessage({
+    const newMsg = dataService.sendChatMessage({
       conversationId: conversation.id,
       senderId: currentUser.id,
       senderName: currentUser.displayName,
@@ -95,6 +106,21 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       attachmentUrl: attachmentUrl || undefined,
       attachmentName: attachmentName || undefined,
       isInternalNote: false,
+    });
+
+    if (channelRef.current) {
+      channelRef.current
+        .send({
+          type: 'broadcast',
+          event: 'new_chat_message',
+          payload: newMsg,
+        })
+        .catch(() => {});
+    }
+
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === newMsg.id)) return prev;
+      return [...prev, newMsg];
     });
 
     setInputText('');

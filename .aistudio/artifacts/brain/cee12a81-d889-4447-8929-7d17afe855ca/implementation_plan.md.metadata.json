@@ -1,6 +1,6 @@
 {
-  "summary": "Comprehensive implementation plan to transition AetherPay completely to Supabase (Auth, Database, Realtime Messaging), eliminate Firebase/Firestore, fix the localhost:3000 password reset link redirect error, and resolve account lookup incompatibility.",
-  "updatedAt": "2026-10-16T00:40:41.982617045Z",
+  "summary": "Implementation plan to fix email verification status and add prominent Verify Now controls, resolve password reset localhost:3000 redirect errors with direct server-generated reset links and in-app codes, and restore real-time chat messaging via Supabase Realtime channels and instant state dispatch.",
+  "updatedAt": "2026-10-16T13:08:57.273917049Z",
   "requestFeedback": true,
   "userFacing": true
 }

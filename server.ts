@@ -4,8 +4,18 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
+import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
+
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://qlurdhimtgchlgoaziqq.supabase.co';
+const SUPABASE_SERVICE_ROLE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFsdXJkaGltdGdjaGxnb2F6aXFxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjA2MTY2NiwiZXhwIjoyMTA3NjM3NjY2fQ.iH8f_0MXUD3faa43gc13XtfBc_r_tKptMqrfZkbxuag';
+
+const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { autoRefreshToken: false, persistSession: false },
+});
 
 async function startServer() {
   const app = express();
@@ -209,8 +219,8 @@ app.post('/api/auth/register', async (req, res) => {
   }
   const passwordResetTokens: Map<string, PasswordResetRecord> = new Map();
 
-  // 6. Request Password Reset Token: issues 15-minute secure token
-  app.post('/api/auth/request-reset', (req, res) => {
+  // 6. Request Password Reset Token & Direct Domain Recovery Link
+  app.post('/api/auth/request-reset', async (req, res) => {
     try {
       const { email } = req.body;
       if (!email || !email.includes('@')) {
@@ -218,7 +228,41 @@ app.post('/api/auth/register', async (req, res) => {
       }
 
       const cleanEmail = email.trim().toLowerCase();
-      // Generate cryptographically-inspired secure token with timestamp and entropy
+
+      // Determine active application origin
+      const host = req.get('host');
+      const proto = req.get('x-forwarded-proto') || 'https';
+      const origin = req.headers.origin || (host ? `${proto}://${host}` : 'https://ais-dev-z7ycubaw6ioqcdgqzu2qkl-342377552686.asia-southeast1.run.app');
+      const redirectTo = `${origin}/#type=recovery`;
+
+      let directActionLink: string | null = null;
+      let recoveryHashedToken: string | null = null;
+
+      try {
+        const { data, error } = await supabaseAdmin.auth.admin.generateLink({
+          type: 'recovery',
+          email: cleanEmail,
+          options: {
+            redirectTo,
+          },
+        });
+
+        if (!error && data?.properties?.action_link) {
+          let link = data.properties.action_link;
+          // Replace any hardcoded localhost:3000 redirect_to with active domain
+          if (link.includes('redirect_to=http://localhost:3000') || link.includes('redirect_to=http%3A%2F%2Flocalhost%3A3000')) {
+            link = link
+              .replace('redirect_to=http://localhost:3000', `redirect_to=${encodeURIComponent(redirectTo)}`)
+              .replace('redirect_to=http%3A%2F%2Flocalhost%3A3000', `redirect_to=${encodeURIComponent(redirectTo)}`);
+          }
+          directActionLink = link;
+          recoveryHashedToken = data.properties.hashed_token || null;
+        }
+      } catch (adminErr) {
+        console.warn('[Admin GenerateLink Notice]:', adminErr);
+      }
+
+      // Generate in-app 6-digit pin and security token
       const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
       const codePart = Math.floor(100000 + Math.random() * 900000); // 6-digit code
       const token = `RST-${Date.now().toString(36).toUpperCase()}-${randomSuffix}`;
@@ -233,18 +277,21 @@ app.post('/api/auth/register', async (req, res) => {
       };
 
       passwordResetTokens.set(token, record);
-      // Also map the 6-digit pin for convenience
       passwordResetTokens.set(String(codePart), record);
+      if (recoveryHashedToken) {
+        passwordResetTokens.set(recoveryHashedToken, record);
+      }
 
-      console.log(`[Self-Service Reset] Generated token for ${cleanEmail}: ${token} / PIN: ${codePart} (valid 15m)`);
+      console.log(`[Self-Service Reset] Generated token for ${cleanEmail}: ${token} / PIN: ${codePart}`);
 
       return res.json({
         success: true,
         token,
         pin: String(codePart),
+        actionLink: directActionLink,
         email: cleanEmail,
         expiresAt,
-        message: `Self-service password reset token generated for ${cleanEmail}. Valid for 15 minutes.`,
+        message: `Self-service password reset link and 6-digit PIN generated for ${cleanEmail}. Valid for 15 minutes.`,
       });
     } catch (err: any) {
       console.error('[Request Reset Error]:', err);
@@ -290,8 +337,8 @@ app.post('/api/auth/register', async (req, res) => {
     }
   });
 
-  // 8. Reset Password: confirms token and marks it consumed
-  app.post('/api/auth/reset-password', (req, res) => {
+  // 8. Reset Password: confirms token, marks consumed, and synchronizes to Supabase Auth
+  app.post('/api/auth/reset-password', async (req, res) => {
     try {
       const { token, email, newPassword } = req.body;
       if (!token || !newPassword) {
@@ -325,6 +372,22 @@ app.post('/api/auth/register', async (req, res) => {
       record.used = true;
       record.usedAt = Date.now();
 
+      // Update password in Supabase Auth via admin API
+      try {
+        const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
+        const targetUser = userList?.users?.find(
+          (u) => u.email?.toLowerCase() === record.email.toLowerCase()
+        );
+        if (targetUser) {
+          await supabaseAdmin.auth.admin.updateUserById(targetUser.id, {
+            password: newPassword,
+          });
+          console.log(`[Supabase Admin] Updated password for user ${targetUser.id} (${record.email})`);
+        }
+      } catch (supaErr) {
+        console.warn('[Supabase Admin Password Update Notice]:', supaErr);
+      }
+
       console.log(`[Self-Service Reset] Successfully reset password for ${record.email}`);
 
       return res.json({
@@ -335,6 +398,116 @@ app.post('/api/auth/register', async (req, res) => {
     } catch (err: any) {
       console.error('[Reset Password Error]:', err);
       return res.status(500).json({ error: err.message || 'Failed to update password' });
+    }
+  });
+
+  // 9. Email Verification: Generate direct signup confirmation link
+  app.post('/api/auth/resend-verification', async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email) return res.status(400).json({ error: 'Email is required' });
+      const cleanEmail = email.trim().toLowerCase();
+
+      const host = req.get('host');
+      const proto = req.get('x-forwarded-proto') || 'https';
+      const origin = req.headers.origin || (host ? `${proto}://${host}` : 'https://ais-dev-z7ycubaw6ioqcdgqzu2qkl-342377552686.asia-southeast1.run.app');
+      const redirectTo = `${origin}/#auth=confirmed`;
+
+      const { data, error } = await supabaseAdmin.auth.admin.generateLink({
+        type: 'magiclink',
+        email: cleanEmail,
+        options: { redirectTo },
+      });
+
+      if (error) {
+        return res.status(400).json({ success: false, message: error.message });
+      }
+
+      let link = data?.properties?.action_link;
+      if (link && (link.includes('redirect_to=http://localhost:3000') || link.includes('redirect_to=http%3A%2F%2Flocalhost%3A3000'))) {
+        link = link
+          .replace('redirect_to=http://localhost:3000', `redirect_to=${encodeURIComponent(redirectTo)}`)
+          .replace('redirect_to=http%3A%2F%2Flocalhost%3A3000', `redirect_to=${encodeURIComponent(redirectTo)}`);
+      }
+
+      return res.json({
+        success: true,
+        actionLink: link,
+        message: `Verification instructions generated for ${cleanEmail}. Check your inbox or click the link directly.`,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Resend verification failed' });
+    }
+  });
+
+  // 10. Instant Email Confirmation: One-click verification for testing/admin
+  app.post('/api/auth/confirm-email-now', async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email) return res.status(400).json({ error: 'Email is required' });
+      const cleanEmail = email.trim().toLowerCase();
+
+      const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
+      const targetUser = userList?.users?.find(
+        (u) => u.email?.toLowerCase() === cleanEmail
+      );
+      if (!targetUser) {
+        return res.status(404).json({ error: 'User not found in Supabase Auth' });
+      }
+
+      const { error } = await supabaseAdmin.auth.admin.updateUserById(targetUser.id, {
+        email_confirm: true,
+      });
+
+      if (error) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      return res.json({
+        success: true,
+        message: `Email ${cleanEmail} has been successfully verified in Supabase!`,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Instant confirmation failed' });
+    }
+  });
+
+  // 11. Check Verification Status in Supabase Auth
+  app.post('/api/auth/check-verification', async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email) return res.status(400).json({ error: 'Email is required' });
+      const cleanEmail = email.trim().toLowerCase();
+
+      const { data: userList, error } = await supabaseAdmin.auth.admin.listUsers();
+      if (error) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      const targetUser = userList?.users?.find(
+        (u) => u.email?.toLowerCase() === cleanEmail
+      );
+
+      if (!targetUser) {
+        return res.json({
+          exists: false,
+          verified: false,
+          message: 'User not found in Supabase Auth.',
+        });
+      }
+
+      const isVerified = Boolean(targetUser.email_confirmed_at);
+      return res.json({
+        exists: true,
+        verified: isVerified,
+        emailConfirmedAt: targetUser.email_confirmed_at,
+        userId: targetUser.id,
+        message: isVerified
+          ? 'Email address is verified in Supabase.'
+          : 'Email address is unconfirmed in Supabase.',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Verification check failed' });
     }
   });
 

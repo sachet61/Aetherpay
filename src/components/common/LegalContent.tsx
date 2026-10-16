@@ -117,7 +117,7 @@ export const LegalContent: React.FC<LegalContentProps> = ({ initialTab = 'privac
               <section className="space-y-2">
                 <h3 className="font-bold text-white text-base">5. Data Security</h3>
                 <p>
-                  We have put in place appropriate security measures to prevent your personal data from being accidentally lost, used, or accessed in an unauthorized way. All sensitive data is transmitted securely via SSL encryption and stored in secure Firebase Firestore databases with strict access controls.
+                  We have put in place appropriate security measures to prevent your personal data from being accidentally lost, used, or accessed in an unauthorized way. All sensitive data is transmitted securely via SSL encryption and stored in secure Supabase PostgreSQL databases with strict access controls.
                 </p>
               </section>
 

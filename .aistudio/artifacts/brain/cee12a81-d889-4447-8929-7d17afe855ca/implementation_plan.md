@@ -1,64 +1,68 @@
-# Supabase Complete Migration, Password Reset Fix & Realtime Architecture
+# Email Verification, Password Reset Link Fix & Realtime Messaging Restoration
 
-Transition the AetherPay platform exclusively to Supabase for authentication, relational database storage, and real-time messaging. This eliminates all Firebase/Firestore dependencies, fixes the `localhost:3000` password reset redirect error by dynamically detecting application origins and handling recovery tokens, and unifies account access so users registered in Supabase or the web app can sign in and manage their accounts.
+Deliver complete end-to-end fixes for player email verification, eradicate the `localhost:3000` redirect error in Supabase password resets through direct server-generated links and in-app code verification, and restore real-time messaging between players and support staff using Supabase Realtime channels with reliable local state synchronization.
 
 ### User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The Supabase project credentials provided in `.env` (`https://qlurdhimtgchlgoaziqq.supabase.co`) will be hardcoded into the fallback configuration to ensure guaranteed connectivity across client bundles and server routes without depending on external runtime env injection.
-> 
-> In Supabase Authentication settings, password recovery emails default to the project's Site URL (`http://localhost:3000`) if a dynamic `redirectTo` is not passed. We fix this by passing `${window.location.origin}/#type=recovery` in the client request and intercepting recovery tokens immediately upon arrival.
+> - **Password Reset Link Resolution**: Supabase project configuration defaults Site URL to `http://localhost:3000`. To prevent broken external redirects, password resets will use a dual approach: direct server-generated links (using the Supabase service role key) that preserve the active application domain, and in-app 6-digit recovery codes via `supabase.auth.verifyOtp`.
+> - **Email Verification Enforcement**: Newly signed-up players will accurately reflect unverified status (`email_confirmed_at === null`). A prominent verification banner on customer dashboards and an active "Verify Now" button in player profiles will allow instant resend and live status updates.
+> - **Chat Messaging Synchronization**: Fixes missing local state event dispatches in `dataService.sendChatMessage` and ensures Supabase Realtime channels are fully subscribed before broadcasting, with periodic fallback polling to guarantee zero message loss.
 
-- **Confirmed Decision 1**: All authentication, database queries, and real-time messaging will run strictly on Supabase.
-- **Confirmed Decision 2**: Complete removal of Firebase SDKs (`firebase`, `firebase-admin`), Firestore blueprints, and security rules.
-- **Confirmed Decision 3**: Supabase credentials hardcoded into the client configuration with `.env` precedence for instant, zero-configuration operation.
-- **Confirmed Decision 4**: Dynamic origin resolution for password reset links with fallback in-app recovery token / OTP entry.
+- **Confirmed Decision 1**: Direct server-generated reset link and in-app code entry for password recovery.
+- **Confirmed Decision 2**: Prominent verification banner and profile button with instant email trigger.
+- **Confirmed Decision 3**: Supabase Realtime broadcast channels combined with instant local state dispatch.
 
 ---
 
 ### 1. Overview & Core Concept
 
-- **What It Does**: Unifies AetherPay's gaming marketplace and escrow system around a single Supabase backend. Users can sign up, log in with email and password, initiate and complete password resets without broken local redirects, create escrow transactions, and participate in real-time chat with buyer/seller counterparties.
-- **Target Audience / Persona**: Gamers, traders, and escrow administrators requiring secure, fast, and transparent peer-to-peer digital transactions.
-- **Key Value**: Eradicates platform disconnects between Firestore and Supabase, resolves account access failures, ensures reliable email link navigation on any deployed domain, and provides low-latency messaging via Supabase Realtime channels.
+- **What It Does**:
+  1. Accurately tracks and reflects whether a player's email is verified in Supabase. Displays clear banners and "Verify Email Now" actions when unverified, with one-click verification email dispatch.
+  2. Eliminates broken password reset redirects by routing password recovery through server-generated action URLs or 6-digit in-app OTP tokens, guaranteeing users can reset passwords on any domain or preview environment.
+  3. Restores real-time customer support chat so player messages, staff responses, transaction cards, and game credential requests update instantly without requiring page reloads.
+- **Target Audience**: Players managing deposits, withdrawals, and game accounts, as well as support staff handling live inquiries.
+- **Key Value**: Restores full platform functionality without dependence on external Supabase dashboard Site URL misconfigurations or silent messaging drops.
 
 ---
 
 ### 2. User Experience & Visual Design
 
 - **Key User Flows**:
-  1. *Authentication Flow*: User enters email and password on the unified Auth portal. The system queries Supabase Auth directly. If email confirmation is required by Supabase project settings, a descriptive banner instructs the user while providing a one-click resend button.
-  2. *Password Reset Flow*:
-     - User clicks "Forgot Password?" and enters their email.
-     - The client sends `resetPasswordForEmail` with `redirectTo: `${window.location.origin}/#type=recovery``.
-     - When the user clicks the link in their email, the app detects `#access_token=...&type=recovery` or `PASSWORD_RECOVERY` auth event and immediately opens the "Set New Password" modal.
-     - An alternate direct recovery tab allows entering an OTP or reset code manually if email redirects are restricted by email client privacy protections.
-  3. *Realtime Messaging Flow*: Buyer and seller enter transaction chat. Messages are stored in Supabase `messages` table and broadcast live via Supabase Realtime channels (`supabase.channel('room-...')`).
+  1. *Player Email Verification Flow*:
+     - Unverified player signs in or registers: A distinctive dark slate banner with amber highlight displays: *"Your email is not verified yet. Verify your email to unlock instant cashouts and referral bonuses."*
+     - Player clicks *"Verify Now"*: An instant request triggers `supabase.auth.resend` or server verification link. The button enters a 60-second countdown with visual feedback.
+     - In *Customer Profile*, an "Unverified" status chip pairs with a prominent *"Send Verification Email"* button.
+     - When verified, the banner smoothly dismisses and cashout limits unlock immediately.
+  2. *Password Reset Flow (Zero Localhost Errors)*:
+     - User clicks *"Forgot Password"* and enters their email.
+     - The backend generates a direct domain-aware reset link (`${origin}/#type=recovery&token=...`) and displays/dispatches an in-app recovery code.
+     - Clicking the email link lands directly on the application's active domain, immediately opening the **Set New Password** modal.
+     - If the user prefers, they can simply type the 6-digit code into the in-app reset form.
+  3. *Customer Support Chat Flow*:
+     - Player types a message and clicks Send.
+     - The message displays immediately in the chat thread (0ms latency).
+     - Staff in *AdminChat* receives the message in real-time via Supabase broadcast channel, complete with notification sound/badge.
+     - Staff replies or sends a Game ID card, which appears instantly on the player's screen.
 - **Visual Identity & Theme**:
-  - *Aesthetic Direction*: Dark slate futuristic fintech gaming console (`#0B0F19` canvas, `#111827` surface containers, `#1F2937` borders).
-  - *Color Palette*: Dominant neutral slate (60%), structural cards with 1px hairline borders (30%), vibrant electric cyan `#06B6D4` and emerald `#10B981` accents (10%).
-  - *Typography & Hierarchy*: `Plus Jakarta Sans` for titles and navigation, `DM Sans` for body text, and `tabular-nums` / `JetBrains Mono` for currency values, countdown timers, and tokens.
-  - *Design Discipline*: Anti-slop layout, zero unboxed pill badges, no mechanical `//` comments, clean single-line navigation contract.
-- **Interactive Feedback & Motion**:
-  - Instant form validation with inline error descriptions.
-  - Smooth 150ms button feedback with subtle settling transitions.
-  - Real-time connection indicator in chat reflecting Supabase Realtime channel status (`SUBSCRIBED`, `CONNECTING`, `DISCONNECTED`).
+  - *Canvas*: High-contrast neutral slate (`#0A0F1D` background, `#111827` surface panels, `#1F2937` borders).
+  - *Accents*: Amber/Gold (`#F59E0B`) for gaming actions, Emerald (`#10B981`) for verified badges and successful approvals, Crimson (`#EF4444`) for errors.
+  - *Typography*: `Plus Jakarta Sans` for headers, `DM Sans` for body, `tabular-nums` for timers and currency.
+  - *Anti-Slop Discipline*: Zero static pill containers for metadata, clean hairline dividers, single-elevation depth.
 
 ---
 
 ### 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1: Hardcoded Fallback Supabase Credentials**
-  - *Chosen Approach*: Embed the project URL and anon public key into `supabaseClient.ts` as fallback defaults while reading `import.meta.env` and `process.env`.
-  - *Why*: Eliminates deployment environment variable mismatch errors where Vite client bundles lose access to server-only env variables.
-  - *Alternatives Considered*: Pure server proxy for all Supabase queries. Rejected because Supabase client SDK enables direct client-side Realtime subscriptions and secure JWT session persistence in browser storage.
-- **Decision 2: Client-Driven Password Recovery Routing**
-  - *Chosen Approach*: Dynamic `redirectTo` calculation using `window.location.origin` plus an in-app URL fragment listener in `App.tsx` and `AuthPage.tsx`.
-  - *Why*: Solves the `localhost:3000` issue regardless of whether the app runs on Cloud Run preview URLs, custom domains, or local development.
-  - *Alternatives Considered*: Forcing users to change Supabase Site URL in their Cloud Dashboard. Rejected because users frequently test across preview URLs and shouldn't be blocked by dashboard-level configuration defaults.
-- **Decision 3: Complete Firebase & Firestore Deprecation**
-  - *Chosen Approach*: Strip `firebase` package from `package.json`, delete Firebase helper files, replace all auth calls in `dataService.ts` and `authStore.ts` with Supabase Auth, and adapt data persistence to Supabase PostgreSQL.
-  - *Why*: Prevents split-brain state where accounts exist in Supabase but the frontend attempts to read user profiles or sessions from Firestore.
+- **Decision 1: Server-Generated Direct Recovery vs Standard Client Reset**
+  - *Chosen Approach*: Implement an Express endpoint `/api/auth/request-reset` using `supabaseAdmin.auth.admin.generateLink` to create exact, host-aware recovery URLs and OTP codes.
+  - *Why*: Supabase client SDK `resetPasswordForEmail` silently falls back to the dashboard's `Site URL` (`http://localhost:3000`) if the request domain is not explicitly whitelisted in the dashboard. Generating the link via the admin service role bypasses this restriction and ensures the link always redirects to the currently loaded site domain.
+- **Decision 2: Prominent Banner + Profile Action for Verification**
+  - *Chosen Approach*: Mount `EmailVerificationBanner` in `App.tsx` (above customer pages) and add an interactive status card in `CustomerProfile.tsx`.
+  - *Why*: Ensures the player cannot miss the verification requirement while keeping the rest of the application accessible for browsing games.
+- **Decision 3: Dual-Mode Messaging (Supabase Channel + State Event Dispatch)**
+  - *Chosen Approach*: `dataService.sendChatMessage` will immediately dispatch `aetherpay_state_changed` for instant local rendering AND broadcast via an explicitly subscribed Supabase channel `room_${conversationId}`.
+  - *Why*: Guarantees instant feedback for the sender even on high-latency connections, while keeping staff and player in sync across browsers.
 
 ---
 
@@ -66,59 +70,40 @@ Transition the AetherPay platform exclusively to Supabase for authentication, re
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        AetherPay Frontend (React/Vite)                 │
+│                        AetherPay Application                           │
 ├──────────────────────────┬─────────────────────────┬───────────────────┤
-│    Unified Auth Page     │    Escrow & Exchange    │ Realtime Chat     │
-│  - Supabase Auth SDK     │  - Supabase DB Tables   │  - Supabase       │
-│  - URL Fragment Listener │  - Drizzle / REST API   │    Realtime Ch.   │
-│  - Dynamic Reset Handler │  - Profile & Order Sync │  - Instant Sync   │
+│   Email Verification     │    Password Recovery    │  Realtime Chat    │
+│  - EmailVerification     │  - Server Endpoint      │  - Supabase Ch.   │
+│    Banner                │    /api/auth/reset-link │    broadcast      │
+│  - CustomerProfile Card  │  - Direct Domain URL    │  - Instant state  │
+│  - Resend & Confirm      │  - In-App 6-Digit OTP   │    event dispatch │
 └────────────┬─────────────┴────────────┬────────────┴─────────┬─────────┘
              │                          │                      │
              ▼                          ▼                      ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                 Supabase Cloud Backend (Hardcoded Config)               │
+│               Supabase Auth & Database (Hardcoded Keys)                │
 ├────────────────────────────────────────────────────────────────────────┤
-│  • Auth Service: gotrue (email/password, recovery tokens, sessions)    │
-│  • PostgreSQL DB: profiles, orders, transactions, messages, disputes   │
-│  • Realtime Engine: postgres_changes & broadcast channels              │
+│  • supabase.auth.resend({ type: 'signup' })                            │
+│  • supabaseAdmin.auth.admin.generateLink({ type: 'recovery' })         │
+│  • supabase.channel('room_' + convId).subscribe()                      │
+│  • In-Memory & LocalStorage Resilience Layer                           │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Data Model & Schema Synchronization
-1. **`profiles` Table**:
-   - `id` (UUID, primary key, references `auth.users.id`)
-   - `email` (text, unique)
-   - `username` (text)
-   - `role` (text: 'user' | 'admin' | 'moderator')
-   - `wallet_balance` (numeric, default 0)
-   - `created_at` (timestamp)
-2. **`messages` Table**:
-   - `id` (UUID, primary key)
-   - `trade_id` (text / UUID)
-   - `sender_id` (UUID, references `profiles.id`)
-   - `sender_name` (text)
-   - `content` (text)
-   - `created_at` (timestamp)
-3. **`orders` / `escrow_transactions` Table**:
-   - `id` (UUID, primary key)
-   - `buyer_id` (UUID)
-   - `seller_id` (UUID)
-   - `title` (text)
-   - `amount` (numeric)
-   - `currency` (text)
-   - `status` (text: 'pending' | 'funded' | 'completed' | 'disputed' | 'cancelled')
-   - `created_at` (timestamp)
+#### Detailed Implementation Plan
 
-#### Interactive Component & State Mapping
-- `AuthPage.tsx`:
-  - `handleEmailSignIn`: Calls `supabase.auth.signInWithPassword`. Sets session in `authStore`.
-  - `handleEmailSignUp`: Calls `supabase.auth.signUp`. Creates profile entry in `profiles`.
-  - `handleForgotPassword`: Calls `supabase.auth.resetPasswordForEmail` with dynamic `redirectTo: window.location.origin`.
-  - `handleUpdatePassword`: Calls `supabase.auth.updateUser({ password })` when recovery token is detected.
-- `App.tsx`:
-  - Monitors `supabase.auth.onAuthStateChange((event, session) => ...)`:
-    - If event is `PASSWORD_RECOVERY`, triggers the reset password modal.
-    - If event is `SIGNED_IN`, refreshes user profile from Supabase.
-- `ChatRoom.tsx`:
-  - Subscribes to `supabase.channel(`room:${tradeId}`)`.
-  - On new message insert, updates chat history state instantly with sound/visual cue.
+1. **Email Verification Implementation**:
+   - Update `supabaseAuthService.ts`: Ensure `registerWithEmail` and `loginWithEmail` check `user.email_confirmed_at` properly rather than defaulting to `true`.
+   - Update `CustomerProfile.tsx`: Add a dedicated "Email Verification" card showing current status (Verified vs Unverified) with a "Verify Email Now" button and status check.
+   - Update `App.tsx`: Mount `EmailVerificationBanner` at the top of the customer workspace when `currentUser.role === 'customer' && !currentUser.emailVerified`.
+   - Update `dataService.ts`: Wire `sendVerificationEmail()` to `supabaseAuthService.resendConfirmationEmail()` with origin-aware redirect.
+
+2. **Password Reset Localhost Redirect Elimination**:
+   - Update `server.ts`: Add `POST /api/auth/generate-reset-link` using `DEFAULT_SUPABASE_SERVICE_ROLE_KEY`. It generates an exact recovery link pointing to `${req.headers.origin || req.headers.referer || currentHost}/#type=recovery` along with an OTP code.
+   - Update `supabaseAuthService.sendPasswordReset`: Call the server endpoint first to retrieve the direct domain-aware recovery link or fallback to Supabase `resetPasswordForEmail`.
+   - Update `ForgotPassword.tsx` and `ResetPassword.tsx`: Ensure users can both click the direct link OR enter the 6-digit code manually into the form without relying on redirects.
+
+3. **Realtime Messaging Fix**:
+   - Update `dataService.ts`: In `sendChatMessage`, add `window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.MESSAGES } }))` so local state updates immediately.
+   - Fix Supabase Realtime channel subscription in `CustomerChat.tsx` and `AdminChat.tsx`: Ensure channels are properly initialized with `.subscribe((status) => ...)` and reused without dropping events.
+   - Add a 3-second lightweight poll fallback when chat is actively open to guarantee messages arrive even if WebSocket connections are filtered by browser extensions.

@@ -77,37 +77,32 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
     setIsLoading(true);
 
     try {
-      // 1. If user entered a manual OTP token and email, verify OTP first
+      // 1. If user entered a manual code/token and email, attempt server-side verification and reset first
       if (token.trim() && email.trim()) {
+        const serverReset = await dataService.resetPasswordWithToken(token.trim(), email.trim(), newPassword);
+        if (serverReset.success) {
+          setIsSuccess(true);
+          return;
+        }
+
+        // If server token wasn't matched, try Supabase direct OTP verify
         const verifyRes = await supabaseAuthService.verifyOtpForRecovery(email.trim(), token.trim());
         if (!verifyRes.success) {
-          // Check local token fallback if server token
-          const localVerify = await dataService.verifyPasswordResetToken(token.trim(), email.trim());
-          if (!localVerify.valid) {
-            setErrorMessage(verifyRes.message || 'Invalid or expired token.');
-            setIsLoading(false);
-            return;
-          }
+          setErrorMessage(serverReset.message || verifyRes.message || 'Invalid or expired reset code / token.');
+          setIsLoading(false);
+          return;
         }
       }
 
-      // 2. Update password directly in Supabase
+      // 2. Update password directly via Supabase session
       const res = await supabaseAuthService.updateUserPassword(newPassword);
 
       if (res.success) {
         setIsSuccess(true);
       } else {
-        // Also check if dataService has a local reset path
-        if (token.trim() && email.trim()) {
-          const localRes = await dataService.resetPasswordWithToken(token.trim(), email.trim(), newPassword);
-          if (localRes.success) {
-            setIsSuccess(true);
-            return;
-          }
-        }
         setErrorMessage(
           res.message ||
-            'Unable to set new password. If you followed an email link, it may have expired. Please request a fresh reset link.'
+            'Unable to set new password. If you followed an email link, it may have expired. Please request a fresh reset link or enter your 6-digit PIN.'
         );
       }
     } catch (err: any) {

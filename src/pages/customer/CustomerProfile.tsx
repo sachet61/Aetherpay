@@ -4,6 +4,8 @@ import { dataService } from '../../services/dataService';
 import {
   User,
   Shield,
+  ShieldAlert,
+  AlertCircle,
   Smartphone,
   Mail,
   Calendar,
@@ -12,6 +14,8 @@ import {
   Lock,
   LogOut,
   RefreshCw,
+  Zap,
+  Send,
 } from 'lucide-react';
 
 interface CustomerProfileProps {
@@ -33,6 +37,41 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
   const [otpSent, setOtpSent] = useState(false);
   const [otpCode, setOtpCode] = useState('');
   const [successNote, setSuccessNote] = useState<string | null>(null);
+  const [isVerifyingEmail, setIsVerifyingEmail] = useState(false);
+  const [isSendingEmailLink, setIsSendingEmailLink] = useState(false);
+
+  const handleProfileVerifyNow = async () => {
+    if (isVerifyingEmail) return;
+    setIsVerifyingEmail(true);
+    setSuccessNote('Confirming email with Supabase Auth...');
+    try {
+      const res = await dataService.confirmEmailNow(currentUser.email);
+      if (res.success) {
+        setSuccessNote('Email address successfully verified in Supabase! Cashouts and referral bonuses unlocked.');
+      } else {
+        setSuccessNote(`Verification status: ${res.message || 'Please check email link.'}`);
+      }
+    } catch (e: any) {
+      setSuccessNote(e?.message || 'Verification error.');
+    } finally {
+      setIsVerifyingEmail(false);
+      setTimeout(() => setSuccessNote(null), 6000);
+    }
+  };
+
+  const handleProfileSendLink = async () => {
+    if (isSendingEmailLink) return;
+    setIsSendingEmailLink(true);
+    try {
+      const res = await dataService.sendVerificationEmail();
+      setSuccessNote(res.message || `Verification link dispatched to ${currentUser.email}.`);
+    } catch (e: any) {
+      setSuccessNote(e?.message || 'Error sending link.');
+    } finally {
+      setIsSendingEmailLink(false);
+      setTimeout(() => setSuccessNote(null), 6000);
+    }
+  };
 
   const handleSimulateSendOTP = () => {
     setOtpSent(true);
@@ -78,9 +117,15 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
               <div className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">
                 <span className="font-mono text-indigo-400">ID: {currentUser.id}</span>
                 <span aria-hidden="true" className="text-slate-600">·</span>
-                <span className="text-emerald-400 flex items-center gap-1">
-                  <Shield className="w-3 h-3" /> Tier-2 KYC Verified
-                </span>
+                {currentUser.emailVerified ? (
+                  <span className="text-emerald-400 flex items-center gap-1">
+                    <Shield className="w-3 h-3" /> Tier-2 KYC Verified
+                  </span>
+                ) : (
+                  <span className="text-amber-400 flex items-center gap-1 font-semibold">
+                    <ShieldAlert className="w-3 h-3" /> Unverified Player (Email Pending)
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -95,12 +140,48 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
 
         {/* Credentials Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
-            <div className="text-slate-400 flex items-center gap-1.5">
-              <Mail className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Registered Email</span>
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+            <div className="text-slate-400 flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Registered Email</span>
+              </div>
+              {currentUser.emailVerified ? (
+                <span className="text-[10px] text-emerald-400 font-bold flex items-center gap-1 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-800">
+                  <CheckCircle2 className="w-3 h-3" /> Verified User
+                </span>
+              ) : (
+                <span className="text-[10px] text-amber-400 font-bold flex items-center gap-1 bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-800">
+                  <AlertCircle className="w-3 h-3" /> Unverified Player
+                </span>
+              )}
             </div>
             <div className="font-medium text-white font-mono">{currentUser.email}</div>
+
+            {!currentUser.emailVerified && (
+              <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleProfileVerifyNow}
+                  disabled={isVerifyingEmail}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center gap-1 shadow-md shadow-emerald-600/20 active:scale-95 disabled:opacity-50"
+                  title="Verify account instantly in Supabase Auth"
+                >
+                  <Zap className={`w-3.5 h-3.5 ${isVerifyingEmail ? 'animate-bounce' : ''}`} />
+                  <span>{isVerifyingEmail ? 'Verifying...' : 'Verify Now (Instant)'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleProfileSendLink}
+                  disabled={isSendingEmailLink}
+                  className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-semibold transition flex items-center gap-1 disabled:opacity-50"
+                  title="Dispatch email confirmation link to inbox"
+                >
+                  <Send className="w-3 h-3" />
+                  <span>{isSendingEmailLink ? 'Sending...' : 'Send Email Link'}</span>
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1">

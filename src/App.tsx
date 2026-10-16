@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useDataService } from './hooks/useDataService';
 import { dataService } from './services/dataService';
+import { authSessionService } from './services/authSessionService';
 import { TopNavbar } from './components/layout/TopNavbar';
 import { CustomerMobileNav } from './components/layout/CustomerMobileNav';
 import { StaffMobileNav } from './components/layout/StaffMobileNav';
@@ -23,6 +24,7 @@ import { CustomerChat } from './pages/customer/CustomerChat';
 import { CustomerReferrals } from './pages/customer/CustomerReferrals';
 import { CustomerRules } from './pages/customer/CustomerRules';
 import { CustomerProfile } from './pages/customer/CustomerProfile';
+import { EmailVerificationBanner } from './components/common/EmailVerificationBanner';
 
 // Staff / Operations Pages
 import { AdminDashboard } from './pages/admin/AdminDashboard';
@@ -184,8 +186,17 @@ export default function App() {
 
         {/* Main Content Viewport */}
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 w-full max-w-7xl mx-auto">
-
-
+          {/* Prominent Email Verification Banner for Unverified Customers */}
+          {isCustomer && (
+            <EmailVerificationBanner
+              currentUser={currentUser}
+              onStatusChanged={(verified) => {
+                const updated = { ...currentUser, emailVerified: verified };
+                dataService.registerUser(updated);
+                authSessionService.updateUserProfile(updated);
+              }}
+            />
+          )}
 
         {/* CUSTOMER PORTAL VIEWS */}
         {isCustomer && (

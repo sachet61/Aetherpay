@@ -94,7 +94,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
     { label: 'Web Play', url: 'https://games.swiftsweeps.com' },
   ]);
 
-  // Keep catalog synchronized in real-time with Firestore changes
+  // Keep catalog synchronized in real-time with Supabase changes
   useEffect(() => {
     const handleSync = () => {
       setCatalog(dataService.getGameCatalog());
@@ -191,7 +191,10 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
     setCatalog(dataService.getGameCatalog());
     setEditingItem(null);
     setIsNewItem(false);
-    setNotificationMsg(`Game title "${title}" successfully saved with ${links.length} link(s) to Firestore.`);
+    setCatalog(dataService.getGameCatalog());
+    setEditingItem(null);
+    setIsNewItem(false);
+    setNotificationMsg(`Game title "${title}" successfully saved with ${links.length} link(s) to Supabase.`);
     setTimeout(() => setNotificationMsg(null), 3500);
   };
 
@@ -206,12 +209,12 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
     try {
       await dataService.deleteGameCatalogItem(gameToDelete.id, currentUser.id, currentUser.displayName);
       setCatalog(dataService.getGameCatalog());
-      setNotificationMsg(`Game title "${gameToDelete.title}" permanently removed from catalog and Firestore.`);
+      setNotificationMsg(`Game title "${gameToDelete.title}" permanently removed from catalog and Supabase.`);
       setTimeout(() => setNotificationMsg(null), 3500);
       setGameToDelete(null);
     } catch (err) {
       console.error('Failed to delete game:', err);
-      alert('Error deleting game from Firestore. Please try again.');
+      alert('Error deleting game from Supabase. Please try again.');
     } finally {
       setIsDeleting(false);
     }
@@ -231,7 +234,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Configure game titles, customize local or remote icons, manage separate Game and Download links, and sync changes to Firebase Firestore.
+            Configure game titles, customize local or remote icons, manage separate Game and Download links, and sync changes to Supabase PostgreSQL database.
           </p>
         </div>
 
@@ -402,7 +405,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
             </div>
 
             <p className="text-xs text-slate-300 leading-relaxed">
-              Are you sure you want to delete <span className="font-bold text-white font-mono">"{gameToDelete.title}"</span>? This will permanently remove the game title and all its play &amp; download links from the master platform catalog and the Firebase Firestore database.
+              Are you sure you want to delete <span className="font-bold text-white font-mono">"{gameToDelete.title}"</span>? This will permanently remove the game title and all its play &amp; download links from the master platform catalog and the Supabase database.
             </p>
 
             <div className="flex items-center justify-end gap-2.5 pt-2">

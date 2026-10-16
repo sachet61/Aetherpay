@@ -119,8 +119,14 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     loadData();
     const handleSync = () => loadData();
     window.addEventListener('aetherpay_state_changed', handleSync);
-    return () => window.removeEventListener('aetherpay_state_changed', handleSync);
+    window.addEventListener('storage', handleSync);
+    return () => {
+      window.removeEventListener('aetherpay_state_changed', handleSync);
+      window.removeEventListener('storage', handleSync);
+    };
   }, [selectedConvId]);
+
+  const channelRef = useRef<any>(null);
 
   // Realtime subscription via Supabase Channel
   useEffect(() => {
@@ -128,13 +134,20 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     const channel = supabase.channel(`room_${selectedConvId}`)
       .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
         if (payload && payload.id) {
+          dataService.appendIncomingMessage(payload);
           setMessages((prev) => {
             if (prev.some((m) => m.id === payload.id)) return prev;
             return [...prev, payload];
           });
         }
       })
-      .subscribe();
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          channelRef.current = channel;
+        }
+      });
+
+    channelRef.current = channel;
 
     return () => {
       supabase.removeChannel(channel);
@@ -215,13 +228,28 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     if (e) e.preventDefault();
     if (!inputText.trim() || !activeConv) return;
 
-    dataService.sendChatMessage({
+    const newMsg = dataService.sendChatMessage({
       conversationId: activeConv.id,
       senderId: currentUser.id,
       senderName: currentUser.displayName,
       senderRole: currentUser.role,
       text: inputText.trim(),
       isInternalNote,
+    });
+
+    if (channelRef.current) {
+      channelRef.current
+        .send({
+          type: 'broadcast',
+          event: 'new_chat_message',
+          payload: newMsg,
+        })
+        .catch(() => {});
+    }
+
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === newMsg.id)) return prev;
+      return [...prev, newMsg];
     });
 
     setInputText('');

@@ -341,8 +341,8 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
   const [feedNotice, setFeedNotice] = useState<string | null>(null);
   const [simulatorNotice, setSimulatorNotice] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [webhookLogs, setWebhookLogs] = useState(dataService.getWebhookLogs());
-  const [isResettingFirestore, setIsResettingFirestore] = useState(false);
-  const [firestoreNotice, setFirestoreNotice] = useState<string | null>(null);
+  const [isResettingDatabase, setIsResettingDatabase] = useState(false);
+  const [databaseNotice, setDatabaseNotice] = useState<string | null>(null);
 
   // Supabase Integration & Migration state
   const [isMigratingSupabase, setIsMigratingSupabase] = useState(false);
@@ -468,14 +468,14 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
         </div>
       )}
 
-      {firestoreNotice && (
+      {databaseNotice && (
         <div className="p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-700 text-emerald-200 text-xs flex items-center justify-between gap-3 shadow-lg">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
-            <span className="font-medium">{firestoreNotice}</span>
+            <span className="font-medium">{databaseNotice}</span>
           </div>
           <button
-            onClick={() => setFirestoreNotice(null)}
+            onClick={() => setDatabaseNotice(null)}
             className="text-emerald-400 hover:text-emerald-200 text-xs font-bold"
           >
             ✕
