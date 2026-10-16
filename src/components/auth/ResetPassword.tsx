@@ -60,9 +60,43 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
   const passwordsMatch = newPassword.length > 0 && newPassword === confirmPassword;
   const isFormValid = hasMinLength && hasLetter && hasNumber && passwordsMatch;
 
+  const [cooldown, setCooldown] = useState(0);
+  const [isResending, setIsResending] = useState(false);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const timer = setInterval(() => {
+      setCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [cooldown]);
+
+  const handleResendCode = async () => {
+    if (cooldown > 0 || isResending || !email.trim()) return;
+    setIsResending(true);
+    setErrorMessage(null);
+    try {
+      const res = await supabaseAuthService.sendPasswordReset(email.trim().toLowerCase());
+      if (res.success) {
+        setCooldown(60);
+      } else {
+        setErrorMessage(res.message || 'Failed to resend reset code.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to resend reset code.');
+    } finally {
+      setIsResending(false);
+    }
+  };
+
   const handleReset = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+
+    if (!hasRecoverySession && !token.trim()) {
+      setErrorMessage('Please enter the 6-digit verification code sent to your email.');
+      return;
+    }
 
     if (!hasMinLength || !hasLetter || !hasNumber) {
       setErrorMessage('Password must be at least 8 characters long and contain both letters and numbers.');
@@ -77,24 +111,23 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
     setIsLoading(true);
 
     try {
-      // 1. If user entered a manual code/token and email, attempt server-side verification and reset first
-      if (token.trim() && email.trim()) {
-        const serverReset = await dataService.resetPasswordWithToken(token.trim(), email.trim(), newPassword);
-        if (serverReset.success) {
-          setIsSuccess(true);
-          return;
-        }
-
-        // If server token wasn't matched, try Supabase direct OTP verify
+      // 1. If not already in recovery session, verify 6-digit recovery OTP first
+      if (!hasRecoverySession && token.trim() && email.trim()) {
         const verifyRes = await supabaseAuthService.verifyOtpForRecovery(email.trim(), token.trim());
         if (!verifyRes.success) {
-          setErrorMessage(serverReset.message || verifyRes.message || 'Invalid or expired reset code / token.');
+          // Also try server backup token if applicable
+          const serverReset = await dataService.resetPasswordWithToken(token.trim(), email.trim(), newPassword);
+          if (serverReset.success) {
+            setIsSuccess(true);
+            return;
+          }
+          setErrorMessage(verifyRes.message || 'Invalid or expired 6-digit reset code. Please request a new code.');
           setIsLoading(false);
           return;
         }
       }
 
-      // 2. Update password directly via Supabase session
+      // 2. Update password directly via Supabase recovery session
       const res = await supabaseAuthService.updateUserPassword(newPassword);
 
       if (res.success) {
@@ -102,7 +135,7 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
       } else {
         setErrorMessage(
           res.message ||
-            'Unable to set new password. If you followed an email link, it may have expired. Please request a fresh reset link or enter your 6-digit PIN.'
+            'Unable to set new password. Please verify your 6-digit code or request a fresh code.'
         );
       }
     } catch (err: any) {
@@ -161,31 +194,47 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
             </div>
           )}
 
-          {/* Token (Optional if email link was clicked) */}
+          {/* 6-Digit OTP Recovery Code */}
           {!hasRecoverySession && (
             <div className="space-y-1">
               <div className="flex items-center justify-between">
-                <label className="text-xs font-medium text-slate-300">6-Digit Code or Token (Optional)</label>
-                {onBackToForgot && (
-                  <button
-                    type="button"
-                    onClick={onBackToForgot}
-                    className="text-[11px] text-amber-400 hover:text-amber-300 hover:underline"
-                  >
-                    Need a reset link?
-                  </button>
-                )}
+                <label className="text-xs font-medium text-slate-300">
+                  6-Digit Recovery Code <span className="text-amber-400">*</span>
+                </label>
+                <button
+                  type="button"
+                  disabled={cooldown > 0 || isResending || !email.trim()}
+                  onClick={handleResendCode}
+                  className="text-[11px] font-semibold text-amber-400 hover:text-amber-300 disabled:text-slate-600 transition flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
+                >
+                  {isResending ? (
+                    <>
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                      <span>Sending...</span>
+                    </>
+                  ) : cooldown > 0 ? (
+                    <span>Resend in {cooldown}s</span>
+                  ) : (
+                    <span>Resend Code</span>
+                  )}
+                </button>
               </div>
               <div className="relative">
                 <KeyRound className="w-4 h-4 text-slate-500 absolute left-3 top-3" />
                 <input
                   type="text"
+                  required
+                  inputMode="numeric"
                   value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  placeholder="123456 or token (if received)"
-                  className="w-full bg-[#0A0F1D] border border-slate-800 rounded-xl pl-9 pr-4 py-2 text-xs text-white font-mono focus:outline-none focus:border-amber-400"
+                  onChange={(e) => setToken(e.target.value.trim())}
+                  placeholder="e.g. 123456"
+                  maxLength={12}
+                  className="w-full bg-[#0A0F1D] border border-slate-800 rounded-xl pl-9 pr-4 py-2 text-xs text-amber-400 font-mono tracking-widest focus:outline-none focus:border-amber-400"
                 />
               </div>
+              <p className="text-[10px] text-slate-500">
+                Enter the 6-digit security code received via Brevo email.
+              </p>
             </div>
           )}
 

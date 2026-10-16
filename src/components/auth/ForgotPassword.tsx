@@ -123,7 +123,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
       {!isSuccess ? (
         <form onSubmit={handleSubmit} className="space-y-4">
           <p className="text-xs text-slate-300 leading-relaxed">
-            Enter your account email. Supabase Auth will dispatch a verified password reset link that redirects back to this application with zero localhost errors.
+            Enter your account email. Supabase Auth will dispatch a 6-digit recovery security code via Brevo directly to your inbox.
           </p>
 
           <div className="space-y-1.5">

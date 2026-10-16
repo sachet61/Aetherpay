@@ -1,155 +1,158 @@
-# Production Email Verification, Password Reset & Qualified Referral Flow
+# Pure Supabase 6-Digit OTP Authentication, Verification & Reset System
 
-Deliver a production-ready authentication and referral qualification workflow for SwiftSweeps. This enforces database existence verification before initiating password resets, replaces mock tokens with official Firebase password reset email dispatch, integrates a live email verification lifecycle (with resend/refresh capabilities), and restricts referral bonus payouts to only referees who have both verified their email address and loaded credits into a game account, while restricting unverified players from requesting cashouts.
-
----
-
-## User Review & Critical Decisions
+Deliver a 100% code-driven OTP workflow using Supabase and Brevo. Users never need to click links or rely on redirect URLs; instead, they receive 6-digit OTP codes via Brevo and enter them directly into the app for account verification, unverified login resolution, and password resets.
 
 > [!IMPORTANT]
-> The following architectural decisions were confirmed through Phase 1 clarifications and are locked for execution upon plan approval:
-
-- **Confirmed Decision 1 (Password Reset Delivery)**: Strict Firebase reset email link only. The app will strictly dispatch official Firebase Auth password reset links to the player's registered inbox. All mock/in-memory reset PINs and manual token entry codes will be eradicated from the client and server.
-- **Confirmed Decision 2 (Email Existence Pre-Check)**: Before dispatching any reset email, the system verifies that the account exists in the platform database (Firestore users registry). If no account matches the entered email, the system rejects the submission with a clear error ("No account found with this email address") and halts execution.
-- **Confirmed Decision 3 (Referral Reward Qualification Rule)**: Referees must satisfy **two mandatory milestones** before the referrer's wallet is credited:
-  1. The referee's email address must be verified (`emailVerified: true`).
-  2. The referee must have loaded credits into at least one game account (`loadFundsToGame` executed).
-  If either milestone is unmet, the referral remains in a pending state with zero bonus credited.
-- **Confirmed Decision 4 (Unverified Player Restrictions)**: Players with unverified emails are permitted to play games and top up, but **cashouts/withdrawals and referral bonus earnings are strictly blocked** until email verification is confirmed.
+> **Key Revisions Based on Feedback**:
+> - **Zero URL / Redirect Dependencies**: No modifications to Supabase Site URL or Redirect URLs are needed. Everything is handled via 6-digit OTP token entry (`{{ .Token }}`) directly inside the app.
+> - **Pure OTP Delivery**: Email templates simply output the 6-digit code `{{ .Token }}`. The app provides instant digit inputs, automatic focus, and copy/paste support.
+> - **Immediate OTP Screen on Signup**: Automatically navigate new signups to an interactive 6-digit OTP verification screen.
+> - **Instant OTP Modal on Unverified Sign-In**: When an unverified user signs in, intercept the error and open an instant OTP modal with a resend button to prevent lockouts.
+> - **Direct 6-Digit Password Reset**: Users enter the 6-digit code and their new password on the same screen, calling `verifyOtp(type: 'recovery')` and updating the password in one unified flow.
 
 ---
 
-## 1. Overview & Core Concept
+## 1. Supabase Email Template Configuration (Brevo)
 
-- **What It Does**: Hardens SwiftSweeps authentication and growth loops for production deployment. It eliminates test mock token leaks, ensures users can recover accounts only via verified email addresses, protects platform funds from bogus referral loops, and provides players with a transparent self-service email verification interface.
-- **Target Audience / Persona**: Players seeking secure account recovery and sweepstakes cashouts, platform operators preventing multi-account referral fraud, and compliance/risk teams requiring verified player identities.
-- **Key Value**: Closes security loopholes (no email existence bypass, no unverified referral abuse), provides native email verification banners with instant reload checks, and guarantees that cashouts only flow to verified players.
+Since we are using 6-digit OTP codes exclusively, you do not need to touch Site URLs or Redirect URLs. You only need to configure the email templates to show the 6-digit code `{{ .Token }}`:
 
----
+* Location: **Supabase Dashboard** &rarr; **Authentication** &rarr; **Email Templates**
 
-## 2. User Experience & Visual Design
+### A. Confirm Signup Template
+* **Subject**: `Your SwiftSweeps Verification Code: {{ .Token }}`
+* **Body**:
+  ```html
+  <h2>Welcome to SwiftSweeps!</h2>
+  <p>Here is your 6-digit verification code to activate your account:</p>
+  <div style="font-size: 36px; font-weight: bold; letter-spacing: 8px; padding: 18px; background: #131c2e; color: #f59e0b; border-radius: 8px; text-align: center; margin: 20px 0; font-family: monospace;">
+    {{ .Token }}
+  </div>
+  <p>Enter this code in the app to complete your registration. This code expires in 1 hour.</p>
+  ```
 
-### Key User Flows
-
-1. **Strict Password Reset Flow**:
-   - **Trigger**: Visitor clicks "Forgot Password?" on the SwiftSweeps sign-in card.
-   - **Input & Existence Validation**: Visitor enters their email. When submitting, the system checks the Firestore `users` registry:
-     - *If NOT found*: Displays an inline alert: *"No account found with this email address. Please check for typos or create a new account."* No email is sent.
-     - *If found*: Dispatches the official Firebase reset email via `sendPasswordResetEmail(auth, email)` and displays a high-clarity success card: *"Password reset link dispatched. Please check your inbox (and spam folder) for the link from Firebase."*
-     - Replaces manual token input forms with a direct "Back to Sign In" action.
-2. **Email Verification Status & Alert Banner**:
-   - When an unverified user logs in (or creates an account), a persistent, non-intrusive alert banner appears at the top of the player dashboard:
-     - Visual: Dark amber/gold container with warning icon, clean typography: *"Your email (name@example.com) is unverified. Cashouts and referral bonuses remain locked until verified."*
-     - Actions: `[Resend Verification Email]` (with a 60-second cooldown timer) and `[I Have Verified - Check Status]` (triggers `auth.currentUser.reload()` and updates Firestore/local user state instantly).
-3. **Cashout / Withdrawal Protection**:
-   - If an unverified user navigates to the Cashout tab or attempts to submit a cashout request:
-     - The cashout form disables the submit action with a clear badge: *"Email verification required to request cashouts."*
-     - In-form button allows 1-click verification email resend.
-4. **Referral Program Transparency**:
-   - In the Referrals dashboard, the referrer sees detailed qualification statuses for each referred friend:
-     - `Pending Email Verification`: Referee signed up but has not clicked the verification link.
-     - `Pending First Game Load`: Referee verified email, waiting to load credits into a game.
-     - `Qualified & Credited`: Both conditions fulfilled, bonus ($10.00) transferred to referrer's wallet.
-
-### Visual Identity & Theme
-- **Color Tokens**: Dark mode palette adhering to SwiftSweeps aesthetic: deep `slate-950` canvas, `indigo-500` accents, `emerald-500` for verified states, and `amber-400` for pending verification warnings.
-- **Typography**: Clean display font pairing (`Plus Jakarta Sans` display, readable body typography) with tabular formatting for timestamps and amounts.
-- **Anti-Slop Discipline**: Zero static pill badges; clean unboxed text dividers (`·`) for referral milestone progress; visible focus rings; minimum 44px touch targets.
+### B. Reset Password Template
+* **Subject**: `SwiftSweeps Password Reset Code: {{ .Token }}`
+* **Body**:
+  ```html
+  <h2>Reset Your Password</h2>
+  <p>You requested a password reset. Here is your 6-digit security code:</p>
+  <div style="font-size: 36px; font-weight: bold; letter-spacing: 8px; padding: 18px; background: #131c2e; color: #f59e0b; border-radius: 8px; text-align: center; margin: 20px 0; font-family: monospace;">
+    {{ .Token }}
+  </div>
+  <p>Enter this code in your password reset screen along with your new password. This code expires in 15 minutes.</p>
+  ```
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
+## 2. Overview & Core Concept
 
-- **Decision 1: Strict Firebase Password Reset vs. Dual Code/Token Fallback**
-  - *Chosen Approach*: Pure Firebase `sendPasswordResetEmail` action links; eliminate all temporary server-generated PINs and fake tokens.
-  - *Why*: Eliminates security vulnerabilities and confusing parallel recovery modes; complies with production standards where passwords must never be resettable via arbitrary client-side token guessing.
-  - *Alternatives Considered*: Retaining the 6-digit PIN code on screen for demo testing was rejected because it bypassed real email delivery and violated the user's explicit instructions.
-- **Decision 2: Game Load Qualification Trigger vs. Pure Deposit**
-  - *Chosen Approach*: The referee must complete at least one `loadFundsToGame` operation (transferring wallet funds into a game platform like Fire Kirin, Orion Stars, etc.) before the referrer qualifies for a bonus.
-  - *Why*: Directly satisfies the user's criteria that the referee must have actually "played" rather than simply depositing and immediately idling.
-- **Decision 3: Soft Restriction vs. Hard Account Block for Unverified Emails**
-  - *Chosen Approach*: Allow gameplay and deposits, but block cashouts and referral rewards.
-  - *Why*: Minimizes onboarding friction for players who want to test games immediately while establishing a strict financial gate preventing payout abuse.
+* **What It Does**: Transitions all authentication challenges from link-clicking to direct 6-digit OTP verification. Handles email verification during registration, resolves unverified user login lockouts via an interactive modal, and streamlines password recovery with single-screen OTP validation.
+* **Target Audience**: SwiftSweeps players across mobile, tablet, and desktop devices.
+* **Key Value**: 100% immunity to domain mismatch errors or `localhost` redirects, zero account lockouts, and instant user activation.
 
 ---
 
-## 4. Technical Architecture & Data Strategy
+## 3. User Experience & Visual Design
 
-### System Architecture Diagram
+### Unified User Flows
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        SwiftSweeps Client                              │
-│                                                                        │
-│  ┌──────────────────────┐             ┌─────────────────────────────┐  │
-│  │   Auth / Reset Card  │             │   Player Dashboard / Nav    │  │
-│  │                      │             │                             │  │
-│  │  1. Check User Exist ├────┐        │  - Verification Alert Banner│  │
-│  │  2. Firebase Reset   │    │        │  - Resend Link (60s timer)  │  │
-│  │     Email Dispatch   │    │        │  - Live Status Check        │  │
-│  └──────────┬───────────┘    │        └──────────────┬──────────────┘  │
-│             │                │                       │                 │
-└─────────────┼────────────────┼───────────────────────┼─────────────────┘
-              │                │                       │
-              ▼                ▼                       ▼
+│                        FLOW 1: NEW USER SIGNUP                         │
+├────────────────────────────────────────────────────────────────────────┤
+│ 1. User registers on Sign Up tab.                                      │
+│ 2. Supabase registers account and dispatches 6-digit OTP via Brevo.    │
+│ 3. App immediately displays OTP screen with 6 digit boxes.             │
+│ 4. User types or pastes 6-digit code -> App calls verifyOtp('signup'). │
+│ 5. Account verified! Automatically logged in to Dashboard.             │
+└────────────────────────────────────────────────────────────────────────┘
+
 ┌────────────────────────────────────────────────────────────────────────┐
-│                   Firebase & Platform Services                         │
-│                                                                        │
-│  ┌─────────────────────────┐            ┌───────────────────────────┐  │
-│  │   Firebase Auth SDK     │            │   Firestore Database      │  │
-│  │                         │            │                           │  │
-│  │ - sendPasswordResetEmail│            │ - /users/{uid}            │  │
-│  │ - sendEmailVerification │            │   (emailVerified, played) │  │
-│  │ - currentUser.reload()  │            │ - /withdrawals/{id}       │  │
-│  └─────────────────────────┘            │   (blocked if unverified) │  │
-│                                         │ - /referrals / wallets    │  │
-│                                         └─────────────┬─────────────┘  │
-│                                                       │                │
-│                                 ┌─────────────────────┴─────────────┐  │
-│                                 │ Referral Qualification Engine     │  │
-│                                 │   IF emailVerified == true        │  │
-│                                 │   AND hasLoadedGameCredits == true│  │
-│                                 │   ==> Award Referral Reward       │  │
-│                                 └───────────────────────────────────┘  │
+│                FLOW 2: UNVERIFIED USER ATTEMPTS SIGN IN                │
+├────────────────────────────────────────────────────────────────────────┤
+│ 1. User enters Email + Password on Sign In tab.                        │
+│ 2. Supabase returns "Email not confirmed".                             │
+│ 3. App catches error and opens the "Verify Account OTP" modal.         │
+│ 4. Modal displays pre-filled email, 6-digit input, and "Resend OTP".   │
+│ 5. User enters code -> Account verified & session established!         │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                    FLOW 3: FORGOT / RESET PASSWORD                     │
+├────────────────────────────────────────────────────────────────────────┤
+│ 1. User clicks "Forgot Password?", enters email, and hits Submit.      │
+│ 2. Supabase dispatches 6-digit OTP via Brevo.                          │
+│ 3. App transitions directly to Reset Password screen with OTP input.   │
+│ 4. User enters 6-digit OTP + New Password on the same screen.          │
+│ 5. App verifies recovery OTP -> Sets new password -> Logs user in.     │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Component & State Mapping
-
-1. **`src/services/dataService.ts`**:
-   - `requestPasswordReset(email)`: Queries the existing users list. If not found, returns `{ success: false, message: 'No registered account was found with this email address.' }`. If found, calls `sendPasswordResetEmail(auth, email)` via `firebaseAuthService` and returns a clean success response without any test token.
-   - `requestWithdrawal(params)`: Enforces `if (!customer.emailVerified) return { success: false, message: 'Email verification required. Please verify your email before requesting a cashout.' }`.
-   - `checkAndAwardReferral(customerId)`: Enforces `if (!customer.emailVerified) return;` and checks if the customer has loaded credits to any game (`hasLoadedGameCredits` or `getTransactions` with game load). Only credits the referrer if both conditions are met.
-   - `syncEmailVerificationStatus(userId)`: Re-checks `auth.currentUser?.emailVerified` after reload and updates the user's profile in Firestore and state.
-2. **`src/components/auth/ForgotPassword.tsx`**:
-   - Updates form submission to remove token/PIN display.
-   - Shows feedback that an official reset link was dispatched by Firebase.
-   - Streamlines UX to a single email input with existence error handling.
-3. **`src/components/common/EmailVerificationBanner.tsx`** *(New/Updated)*:
-   - High-visibility banner when `currentUser.emailVerified === false`.
-   - Offers "Resend Email" (with cooldown) and "Refresh Status" actions.
-4. **`src/components/customer/CustomerWithdrawalView.tsx`**:
-   - Checks `currentUser.emailVerified`; disables cashout form with notice if unverified.
-5. **`src/components/customer/CustomerReferralsView.tsx`**:
-   - Shows referee milestone breakdown: `Email Verified (✓/✗)` and `Game Loaded (✓/✗)` so referrers understand why bonuses are pending.
-6. **`server.ts`**:
-   - Clean up `/api/auth/request-reset` to eliminate arbitrary in-memory dummy token generation.
+### Visual Identity & Theme
+* **Palette**: Dark casino aesthetic (`#0A0F1D` background, `#131C2E` container cards), neon amber accents (`amber-500`, `#F59E0B`), and emerald confirmation badges (`emerald-400`).
+* **OTP Input**: 6 individual high-contrast digits with auto-focus, paste support, numeric keyboard on mobile (`inputMode="numeric"`), and smooth focus rings.
+* **Accessibility**: Clear error states with contextual instructions, a visible 60-second resend cooldown timer, and screen-reader accessible labels.
 
 ---
 
-## 5. Verification & Testing Plan
+## 4. Technical Architecture & Component Mapping
 
-1. **Password Reset Verification**:
-   - Attempt reset with an unregistered email (e.g. `nonexistent@test.com`): Verify it fails immediately with "No account found".
-   - Attempt reset with a registered email (e.g. `blithesweeps@gmail.com`): Verify Firebase `sendPasswordResetEmail` is triggered and success message directs user to check inbox. Verify no tokens/PINs are exposed in UI or console.
-2. **Email Verification Lifecycle**:
-   - Sign up / sign in with an unverified account: Verify alert banner displays prominently.
-   - Click "Resend Verification Email": Verify Firebase `sendEmailVerification` is dispatched.
-   - Click "Check Status": Verify it reloads Firebase user profile and updates Firestore.
-3. **Cashout Blocking**:
-   - With an unverified account, attempt to submit a cashout request: Verify system rejects request and displays verification requirement.
-4. **Referral Reward Rules**:
-   - Register a new account with a referral code.
-   - Verify referrer has $0 referral bonus while referee is unverified.
-   - Simulate email verification: Verify bonus is still withheld because referee hasn't loaded a game.
-   - Load credits into any game account (`loadFundsToGame`): Verify qualification triggers and referral bonus is awarded to referrer.
+```
+┌───────────────────────────────────────────────────────────────────────┐
+│                           AuthPage.tsx                                │
+│   ┌───────────────────────────────────────────────────────────────┐   │
+│   │ Sign In Tab / Sign Up Tab                                     │   │
+│   │  - On SignUp -> Transitions to <EmailOtpView>                 │   │
+│   │  - On Unverified Login -> Opens <EmailOtpModal>               │   │
+│   └───────────────────────────────────────────────────────────────┘   │
+│   ┌───────────────────────────┐       ┌───────────────────────────┐   │
+│   │   <ForgotPassword>        │ ----> │      <ResetPassword>      │   │
+│   │   Sends 6-digit reset OTP │       │   Verifies OTP & sets pwd │   │
+│   └───────────────────────────┘       └───────────────────────────┘   │
+└───────────────────────────────────┬───────────────────────────────────┘
+                                    │
+                                    ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│                     supabaseAuthService.ts                            │
+│  ├── verifyEmailOtp(email, token): supabase.auth.verifyOtp('signup')  │
+│  ├── resendEmailOtp(email): supabase.auth.resend({ type: 'signup' })  │
+│  ├── sendPasswordReset(email): supabase.auth.resetPasswordForEmail()  │
+│  ├── verifyOtpForRecovery(email, token): verifyOtp('recovery')        │
+│  └── updateUserPassword(newPassword): supabase.auth.updateUser()      │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+### Planned Code Changes
+1. **`src/components/auth/EmailOtpModal.tsx`**:
+   - Reusable modal and view for verifying email via 6-digit OTP.
+   - Features: auto-focus, 6-digit pin inputs, clipboard paste handling, "Resend Code" with 60s cooldown timer, and error display.
+2. **`src/services/supabaseAuthService.ts`**:
+   - Add `verifyEmailOtp(email: string, token: string)` using `type: 'signup'`.
+   - Add `resendEmailOtp(email: string)`.
+   - Enhance `loginWithEmail` to return `isUnverified: true` when unconfirmed.
+   - Ensure `verifyOtpForRecovery(email: string, token: string)` cleanly establishes a recovery session before password update.
+3. **`src/pages/auth/AuthPage.tsx`**:
+   - Immediately navigate to OTP verification view upon signup.
+   - Detect `isUnverified` on sign-in attempt and trigger `EmailOtpModal` with user's email pre-filled and an option to resend.
+   - After OTP verification succeeds, update user profile and log them straight into the application.
+4. **`src/components/auth/ForgotPassword.tsx` & `ResetPassword.tsx`**:
+   - Streamline `ForgotPassword` to transition directly to `ResetPassword` with email prefilled.
+   - In `ResetPassword`, provide 6-digit OTP input + New Password fields; upon submit, verify recovery OTP and set the new password.
+
+---
+
+## 5. Verification Plan
+
+1. **Sign Up Flow**:
+   - Create a test account & verify the app immediately presents the 6-digit OTP view.
+   - Test OTP entry and confirmation leading directly to logged-in dashboard.
+2. **Unverified Sign-In Flow**:
+   - Attempt to log in with an unverified account.
+   - Verify the app catches the unverified status and launches the OTP verification modal.
+   - Test the "Resend Code" button with 60-second cooldown timer.
+   - Complete verification through the modal and verify direct session login.
+3. **Password Reset Flow**:
+   - Request password reset & verify the screen switches to OTP + new password inputs.
+   - Verify that entering the 6-digit OTP successfully updates the password and logs in.
+4. **Build & Compilation**:
+   - Run `compile_applet` to ensure zero TypeScript or build issues.

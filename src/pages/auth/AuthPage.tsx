@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { ForgotPassword } from '../../components/auth/ForgotPassword';
 import { ResetPassword } from '../../components/auth/ResetPassword';
+import { EmailOtpModal } from '../../components/auth/EmailOtpModal';
 import { SwiftSweepsLogo } from '../../components/common/SwiftSweepsLogo';
 import { LiveCashoutTicker } from '../../components/common/LiveCashoutTicker';
 
@@ -31,9 +32,11 @@ interface AuthPageProps {
 }
 
 export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotice }) => {
-  const [authMode, setAuthMode] = useState<'signin' | 'signup' | 'forgot' | 'reset'>('signin');
+  const [authMode, setAuthMode] = useState<'signin' | 'signup' | 'forgot' | 'reset' | 'verify-otp'>('signin');
   const [resetEmail, setResetEmail] = useState('');
   const [resetToken, setResetToken] = useState('');
+  const [otpEmail, setOtpEmail] = useState('');
+  const [showOtpModal, setShowOtpModal] = useState(false);
 
   // Selected game when a visitor clicks "Play Now" on a game card
   const [selectedGameForPlay, setSelectedGameForPlay] = useState<string | null>(null);
@@ -127,6 +130,14 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
         return;
       }
 
+      if (authRes.isUnverified) {
+        const targetEmail = authRes.email || email.trim();
+        setOtpEmail(targetEmail);
+        setShowOtpModal(true);
+        setErrorMessage('Your email address is not verified yet. Please enter the 6-digit code sent to your email to verify and sign in.');
+        return;
+      }
+
       setErrorMessage(
         authRes.error || 'Invalid email or password. Please verify your credentials.'
       );
@@ -156,21 +167,19 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     setIsLoading(true);
 
     try {
+      const cleanEmail = signupEmail.trim();
       const res = await supabaseAuthService.registerWithEmail({
-        email: signupEmail.trim(),
+        email: cleanEmail,
         password: signupPassword,
         displayName: signupName.trim(),
         phone: signupPhone.trim() || undefined,
         referralCode: signupReferral.trim() || undefined,
       });
 
-      if (res.success && res.user) {
-        if (res.message && res.message.includes('check your email')) {
-          setInfoMessage(res.message);
-          setAuthMode('signin');
-        } else {
-          onLoginSuccess(res.user);
-        }
+      if (res.success) {
+        setOtpEmail(cleanEmail);
+        setAuthMode('verify-otp');
+        setInfoMessage('Account created! Enter the 6-digit verification code sent to your email to activate your account.');
       } else {
         setErrorMessage(res.error || 'Registration failed.');
       }
@@ -334,6 +343,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
                 <span className="text-xs font-bold text-white tracking-wide">
                   {authMode === 'signup'
                     ? 'Create Swift Sweeps Account'
+                    : authMode === 'verify-otp'
+                    ? 'Verify Email with 6-Digit Code'
                     : authMode === 'forgot'
                     ? 'Password Recovery'
                     : authMode === 'reset'
@@ -391,12 +402,12 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
                 >
                   Create Account
                 </button>
-                {(authMode === 'forgot' || authMode === 'reset') && (
+                {(authMode === 'forgot' || authMode === 'reset' || authMode === 'verify-otp') && (
                   <button
                     type="button"
                     className="flex-1 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 shadow-md transition-all"
                   >
-                    {authMode === 'forgot' ? 'Reset' : 'New Pass'}
+                    {authMode === 'forgot' ? 'Reset' : authMode === 'reset' ? 'New Pass' : 'Verify Code'}
                   </button>
                 )}
               </div>
@@ -418,8 +429,20 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
                 </div>
               )}
 
-              {/* Forgot Password Flow */}
-              {authMode === 'forgot' ? (
+              {/* Verification & Recovery Flows */}
+              {authMode === 'verify-otp' ? (
+                <EmailOtpModal
+                  email={otpEmail || signupEmail || email}
+                  isStandalone={true}
+                  onSuccess={(user) => {
+                    onLoginSuccess(user);
+                  }}
+                  onBackToSignIn={() => {
+                    setAuthMode('signin');
+                    setErrorMessage(null);
+                  }}
+                />
+              ) : authMode === 'forgot' ? (
                 <ForgotPassword
                   initialEmail={resetEmail || email}
                   onBackToSignIn={() => {
@@ -525,6 +548,23 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
                       <ArrowRight className="w-4 h-4" />
                     </button>
                   </form>
+
+                  {/* Immediate Unverified Account Verification Trigger */}
+                  <div className="pt-2 text-center border-t border-slate-800/80">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetEmail = email.trim();
+                        setOtpEmail(targetEmail);
+                        setShowOtpModal(true);
+                        setErrorMessage(null);
+                      }}
+                      className="text-[11px] text-amber-400 hover:text-amber-300 hover:underline transition font-medium cursor-pointer inline-flex items-center gap-1"
+                    >
+                      <span>Unverified account? Enter 6-digit code or resend</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
               ) : (
                 /* Registration Form */
@@ -698,6 +738,23 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
           <span>Support</span>
         </button>
       </div>
+
+      {/* Interactive Unverified OTP Modal */}
+      {showOtpModal && (
+        <EmailOtpModal
+          email={otpEmail || email}
+          isOpen={showOtpModal}
+          onClose={() => setShowOtpModal(false)}
+          onSuccess={(user) => {
+            setShowOtpModal(false);
+            onLoginSuccess(user);
+          }}
+          onBackToSignIn={() => {
+            setShowOtpModal(false);
+            setAuthMode('signin');
+          }}
+        />
+      )}
     </div>
   );
 };

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Mail, Send, CheckCircle2, AlertCircle, RefreshCw, X, ShieldAlert, Zap, ExternalLink } from 'lucide-react';
+import { Mail, Send, CheckCircle2, AlertCircle, RefreshCw, X, ShieldAlert, Zap, ExternalLink, KeyRound } from 'lucide-react';
 import { dataService } from '../../services/dataService';
 import { UserProfile } from '../../types';
+import { EmailOtpModal } from '../auth/EmailOtpModal';
 
 interface EmailVerificationBannerProps {
   currentUser: UserProfile;
@@ -16,6 +17,7 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
   const [isSending, setIsSending] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
   const [isInstantConfirming, setIsInstantConfirming] = useState(false);
+  const [showOtpModal, setShowOtpModal] = useState(false);
   const [cooldown, setCooldown] = useState(0);
   const [actionLink, setActionLink] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
@@ -153,7 +155,18 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
             <span>{isInstantConfirming ? 'Verifying...' : 'Verify Now (Instant)'}</span>
           </button>
 
-          {/* Resend Supabase Email Link */}
+          {/* Enter 6-Digit Code Button */}
+          <button
+            type="button"
+            onClick={() => setShowOtpModal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shadow-md shadow-amber-500/20 active:scale-95"
+            title="Enter 6-digit verification code received in email"
+          >
+            <KeyRound className="w-3.5 h-3.5" />
+            <span>Enter 6-Digit Code</span>
+          </button>
+
+          {/* Resend Supabase Email Code */}
           <button
             type="button"
             onClick={handleResend}
@@ -166,7 +179,7 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
             ) : (
               <>
                 <Send className="w-3.5 h-3.5" />
-                <span>{cooldown > 0 ? `Resend (${cooldown}s)` : 'Send Email Link'}</span>
+                <span>{cooldown > 0 ? `Resend (${cooldown}s)` : 'Send Code'}</span>
               </>
             )}
           </button>
@@ -232,6 +245,18 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
           )}
           <span>{feedback.message}</span>
         </div>
+      )}
+
+      {showOtpModal && (
+        <EmailOtpModal
+          email={currentUser.email}
+          isOpen={showOtpModal}
+          onClose={() => setShowOtpModal(false)}
+          onSuccess={(user) => {
+            setShowOtpModal(false);
+            if (onStatusChanged) onStatusChanged(true);
+          }}
+        />
       )}
     </div>
   );

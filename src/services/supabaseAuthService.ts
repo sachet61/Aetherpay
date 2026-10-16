@@ -8,6 +8,8 @@ export interface SupabaseAuthResult {
   user?: UserProfile;
   error?: string;
   message?: string;
+  isUnverified?: boolean;
+  email?: string;
 }
 
 export interface PasswordResetResponse {
@@ -223,11 +225,13 @@ class SupabaseAuthService {
 
       if (error) {
         // Helpful handling for unconfirmed emails
-        if (error.message.toLowerCase().includes('email not confirmed')) {
+        const errLower = error.message.toLowerCase();
+        if (errLower.includes('email not confirmed') || errLower.includes('email_not_confirmed') || errLower.includes('not confirmed')) {
           return {
             success: false,
-            error:
-              'Your email address has not been confirmed yet. Please verify your email or click resend below.',
+            error: 'Your email address is not verified yet. Please enter your 6-digit verification code below to activate your account.',
+            isUnverified: true,
+            email: cleanEmail,
           };
         }
 
@@ -323,16 +327,31 @@ class SupabaseAuthService {
    * Generates password reset link avoiding localhost:3000 redirects.
    * Calls server endpoint to generate direct domain-aware recovery action link and 6-digit PIN.
    */
+  /**
+   * Dispatches Supabase password reset OTP code.
+   * Checks database first to verify the email exists before sending.
+   */
   public async sendPasswordReset(email: string): Promise<PasswordResetResponse> {
     const cleanEmail = email.trim().toLowerCase();
-    const origin = typeof window !== 'undefined' ? window.location.origin : '';
-    const redirectTo = origin ? `${origin}/#type=recovery` : undefined;
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      return { success: false, message: 'Please enter a valid email address.' };
+    }
+
+    // 1. Check if user exists in database
+    const allUsers = dataService.getUsers();
+    const existingUser = allUsers.find((u) => u.email.toLowerCase() === cleanEmail);
+    if (!existingUser) {
+      return {
+        success: false,
+        message: 'No account found with this email address. Please check your spelling or sign up.',
+      };
+    }
 
     let actionLink: string | undefined;
     let pin: string | undefined;
     let token: string | undefined;
 
-    // 1. Call server API to generate direct domain-aware action link and 6-digit PIN
+    // Optional server backup token generation
     try {
       const resp = await fetch('/api/auth/request-reset', {
         method: 'POST',
@@ -346,17 +365,22 @@ class SupabaseAuthService {
         token = json.token;
       }
     } catch (err) {
-      console.warn('Server request-reset endpoint notice:', err);
+      console.warn('Server request-reset backup notice:', err);
     }
 
-    // 2. Dispatch Supabase background reset email with dynamic redirectTo
+    // 2. Dispatch Supabase reset password email with 6-digit OTP code {{ .Token }}
     try {
-      supabase.auth.resetPasswordForEmail(cleanEmail, { redirectTo }).catch(() => {});
-    } catch {}
+      const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail);
+      if (error) {
+        return { success: false, message: error.message };
+      }
+    } catch (sbErr: any) {
+      console.warn('Supabase resetPasswordForEmail notice:', sbErr);
+    }
 
     return {
       success: true,
-      message: `Password reset link and code prepared for ${cleanEmail}. Click the direct link or enter your 6-digit PIN.`,
+      message: `Password reset code sent to ${cleanEmail}. Please enter the 6-digit code below to set your new password.`,
       actionLink,
       pin,
       token,
@@ -393,20 +417,151 @@ class SupabaseAuthService {
     email: string,
     token: string
   ): Promise<{ success: boolean; message?: string }> {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanToken = token.trim();
+
+    if (!cleanEmail || !cleanToken) {
+      return { success: false, message: 'Both email and 6-digit recovery code are required.' };
+    }
+
     try {
       const { data, error } = await supabase.auth.verifyOtp({
-        email: email.trim().toLowerCase(),
-        token: token.trim(),
+        email: cleanEmail,
+        token: cleanToken,
         type: 'recovery',
       });
 
       if (error) {
-        return { success: false, message: error.message };
+        return { success: false, message: error.message || 'Invalid or expired 6-digit recovery code.' };
       }
 
-      return { success: true, message: 'Recovery token verified successfully.' };
+      this.isRecoveryMode = true;
+      return { success: true, message: 'Recovery code verified successfully! Please enter your new password.' };
     } catch (err: any) {
-      return { success: false, message: err?.message || 'Failed to verify token' };
+      return { success: false, message: err?.message || 'Failed to verify recovery code' };
+    }
+  }
+
+  /**
+   * Verifies a 6-digit email confirmation OTP code from Supabase (signup confirmation).
+   */
+  public async verifyEmailOtp(
+    email: string,
+    token: string
+  ): Promise<{ success: boolean; user?: UserProfile; message?: string }> {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanToken = token.trim();
+
+    if (!cleanEmail || !cleanToken) {
+      return { success: false, message: 'Both email and 6-digit verification code are required.' };
+    }
+
+    try {
+      // 1. Verify signup OTP code in Supabase
+      let { data, error } = await supabase.auth.verifyOtp({
+        email: cleanEmail,
+        token: cleanToken,
+        type: 'signup',
+      });
+
+      // 2. Fallback to type 'email' if signup type fails
+      if (error && (error.message.includes('expired') || error.message.includes('invalid') || error.message.includes('type'))) {
+        const emailAttempt = await supabase.auth.verifyOtp({
+          email: cleanEmail,
+          token: cleanToken,
+          type: 'email',
+        });
+        if (!emailAttempt.error) {
+          data = emailAttempt.data;
+          error = null;
+        }
+      }
+
+      if (error) {
+        return {
+          success: false,
+          message: error.message || 'Invalid or expired 6-digit verification code.',
+        };
+      }
+
+      const authUser = data?.user || (await supabase.auth.getUser()).data.user;
+      const userId = authUser?.id || `usr_${Date.now()}`;
+
+      // 3. Mark profile as emailVerified in dataService
+      let userProfile =
+        dataService.getUserById(userId) ||
+        dataService.getUsers().find((u) => u.email.toLowerCase() === cleanEmail);
+
+      const nowIso = new Date().toISOString();
+      if (userProfile) {
+        userProfile.emailVerified = true;
+        dataService.registerUser(userProfile);
+      } else {
+        const dName = authUser?.user_metadata?.displayName || cleanEmail.split('@')[0];
+        userProfile = {
+          id: userId,
+          email: cleanEmail,
+          displayName: dName,
+          role: (authUser?.user_metadata?.role as UserRole) || 'customer',
+          status: 'active',
+          emailVerified: true,
+          referralCode: `REF_${dName.replace(/\s+/g, '').toUpperCase()}_${Date.now().toString().slice(-4)}`,
+          createdAt: nowIso,
+          lastLoginAt: nowIso,
+        };
+        await this.syncProfileAndWallet(userProfile);
+      }
+
+      // 4. Activate session
+      authSessionService.createSessionForUser(
+        userProfile.id,
+        userProfile.email,
+        userProfile.displayName,
+        userProfile.role
+      );
+
+      // Check referral qualification on email verification
+      try {
+        dataService.checkAndAwardReferral(userProfile.id, 0);
+      } catch (refErr) {
+        console.warn('Referral check notice:', refErr);
+      }
+
+      return {
+        success: true,
+        user: userProfile,
+        message: 'Email successfully verified! Welcome to SwiftSweeps.',
+      };
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'Verification failed. Please try again.' };
+    }
+  }
+
+  /**
+   * Resends 6-digit verification OTP code to the user's email.
+   */
+  public async resendEmailOtp(email: string): Promise<{ success: boolean; message: string }> {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      return { success: false, message: 'Valid email address is required.' };
+    }
+
+    try {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: cleanEmail,
+      });
+
+      if (error) {
+        return { success: false, message: error.message || 'Failed to resend code.' };
+      }
+
+      return {
+        success: true,
+        message: `A fresh 6-digit verification code was sent to ${cleanEmail}. Please check your inbox.`,
+      };
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'Failed to resend verification code.' };
     }
   }
 
@@ -415,43 +570,7 @@ class SupabaseAuthService {
     message: string;
     actionLink?: string;
   }> {
-    const cleanEmail = email.trim().toLowerCase();
-    const origin = typeof window !== 'undefined' ? window.location.origin : '';
-    const redirectTo = origin ? `${origin}/#auth=confirmed` : undefined;
-
-    let actionLink: string | undefined;
-
-    // 1. Call server API to generate direct domain-aware verification link
-    try {
-      const resp = await fetch('/api/auth/resend-verification', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: cleanEmail }),
-      });
-      if (resp.ok) {
-        const json = await resp.json();
-        actionLink = json.actionLink;
-      }
-    } catch (err) {
-      console.warn('Server resend-verification notice:', err);
-    }
-
-    // 2. Dispatch Supabase client resend
-    try {
-      await supabase.auth.resend({
-        type: 'signup',
-        email: cleanEmail,
-        options: {
-          emailRedirectTo: redirectTo,
-        },
-      });
-    } catch {}
-
-    return {
-      success: true,
-      actionLink,
-      message: `Verification link dispatched for ${cleanEmail}. Check your inbox or click the link directly.`,
-    };
+    return this.resendEmailOtp(email);
   }
 
   public async resendVerificationEmail(email: string): Promise<{
@@ -459,7 +578,7 @@ class SupabaseAuthService {
     message: string;
     actionLink?: string;
   }> {
-    return this.resendConfirmationEmail(email);
+    return this.resendEmailOtp(email);
   }
 
   public async confirmEmailNow(email: string): Promise<{ success: boolean; message: string }> {
