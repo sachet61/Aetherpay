@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { supabaseAuthService } from '../../services/supabaseAuthService';
 import { dataService } from '../../services/dataService';
 import {
   KeyRound,
@@ -20,6 +21,7 @@ interface ForgotPasswordProps {
 export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
   initialEmail = '',
   onBackToSignIn,
+  onProceedToReset,
 }) => {
   const [email, setEmail] = useState(initialEmail);
   const [isLoading, setIsLoading] = useState(false);
@@ -48,12 +50,12 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
     setIsLoading(true);
 
     try {
-      const res = await dataService.requestPasswordReset(cleanEmail);
+      const res = await supabaseAuthService.sendPasswordReset(cleanEmail);
       if (res.success) {
         setIsSuccess(true);
         setCooldown(60);
       } else {
-        setErrorMessage(res.message || 'Unable to request password reset. Please check the email entered.');
+        setErrorMessage(res.message || 'Unable to request password reset. Please verify your email address.');
       }
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to request password reset.');
@@ -67,7 +69,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
     setErrorMessage(null);
     setIsLoading(true);
     try {
-      const res = await dataService.requestPasswordReset(email.trim().toLowerCase());
+      const res = await supabaseAuthService.sendPasswordReset(email.trim().toLowerCase());
       if (res.success) {
         setCooldown(60);
       } else {
@@ -83,12 +85,12 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
   return (
     <div className="space-y-5 animate-in fade-in duration-200">
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+        <div className="w-10 h-10 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
           <KeyRound className="w-5 h-5" />
         </div>
         <div>
-          <h2 className="text-base font-bold text-white tracking-tight">Password Reset</h2>
-          <p className="text-xs text-slate-400">Official recovery link dispatched to your inbox</p>
+          <h2 className="text-base font-bold text-white tracking-tight">Password Recovery</h2>
+          <p className="text-xs text-slate-400">Secure link dispatched directly to your inbox</p>
         </div>
       </div>
 
@@ -102,7 +104,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
       {!isSuccess ? (
         <form onSubmit={handleSubmit} className="space-y-4">
           <p className="text-xs text-slate-300 leading-relaxed">
-            Enter your account email. We will check our records and dispatch a secure password reset link to your verified inbox.
+            Enter your account email. Supabase Auth will dispatch a verified password reset link that redirects back to this application.
           </p>
 
           <div className="space-y-1.5">
@@ -115,7 +117,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="name@example.com"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-4 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+                className="w-full bg-[#0A0F1D] border border-slate-800 rounded-xl pl-9 pr-4 py-2.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
             </div>
           </div>
@@ -123,12 +125,12 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
           <button
             type="submit"
             disabled={isLoading}
-            className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-2 disabled:opacity-50"
+            className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-bold text-xs transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 disabled:opacity-50"
           >
             {isLoading ? (
               <>
                 <RefreshCw className="w-4 h-4 animate-spin" />
-                <span>Checking Account &amp; Sending...</span>
+                <span>Dispatching via Supabase...</span>
               </>
             ) : (
               <>
@@ -137,6 +139,16 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
               </>
             )}
           </button>
+
+          {onProceedToReset && (
+            <button
+              type="button"
+              onClick={() => onProceedToReset(email, '')}
+              className="w-full py-2 text-center text-xs text-amber-400 hover:text-amber-300 hover:underline"
+            >
+              Already clicked an email link or have a token? Set new password →
+            </button>
+          )}
 
           <button
             type="button"
@@ -157,13 +169,13 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
               We have sent a secure password reset link to <strong className="text-white">{email}</strong>.
             </p>
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              Please check your inbox (and spam or junk folder). Click the link in the email to choose a new password.
+              Check your inbox (and spam or junk folder). Clicking the link will redirect you directly back here to set your new password without any localhost errors.
             </p>
           </div>
 
-          <div className="flex items-center gap-2 p-3 rounded-xl bg-slate-950 border border-slate-800/80 text-[11px] text-slate-400">
+          <div className="flex items-center gap-2 p-3 rounded-xl bg-[#0A0F1D] border border-slate-800/80 text-[11px] text-slate-400">
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span>The link is securely generated and expires automatically.</span>
+            <span>The link is securely generated by Supabase and expires automatically.</span>
           </div>
 
           <div className="flex flex-col sm:flex-row gap-2 pt-1">
@@ -177,15 +189,26 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
               <span>{cooldown > 0 ? `Resend Email (${cooldown}s)` : 'Resend Email'}</span>
             </button>
 
-            <button
-              type="button"
-              onClick={onBackToSignIn}
-              className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-2"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back to Sign In</span>
-            </button>
+            {onProceedToReset && (
+              <button
+                type="button"
+                onClick={() => onProceedToReset(email, '')}
+                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-bold text-xs transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2"
+              >
+                <span>Enter Password</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
+
+          <button
+            type="button"
+            onClick={onBackToSignIn}
+            className="w-full py-2.5 rounded-xl border border-slate-800 hover:bg-slate-800 text-slate-400 hover:text-white text-xs font-medium transition flex items-center justify-center gap-2"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Back to Sign In</span>
+          </button>
         </div>
       )}
     </div>

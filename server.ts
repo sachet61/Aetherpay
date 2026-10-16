@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import bcrypt from 'bcryptjs';
 
 dotenv.config();
 
@@ -89,67 +90,62 @@ async function startServer() {
   }
   const serverSessions: Map<string, ServerSessionRecord> = new Map();
 
-  // 1. Auth Login: issues session cookie
-  app.post('/api/auth/login', (req, res) => {
-    try {
-      const { email, token, userId } = req.body;
-      const sessionToken = token || `tok_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const expiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+// Server-Side DB Helper
+const DB_PATH = path.resolve(process.cwd(), 'server-db.json');
+const readDB = () => JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+const writeDB = (data: any) => fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
 
-      serverSessions.set(sessionToken, {
-        token: sessionToken,
-        email: email || '',
-        userId: userId || '',
-        createdAt: Date.now(),
-        expiresAt,
-      });
+// 1. Auth Login: issues session cookie
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const db = readDB();
+    const cred = db.credentials[email.toLowerCase()];
 
-      // Set session cookie
-      res.setHeader(
-        'Set-Cookie',
-        `aetherpay_session=${sessionToken}; Path=/; SameSite=Lax; Max-Age=86400`
-      );
-
-      return res.json({
-        success: true,
-        token: sessionToken,
-        expiresAt,
-        message: 'Production session cookie issued',
-      });
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message || 'Login session error' });
+    if (!cred || !(await bcrypt.compare(password, cred.passwordHash))) {
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
-  });
 
-  // 2. Auth Register: issues session cookie
-  app.post('/api/auth/register', (req, res) => {
-    try {
-      const { email, token, userId } = req.body;
-      const sessionToken = token || `tok_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
+    const sessionToken = `tok_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const expiresAt = Date.now() + 24 * 60 * 60 * 1000;
 
-      serverSessions.set(sessionToken, {
-        token: sessionToken,
-        email: email || '',
-        userId: userId || '',
-        createdAt: Date.now(),
-        expiresAt,
-      });
+    serverSessions.set(sessionToken, {
+      token: sessionToken,
+      email: cred.email,
+      userId: cred.userId,
+      createdAt: Date.now(),
+      expiresAt,
+    });
 
-      res.setHeader(
-        'Set-Cookie',
-        `aetherpay_session=${sessionToken}; Path=/; SameSite=Lax; Max-Age=86400`
-      );
+    res.setHeader('Set-Cookie', `aetherpay_session=${sessionToken}; Path=/; SameSite=Lax; Max-Age=86400`);
+    return res.json({ success: true, userId: cred.userId });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Login error' });
+  }
+});
 
-      return res.json({
-        success: true,
-        token: sessionToken,
-        expiresAt,
-      });
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message || 'Register session error' });
+// 2. Auth Register: hashes password and saves to server-side DB
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password, userId, displayName } = req.body;
+    const db = readDB();
+    if (db.credentials[email.toLowerCase()]) {
+      return res.status(400).json({ error: 'User already exists' });
     }
-  });
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    db.credentials[email.toLowerCase()] = { email: email.toLowerCase(), passwordHash, userId };
+    writeDB(db);
+
+    const sessionToken = `tok_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    serverSessions.set(sessionToken, { token: sessionToken, email: email.toLowerCase(), userId, createdAt: Date.now(), expiresAt: Date.now() + 86400000 });
+
+    res.setHeader('Set-Cookie', `aetherpay_session=${sessionToken}; Path=/; SameSite=Lax; Max-Age=86400`);
+    return res.json({ success: true, userId });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Register error' });
+  }
+});
 
   // 3. Auth Session: validates session cookie
   app.get('/api/auth/session', (req, res) => {

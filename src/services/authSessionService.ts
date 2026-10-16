@@ -3,7 +3,13 @@
 
 import { UserProfile, UserRole } from '../types';
 import { INITIAL_USERS } from './seedData';
-import { PREDEFINED_ADMINS } from './firebase';
+
+export const PREDEFINED_ADMINS = [
+  'blithesweeps@gmail.com',
+  'sachet61@gmail.com',
+  'admin@aetherpay.com',
+  'support@aetherpay.com',
+];
 
 export interface UserSession {
   sessionId: string;

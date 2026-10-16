@@ -9,6 +9,7 @@ import {
   WithdrawalRequest,
 } from '../../types';
 import { dataService } from '../../services/dataService';
+import { supabase } from '../../services/supabaseClient';
 import { ChatTransactionCard } from '../../components/chat/ChatTransactionCard';
 import {
   Search,
@@ -119,6 +120,25 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     const handleSync = () => loadData();
     window.addEventListener('aetherpay_state_changed', handleSync);
     return () => window.removeEventListener('aetherpay_state_changed', handleSync);
+  }, [selectedConvId]);
+
+  // Realtime subscription via Supabase Channel
+  useEffect(() => {
+    if (!selectedConvId) return;
+    const channel = supabase.channel(`room_${selectedConvId}`)
+      .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
+        if (payload && payload.id) {
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === payload.id)) return prev;
+            return [...prev, payload];
+          });
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [selectedConvId]);
 
   useEffect(() => {

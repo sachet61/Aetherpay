@@ -122,7 +122,7 @@ const QrCodeUploadBox: React.FC<QrCodeUploadBoxProps> = ({
   };
 
   const uploadData = async (dataUrl: string) => {
-    setStatusMsg({ text: 'Saving to server storage & Firestore database...', type: 'info' });
+    setStatusMsg({ text: 'Saving to server storage & Supabase database...', type: 'info' });
     try {
       const res = await fetch('/api/upload-qr', {
         method: 'POST',
@@ -136,14 +136,14 @@ const QrCodeUploadBox: React.FC<QrCodeUploadBoxProps> = ({
         onChange(serverUrl);
         if (onDirectSave) onDirectSave();
         setStatusMsg({
-          text: `QR image uploaded! Saved to server storage (${serverUrl}) and Firestore database.`,
+          text: `QR image uploaded! Saved to server storage (${serverUrl}) and Supabase database.`,
           type: 'success',
         });
       } else {
         onChange(dataUrl);
         if (onDirectSave) onDirectSave();
         setStatusMsg({
-          text: 'Saved directly to Firestore database storage.',
+          text: 'Saved directly to database storage.',
           type: 'success',
         });
       }
@@ -151,7 +151,7 @@ const QrCodeUploadBox: React.FC<QrCodeUploadBoxProps> = ({
       onChange(dataUrl);
       if (onDirectSave) onDirectSave();
       setStatusMsg({
-        text: 'Saved directly to Firestore database storage.',
+        text: 'Saved directly to database storage.',
         type: 'success',
       });
     } finally {
@@ -300,7 +300,7 @@ const QrCodeUploadBox: React.FC<QrCodeUploadBoxProps> = ({
           </div>
 
           <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-800/80 text-[10px] text-slate-400 border border-slate-700/60">
-            <span>Stores in Server Repo Storage & Firestore Database</span>
+            <span>Stores in Server Repo Storage & Supabase Database</span>
           </div>
         </div>
       )}
@@ -929,7 +929,7 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
                 value={cashAppMethod.qrCodeUrl || ''}
                 placeholder="Leave empty for link-only, or upload CashApp QR from PC/mobile"
                 filePrefix="cashapp_qr"
-                helpText="Upload CashApp QR code image from your PC or mobile phone. It is stored in server repo storage (/images/qr/...) and saved in the Firestore database."
+                helpText="Upload CashApp QR code image from your PC or mobile phone. It is stored in server repo storage (/images/qr/...) and saved in the Supabase database."
                 onChange={(newUrl) => {
                   const updatedMethods = config.paymentMethods.map((pm) =>
                     pm.id === cashAppMethod.id ? { ...pm, qrCodeUrl: newUrl } : pm
@@ -1075,7 +1075,7 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
                 value={chimeMethod.chimeQrCodeUrl || ''}
                 placeholder="Leave empty for auto-generated chime:// QR code, or upload from PC/mobile"
                 filePrefix="chime_qr"
-                helpText="Upload a Chime QR code image from your PC or take a photo/choose from gallery on mobile. It is saved to the server repo storage (/images/qr/...) and synced directly to the Firestore database."
+                helpText="Upload a Chime QR code image from your PC or take a photo/choose from gallery on mobile. It is saved to the server repo storage (/images/qr/...) and synced directly to the Supabase database."
                 onChange={(newUrl) => {
                   const updatedMethods = config.paymentMethods.map((pm) =>
                     pm.id === chimeMethod.id ? { ...pm, chimeQrCodeUrl: newUrl } : pm

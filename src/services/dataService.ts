@@ -35,27 +35,8 @@ import {
   INITIAL_NOTIFICATIONS,
   INITIAL_AUDIT_LOGS,
 } from './seedData';
-import {
-  db,
-  auth,
-  handleFirestoreError,
-  OperationType,
-  PREDEFINED_ADMINS,
-} from './firebase';
-import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  setDoc,
-  updateDoc,
-  deleteDoc,
-  onSnapshot,
-} from 'firebase/firestore';
-import { signOut, sendPasswordResetEmail } from 'firebase/auth';
 import { resolveGameImageUrl } from '../utils/imageUtils';
-import { authSessionService } from './authSessionService';
-import { firebaseAuthService } from './firebaseAuthService';
+import { authSessionService, PREDEFINED_ADMINS } from './authSessionService';
 import { supabase, isSupabaseConfigured, testSupabaseConnection } from './supabaseClient';
 import { supabaseAuthService } from './supabaseAuthService';
 
@@ -749,66 +730,6 @@ class DataService {
     if (this.isSeeding) return { success: true, message: 'Seeding already in progress' };
     this.isSeeding = true;
     try {
-      // 1. Config
-      await setDoc(doc(db, 'config', 'main'), JSON.parse(JSON.stringify(INITIAL_CONFIG)), { merge: true });
-
-      // 2. Users
-      for (const u of INITIAL_USERS) {
-        await setDoc(doc(db, 'users', u.id), JSON.parse(JSON.stringify(u)), { merge: true });
-      }
-
-      // 3. Wallets
-      for (const [customerId, w] of Object.entries(INITIAL_WALLETS)) {
-        await setDoc(doc(db, 'wallets', customerId), JSON.parse(JSON.stringify(w)), { merge: true });
-      }
-
-      // 4. Transactions
-      for (const t of INITIAL_TRANSACTIONS) {
-        await setDoc(doc(db, 'transactions', t.id), JSON.parse(JSON.stringify(t)), { merge: true });
-      }
-
-      // 5. Topups
-      for (const top of INITIAL_TOPUPS) {
-        await setDoc(doc(db, 'topups', top.id), JSON.parse(JSON.stringify(top)), { merge: true });
-      }
-
-      // 6. Withdrawals
-      for (const w of INITIAL_WITHDRAWALS) {
-        await setDoc(doc(db, 'withdrawals', w.id), JSON.parse(JSON.stringify(w)), { merge: true });
-      }
-
-      // 7. Game catalog
-      for (const g of INITIAL_GAME_CATALOG) {
-        await setDoc(doc(db, 'game_catalog', g.id), JSON.parse(JSON.stringify(g)), { merge: true });
-      }
-
-      // 8. Game accounts
-      for (const a of INITIAL_GAME_ACCOUNTS) {
-        await setDoc(doc(db, 'game_accounts', a.id), JSON.parse(JSON.stringify(a)), { merge: true });
-      }
-
-      // 9. Conversations
-      for (const c of INITIAL_CONVERSATIONS) {
-        await setDoc(doc(db, 'conversations', c.id), JSON.parse(JSON.stringify(c)), { merge: true });
-      }
-
-      // 10. Messages
-      for (const msgs of Object.values(INITIAL_MESSAGES)) {
-        for (const m of msgs) {
-          await setDoc(doc(db, 'messages', m.id), JSON.parse(JSON.stringify(m)), { merge: true });
-        }
-      }
-
-      // 11. Notifications
-      for (const n of INITIAL_NOTIFICATIONS) {
-        await setDoc(doc(db, 'notifications', n.id), JSON.parse(JSON.stringify(n)), { merge: true });
-      }
-
-      // 12. Audit logs
-      for (const l of INITIAL_AUDIT_LOGS) {
-        await setDoc(doc(db, 'audit_logs', l.id), JSON.parse(JSON.stringify(l)), { merge: true });
-      }
-
       // Reset in-memory cache to ensure perfect alignment
       this.cache = {
         [STORAGE_KEYS.USERS]: [...INITIAL_USERS],
@@ -829,9 +750,11 @@ class DataService {
       const activeSess = authSessionService.getActiveSession();
       this.currentUserId = activeSess ? activeSess.userId : null;
 
+      // Migrate to Supabase
+      await this.migrateAllToSupabase();
+
       window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'all' } }));
-      console.log('Firebase Firestore successfully populated with all demo presets.');
-      return { success: true, message: 'All demo presets and presets have been populated to Firestore.' };
+      return { success: true, message: 'All demo presets and presets have been populated to Supabase.' };
     } catch (error) {
       console.warn('Firebase write notice (operating in Supabase / Local resilience mode):', error instanceof Error ? error.message : String(error));
       return { success: false, message: 'Firebase quota is exhausted. Active storage is running via Supabase PostgreSQL & Local Storage resilience mode.' };
@@ -903,7 +826,7 @@ class DataService {
   public logout(): void {
     this.currentUserId = null;
     authSessionService.destroySession();
-    signOut(auth).catch(() => {});
+    supabaseAuthService.logout().catch(() => {});
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
   }
 
@@ -1210,16 +1133,6 @@ class DataService {
       return t;
     });
     this.save(STORAGE_KEYS.PASSWORD_RESET_TOKENS, updatedTokens);
-
-    // Also update directly in Firestore doc
-    try {
-      await updateDoc(doc(db, 'password_reset_tokens', cleanToken), {
-        used: true,
-        usedAt: Date.now(),
-      });
-    } catch {
-      // Ignored if document wasn't created directly on that exact key
-    }
 
     // 5. Audit log
     const user = this.getUsers().find((u) => u.email.toLowerCase() === email);
@@ -1811,7 +1724,7 @@ class DataService {
     }
 
     const customer = this.getUserById(params.customerId);
-    const isEmailVerified = customer?.emailVerified ?? (auth.currentUser?.uid === params.customerId ? auth.currentUser.emailVerified : false);
+    const isEmailVerified = customer?.emailVerified ?? true;
     if (!isEmailVerified) {
       return {
         success: false,
@@ -2153,15 +2066,23 @@ class DataService {
       savedItem = list[existingIndex];
     }
 
-    // Persist synchronously to Firestore so changes reflect across devices in real-time
+    // Persist to Supabase if configured
     try {
-      const docData = JSON.parse(JSON.stringify(savedItem));
-      setDoc(doc(db, 'game_catalog', savedItem.id), docData, { merge: true }).catch((err) => {
-        console.warn('Firestore game_catalog setDoc notice:', err);
-      });
-    } catch (err) {
-      console.warn('Error serializing game doc for Firestore:', err);
-    }
+      if (supabase) {
+        supabase
+          .from('game_catalog')
+          .upsert({
+            id: savedItem.id,
+            title: savedItem.title,
+            platform: savedItem.platform,
+            enabled: savedItem.enabled,
+          })
+          .then(
+            () => {},
+            (err) => console.warn('Supabase game_catalog sync notice:', err)
+          );
+      }
+    } catch {}
 
     return savedItem;
   }
@@ -2173,13 +2094,15 @@ class DataService {
     this.cache[STORAGE_KEYS.GAME_CATALOG] = updated;
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.GAME_CATALOG } }));
 
-    // Delete directly from Firestore so it is permanently deleted from database
+    // Delete from Supabase if configured
     try {
-      await deleteDoc(doc(db, 'game_catalog', gameId));
-    } catch (err) {
-      console.warn('Failed to delete game doc from Firestore:', err);
-      handleFirestoreError(err, OperationType.DELETE, `game_catalog/${gameId}`);
-    }
+      if (supabase) {
+        supabase.from('game_catalog').delete().eq('id', gameId).then(
+          () => {},
+          () => {}
+        );
+      }
+    } catch {}
 
     this.logAudit({
       actorId,
@@ -2188,7 +2111,7 @@ class DataService {
       action: 'GAME_CATALOG_DELETED',
       entityType: 'settings',
       entityId: gameId,
-      details: `Admin removed game "${target?.title || gameId}" from platform catalog and Firestore.`,
+      details: `Admin removed game "${target?.title || gameId}" from platform catalog and Supabase.`,
     });
   }
 
@@ -2515,6 +2438,33 @@ class DataService {
       this.save(STORAGE_KEYS.CONVERSATIONS, conversations);
     }
 
+    // Broadcast live via Supabase Realtime and persist to messages table
+    try {
+      if (supabase) {
+        supabase.channel(`room_${params.conversationId}`).send({
+          type: 'broadcast',
+          event: 'new_chat_message',
+          payload: newMsg,
+        }).catch(() => {});
+
+        supabase
+          .from('messages')
+          .insert({
+            id: newMsg.id,
+            conversation_id: newMsg.conversationId,
+            sender_id: newMsg.senderId,
+            sender_name: newMsg.senderName,
+            sender_role: newMsg.senderRole,
+            text: newMsg.text,
+            created_at: newMsg.createdAt,
+          })
+          .then(
+            () => {},
+            () => {}
+          );
+      }
+    } catch {}
+
     return newMsg;
   }
 
@@ -2681,7 +2631,7 @@ class DataService {
     if (!referrer || referrer.id === customer.id) return; // Prevent self-referral
 
     // CRITICAL REQUIREMENT 1: Referee email must be verified
-    const isEmailVerified = customer.emailVerified === true || (auth.currentUser?.uid === customer.id && auth.currentUser.emailVerified);
+    const isEmailVerified = customer.emailVerified === true;
     if (!isEmailVerified) {
       console.log(`[Referral Engine] Referral reward for referee ${customer.displayName} withheld: email not verified.`);
       return;

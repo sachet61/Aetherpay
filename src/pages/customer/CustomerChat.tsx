@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { UserProfile, ChatMessage, SupportConversation, GameCatalogItem } from '../../types';
 import { dataService } from '../../services/dataService';
+import { supabase } from '../../services/supabaseClient';
 import { ChatTransactionCard } from '../../components/chat/ChatTransactionCard';
 import {
   Send,
@@ -57,7 +58,23 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     };
 
     window.addEventListener('aetherpay_state_changed', handleSync);
-    return () => window.removeEventListener('aetherpay_state_changed', handleSync);
+
+    // Supabase Realtime channel subscription for instant cross-tab/device messaging
+    const channel = supabase.channel(`room_${conv.id}`)
+      .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
+        if (payload && payload.id) {
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === payload.id)) return prev;
+            return [...prev, payload];
+          });
+        }
+      })
+      .subscribe();
+
+    return () => {
+      window.removeEventListener('aetherpay_state_changed', handleSync);
+      supabase.removeChannel(channel);
+    };
   }, [currentUser.id]);
 
   useEffect(() => {

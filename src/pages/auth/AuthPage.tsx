@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { UserProfile, UserRole, GameCatalogItem } from '../../types';
 import { dataService } from '../../services/dataService';
+import { supabaseAuthService } from '../../services/supabaseAuthService';
 import {
   Play,
   Zap,
@@ -66,6 +67,25 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
   useEffect(() => {
     const catalog = dataService.getGameCatalog().filter((g) => g.enabled !== false);
     setGames(catalog);
+
+    // Password recovery listener
+    const handleRecovery = () => {
+      setAuthMode('reset');
+      setErrorMessage(null);
+      setInfoMessage('Password recovery session initiated. Please set your new password below.');
+    };
+
+    window.addEventListener('supabase_password_recovery', handleRecovery);
+
+    // Also check window hash directly on mount
+    if (typeof window !== 'undefined') {
+      const hash = window.location.hash || '';
+      if (hash.includes('type=recovery') || hash.includes('access_token')) {
+        handleRecovery();
+      }
+    }
+
+    return () => window.removeEventListener('supabase_password_recovery', handleRecovery);
   }, []);
 
   // Live cashouts feed entries
@@ -86,7 +106,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     authCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
-  // Firebase Authentication Sign-In Flow
+  // Supabase Authentication Sign-In Flow
   const handleEmailSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -100,7 +120,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     setIsLoading(true);
 
     try {
-      const authRes = await dataService.loginWithFirebaseAuth(email.trim(), password);
+      const authRes = await supabaseAuthService.loginWithEmail(email.trim(), password);
 
       if (authRes.success && authRes.user) {
         onLoginSuccess(authRes.user);
@@ -108,7 +128,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
       }
 
       setErrorMessage(
-        authRes.message || 'Invalid email or password. Please verify your credentials.'
+        authRes.error || 'Invalid email or password. Please verify your credentials.'
       );
     } catch (err: any) {
       setErrorMessage(err.message || 'Authentication error.');
@@ -117,9 +137,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     }
   };
 
-
-
-  // Pure Firebase Authentication Registration Flow
+  // Supabase Authentication Registration Flow
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -138,18 +156,23 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     setIsLoading(true);
 
     try {
-      const res = await dataService.registerWithFirebaseAuth(
-        signupEmail.trim(),
-        signupPassword,
-        signupName.trim(),
-        signupPhone.trim() || undefined,
-        signupReferral.trim() || undefined
-      );
+      const res = await supabaseAuthService.registerWithEmail({
+        email: signupEmail.trim(),
+        password: signupPassword,
+        displayName: signupName.trim(),
+        phone: signupPhone.trim() || undefined,
+        referralCode: signupReferral.trim() || undefined,
+      });
 
       if (res.success && res.user) {
-        onLoginSuccess(res.user);
+        if (res.message && res.message.includes('check your email')) {
+          setInfoMessage(res.message);
+          setAuthMode('signin');
+        } else {
+          onLoginSuccess(res.user);
+        }
       } else {
-        setErrorMessage(res.message || 'Registration failed.');
+        setErrorMessage(res.error || 'Registration failed.');
       }
     } catch (err: any) {
       setErrorMessage(err.message || 'Registration failed.');
