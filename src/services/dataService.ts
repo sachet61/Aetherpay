@@ -155,28 +155,48 @@ class DataService {
       let changed = false;
 
       if (convsRes.data && convsRes.data.length > 0) {
-        const convList: SupportConversation[] = convsRes.data.map((c: any) => ({
-          id: c.id,
-          customerId: c.customer_id,
-          customerName: c.customer_name,
-          customerEmail: c.customer_email || `${c.customer_id}@player.com`,
-          assignedAgentId: c.agent_id || undefined,
-          assignedAgentName: c.agent_name || undefined,
-          status: c.status || 'open',
-          lastMessageText: c.last_message || '',
-          lastMessageTimestamp: c.last_message_at || new Date().toISOString(),
-          unreadCountCustomer: 0,
-          unreadCountStaff: 0,
-          createdAt: c.created_at || new Date().toISOString(),
-          updatedAt: c.last_message_at || c.created_at || new Date().toISOString(),
-        }));
-        this.cache[STORAGE_KEYS.CONVERSATIONS] = convList;
-        this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, convList);
+        const remoteConvs: SupportConversation[] = convsRes.data.map((c: any) => {
+          const user = this.getUserById(c.customer_id);
+          return {
+            id: c.id,
+            customerId: c.customer_id,
+            customerName: c.customer_name || user?.displayName || 'Customer',
+            customerEmail: user?.email || c.customer_email || `${c.customer_id}@player.com`,
+            assignedAgentId: c.agent_id || undefined,
+            assignedAgentName: c.agent_name || undefined,
+            status: c.status || 'open',
+            lastMessageText: c.last_message || '',
+            lastMessageTimestamp: c.last_message_at || new Date().toISOString(),
+            unreadCountCustomer: 0,
+            unreadCountStaff: 0,
+            createdAt: c.created_at || new Date().toISOString(),
+            updatedAt: c.last_message_at || c.created_at || new Date().toISOString(),
+          };
+        });
+
+        // Safely merge with current conversations so in-flight items aren't discarded
+        const currentList = this.getConversations();
+        const convMap = new Map<string, SupportConversation>();
+        for (const c of remoteConvs) {
+          convMap.set(c.id, c);
+        }
+        for (const c of currentList) {
+          if (!convMap.has(c.id)) {
+            convMap.set(c.id, c);
+          }
+        }
+        const mergedList = Array.from(convMap.values()).sort(
+          (a, b) => new Date(b.lastMessageTimestamp).getTime() - new Date(a.lastMessageTimestamp).getTime()
+        );
+        this.cache[STORAGE_KEYS.CONVERSATIONS] = mergedList;
+        this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, mergedList);
         changed = true;
       }
 
       if (msgsRes.data && msgsRes.data.length > 0) {
-        const msgMap: Record<string, ChatMessage[]> = {};
+        const currentMsgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+        const msgMap: Record<string, ChatMessage[]> = { ...currentMsgs };
+
         for (const m of msgsRes.data) {
           const item: ChatMessage = {
             id: m.id,
@@ -190,8 +210,15 @@ class DataService {
             transactionData: m.transaction_data || undefined,
             createdAt: m.created_at || new Date().toISOString(),
           };
-          if (!msgMap[m.conversation_id]) msgMap[m.conversation_id] = [];
-          msgMap[m.conversation_id].push(item);
+          if (!msgMap[m.conversation_id]) {
+            msgMap[m.conversation_id] = [];
+          }
+          const idx = msgMap[m.conversation_id].findIndex((x) => x.id === item.id);
+          if (idx >= 0) {
+            msgMap[m.conversation_id][idx] = item;
+          } else {
+            msgMap[m.conversation_id].push(item);
+          }
         }
         this.cache[STORAGE_KEYS.MESSAGES] = msgMap;
         this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, msgMap);
@@ -209,15 +236,52 @@ class DataService {
   public async pollSupabaseGeneral(): Promise<void> {
     if (!supabase || !isSupabaseConfigured()) return;
     try {
-      const [topupsRes, withdrawalsRes, walletsRes, catalogRes, cashoutsRes] = await Promise.all([
+      const [topupsRes, withdrawalsRes, walletsRes, catalogRes, cashoutsRes, usersRes] = await Promise.all([
         supabase.from('topups').select('*').order('created_at', { ascending: false }),
         supabase.from('withdrawals').select('*').order('created_at', { ascending: false }),
         supabase.from('wallets').select('*'),
         supabase.from('game_catalog').select('*').order('created_at', { ascending: true }),
         supabase.from('faked_cashouts').select('*').order('timestamp', { ascending: false }).limit(40),
+        supabase.from('users').select('*'),
       ]);
 
       let changed = false;
+
+      // 1. Sync all users from Supabase so all devices and staff know about registered users
+      if (usersRes.data && usersRes.data.length > 0) {
+        const currentUsers = this.getUsers();
+        const userMap = new Map<string, UserProfile>();
+        for (const u of currentUsers) {
+          userMap.set(u.id, u);
+        }
+        for (const dbU of usersRes.data) {
+          const existing =
+            userMap.get(dbU.id) ||
+            currentUsers.find((u) => u.email.toLowerCase() === (dbU.email || '').toLowerCase());
+          const merged: UserProfile = {
+            id: dbU.id,
+            email: dbU.email,
+            displayName: dbU.display_name || existing?.displayName || dbU.email?.split('@')[0] || 'User',
+            role: (dbU.role as any) || existing?.role || 'customer',
+            phone: dbU.phone || existing?.phone,
+            avatarUrl: dbU.avatar_url || existing?.avatarUrl,
+            status: dbU.status || 'active',
+            emailVerified: Boolean(dbU.email_verified),
+            referralCode: existing?.referralCode || `REF_${dbU.id.slice(-5).toUpperCase()}`,
+            referredBy: dbU.referred_by || existing?.referredBy,
+            createdAt: dbU.created_at || existing?.createdAt || new Date().toISOString(),
+            lastLoginAt: existing?.lastLoginAt || new Date().toISOString(),
+          };
+          if (existing && existing.id !== dbU.id) {
+            userMap.delete(existing.id);
+          }
+          userMap.set(dbU.id, merged);
+        }
+        const updatedUsers = Array.from(userMap.values());
+        this.cache[STORAGE_KEYS.USERS] = updatedUsers;
+        this.saveToLocalStorage(STORAGE_KEYS.USERS, updatedUsers);
+        changed = true;
+      }
 
       if (topupsRes.data && topupsRes.data.length > 0) {
         this.cache[STORAGE_KEYS.TOPUPS] = topupsRes.data.map((t: any) => ({
@@ -465,38 +529,47 @@ class DataService {
         }));
         await supabase.from('game_accounts').upsert(rows);
       } else if (key === STORAGE_KEYS.CONVERSATIONS && Array.isArray(value)) {
-        const rows = value.map((c: SupportConversation) => ({
-          id: c.id,
-          customer_id: c.customerId,
-          customer_name: c.customerName,
-          agent_id: c.assignedAgentId || null,
-          agent_name: c.assignedAgentName || null,
-          status: c.status,
-          last_message: c.lastMessageText,
-          last_message_at: c.lastMessageTimestamp,
-          created_at: c.createdAt,
-        }));
-        await supabase.from('conversations').upsert(rows);
+        for (const c of value as SupportConversation[]) {
+          if (!c.id || !c.customerId) continue;
+          supabase
+            .from('conversations')
+            .upsert({
+              id: c.id,
+              customer_id: c.customerId,
+              customer_name: c.customerName,
+              agent_id: c.assignedAgentId || null,
+              agent_name: c.assignedAgentName || null,
+              status: c.status,
+              last_message: c.lastMessageText,
+              last_message_at: c.lastMessageTimestamp,
+              created_at: c.createdAt,
+            })
+            .then(
+              () => {},
+              (err) => console.warn('Supabase conv persist notice for ' + c.id + ':', err)
+            );
+        }
       } else if (key === STORAGE_KEYS.MESSAGES && typeof value === 'object' && value !== null) {
-        const allMsgs: any[] = [];
-        for (const msgs of Object.values(value as Record<string, ChatMessage[]>)) {
-          if (Array.isArray(msgs)) {
-            for (const m of msgs.slice(-5)) {
-              allMsgs.push({
+        for (const [convId, msgs] of Object.entries(value as Record<string, ChatMessage[]>)) {
+          if (!Array.isArray(msgs)) continue;
+          for (const m of msgs.slice(-5)) {
+            supabase
+              .from('messages')
+              .upsert({
                 id: m.id,
-                conversation_id: m.conversationId,
+                conversation_id: m.conversationId || convId,
                 sender_id: m.senderId,
                 sender_name: m.senderName,
                 sender_role: m.senderRole,
                 content: m.text,
                 transaction_data: m.transactionData || null,
                 created_at: m.createdAt,
-              });
-            }
+              })
+              .then(
+                () => {},
+                (err) => console.warn('Supabase msg persist notice for ' + m.id + ':', err)
+              );
           }
-        }
-        if (allMsgs.length > 0) {
-          await supabase.from('messages').upsert(allMsgs);
         }
       } else if (key === STORAGE_KEYS.FAKED_CASHOUTS && Array.isArray(value)) {
         const rows = value.slice(0, 20).map((f: CashoutFeedItem) => ({
@@ -2403,6 +2476,111 @@ class DataService {
     return { success: true, message: `Successfully assigned credentials for ${acc.gameName}. Player notified.` };
   }
 
+  // Data Migration for user account ID reconciliation (e.g. Supabase recreation / session matching)
+  public migrateUserEntityIds(oldId: string, newId: string): void {
+    if (!oldId || !newId || oldId === newId) return;
+    console.log(`[SwiftSweeps] Migrating user data from old ID ${oldId} to canonical ID ${newId}`);
+
+    // 1. Users
+    const users = this.getUsers();
+    let usersUpdated = false;
+    for (const u of users) {
+      if (u.id === oldId) {
+        u.id = newId;
+        usersUpdated = true;
+      }
+    }
+    if (usersUpdated) {
+      this.cache[STORAGE_KEYS.USERS] = users;
+      this.saveToLocalStorage(STORAGE_KEYS.USERS, users);
+    }
+
+    // 2. Wallets
+    const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
+    if (wallets[oldId]) {
+      wallets[newId] = {
+        ...wallets[oldId],
+        customerId: newId,
+      };
+      delete wallets[oldId];
+      this.cache[STORAGE_KEYS.WALLETS] = wallets;
+      this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
+    }
+
+    // 3. Conversations
+    const convs = this.getConversations();
+    let convsUpdated = false;
+    for (const c of convs) {
+      if (c.customerId === oldId) {
+        c.customerId = newId;
+        convsUpdated = true;
+      }
+    }
+    if (convsUpdated) {
+      this.cache[STORAGE_KEYS.CONVERSATIONS] = convs;
+      this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, convs);
+    }
+
+    // 4. Messages
+    const msgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+    let msgsUpdated = false;
+    for (const convId of Object.keys(msgs)) {
+      for (const m of msgs[convId]) {
+        if (m.senderId === oldId) {
+          m.senderId = newId;
+          msgsUpdated = true;
+        }
+      }
+    }
+    if (msgsUpdated) {
+      this.cache[STORAGE_KEYS.MESSAGES] = msgs;
+      this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, msgs);
+    }
+
+    // 5. Game Accounts
+    const accounts = this.load<GameAccount[]>(STORAGE_KEYS.GAME_ACCOUNTS, INITIAL_GAME_ACCOUNTS);
+    let accountsUpdated = false;
+    for (const a of accounts) {
+      if (a.customerId === oldId) {
+        a.customerId = newId;
+        accountsUpdated = true;
+      }
+    }
+    if (accountsUpdated) {
+      this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = accounts;
+      this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, accounts);
+    }
+
+    // 6. Top-Ups & Withdrawals
+    const topups = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
+    let topupsUpdated = false;
+    for (const t of topups) {
+      if (t.customerId === oldId) {
+        t.customerId = newId;
+        topupsUpdated = true;
+      }
+    }
+    if (topupsUpdated) {
+      this.cache[STORAGE_KEYS.TOPUPS] = topups;
+      this.saveToLocalStorage(STORAGE_KEYS.TOPUPS, topups);
+    }
+
+    const withdrawals = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
+    let wdrUpdated = false;
+    for (const w of withdrawals) {
+      if (w.customerId === oldId) {
+        w.customerId = newId;
+        wdrUpdated = true;
+      }
+    }
+    if (wdrUpdated) {
+      this.cache[STORAGE_KEYS.WITHDRAWALS] = withdrawals;
+      this.saveToLocalStorage(STORAGE_KEYS.WITHDRAWALS, withdrawals);
+    }
+
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_migrated' } }));
+  }
+
   // Real-Time Chat & Customer Support Center
   public getConversations(): SupportConversation[] {
     return this.load<SupportConversation[]>(STORAGE_KEYS.CONVERSATIONS, INITIAL_CONVERSATIONS).sort(
@@ -2412,9 +2590,23 @@ class DataService {
 
   public getOrCreateConversationForCustomer(customerId: string, customerName: string): SupportConversation {
     const list = this.getConversations();
+    const user = this.getUserById(customerId);
+    const userEmail = user?.email?.toLowerCase();
+
+    // 1. First look by customerId
     let conv = list.find((c) => c.customerId === customerId);
+
+    // 2. If not found by ID, look by email (handles ID migrations / account recreation)
+    if (!conv && userEmail) {
+      conv = list.find((c) => c.customerEmail && c.customerEmail.toLowerCase() === userEmail);
+      if (conv) {
+        conv.customerId = customerId;
+        conv.customerName = user?.displayName || customerName;
+        this.save(STORAGE_KEYS.CONVERSATIONS, list);
+      }
+    }
+
     if (!conv) {
-      const user = this.getUserById(customerId);
       conv = {
         id: `conv_${Date.now()}`,
         customerId,
@@ -2443,6 +2635,28 @@ class DataService {
         isInternalNote: false,
       });
     }
+
+    // Ensure conversation is immediately recorded in Supabase PostgreSQL
+    if (supabase && isSupabaseConfigured()) {
+      supabase
+        .from('conversations')
+        .upsert({
+          id: conv.id,
+          customer_id: conv.customerId,
+          customer_name: conv.customerName,
+          agent_id: conv.assignedAgentId || null,
+          agent_name: conv.assignedAgentName || null,
+          status: conv.status,
+          last_message: conv.lastMessageText,
+          last_message_at: conv.lastMessageTimestamp,
+          created_at: conv.createdAt,
+        })
+        .then(
+          () => {},
+          (err) => console.warn('Supabase conv sync notice:', err)
+        );
+    }
+
     return conv;
   }
 
@@ -2536,9 +2750,10 @@ class DataService {
       this.save(STORAGE_KEYS.CONVERSATIONS, conversations);
     }
 
-    // Broadcast live via Supabase Realtime and persist to messages table
+    // Broadcast live via Supabase Realtime (both room-specific and staff channel)
     try {
-      if (supabase) {
+      if (supabase && isSupabaseConfigured()) {
+        // 1. Room specific broadcast
         const channel = supabase.channel(`room_${params.conversationId}`);
         if ((channel as any).state === 'joined') {
           channel
@@ -2562,16 +2777,41 @@ class DataService {
           });
         }
 
+        // 2. Global staff admin notification channel
+        const staffChannel = supabase.channel('room_admin_support');
+        if ((staffChannel as any).state === 'joined') {
+          staffChannel
+            .send({
+              type: 'broadcast',
+              event: 'new_chat_message',
+              payload: newMsg,
+            })
+            .catch(() => {});
+        } else {
+          staffChannel.subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+              staffChannel
+                .send({
+                  type: 'broadcast',
+                  event: 'new_chat_message',
+                  payload: newMsg,
+                })
+                .catch(() => {});
+            }
+          });
+        }
+
+        // 3. Persist to messages table with correct PostgreSQL schema columns (content, not text)
         supabase
           .from('messages')
-          .insert({
+          .upsert({
             id: newMsg.id,
             conversation_id: newMsg.conversationId,
             sender_id: newMsg.senderId,
             sender_name: newMsg.senderName,
             sender_role: newMsg.senderRole,
             content: newMsg.text,
-            text: newMsg.text,
+            transaction_data: newMsg.transactionData || null,
             created_at: newMsg.createdAt,
           })
           .then(

@@ -88,6 +88,12 @@ class SupabaseAuthService {
             };
             await this.syncProfileAndWallet(userProfile);
           } else {
+            // Reconcile and migrate if user profile ID differs from Supabase canonical ID
+            if (userProfile.id !== user.id) {
+              const oldId = userProfile.id;
+              userProfile.id = user.id;
+              dataService.migrateUserEntityIds(oldId, user.id);
+            }
             // Update emailVerified dynamically from active Supabase session
             userProfile.emailVerified = isConfirmed;
             dataService.registerUser(userProfile);
@@ -114,6 +120,11 @@ class SupabaseAuthService {
                 dataService.getUserById(session.user.id) ||
                 dataService.getUsers().find((u) => u.email.toLowerCase() === cleanEmail);
               if (userProfile) {
+                if (userProfile.id !== session.user.id) {
+                  const oldId = userProfile.id;
+                  userProfile.id = session.user.id;
+                  dataService.migrateUserEntityIds(oldId, session.user.id);
+                }
                 userProfile.emailVerified = isConfirmed;
                 dataService.registerUser(userProfile);
                 authSessionService.createSessionForUser(
@@ -274,6 +285,11 @@ class SupabaseAuthService {
         };
         await this.syncProfileAndWallet(userProfile);
       } else {
+        if (userProfile.id !== data.user.id) {
+          const oldId = userProfile.id;
+          userProfile.id = data.user.id;
+          dataService.migrateUserEntityIds(oldId, data.user.id);
+        }
         userProfile.emailVerified = isConfirmed;
         dataService.registerUser(userProfile);
       }

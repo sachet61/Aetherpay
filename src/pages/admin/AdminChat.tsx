@@ -154,16 +154,44 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     };
   }, [selectedConvId]);
 
+  // Global staff channel to hear incoming messages across all conversations in real time
+  useEffect(() => {
+    const staffChannel = supabase.channel('room_admin_support')
+      .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
+        if (payload && payload.id) {
+          dataService.appendIncomingMessage(payload);
+          loadData();
+          if (payload.conversationId === selectedConvId) {
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === payload.id)) return prev;
+              return [...prev, payload];
+            });
+          }
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(staffChannel);
+    };
+  }, [selectedConvId]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   const activeConv = conversations.find((c) => c.id === selectedConvId);
-  const customerProfile = activeConv ? dataService.getUserById(activeConv.customerId) : undefined;
-  const customerWallet = activeConv ? dataService.getWallet(activeConv.customerId) : undefined;
-  const customerGameAccounts = activeConv ? dataService.getGameAccounts(activeConv.customerId) : [];
-  const customerTopUps = activeConv ? dataService.getTopUpRequests(activeConv.customerId) : [];
-  const customerWithdrawals = activeConv ? dataService.getWithdrawalRequests(activeConv.customerId) : [];
+  const customerProfile = activeConv
+    ? dataService.getUserById(activeConv.customerId) ||
+      (activeConv.customerEmail
+        ? dataService.getUsers().find((u) => u.email.toLowerCase() === activeConv.customerEmail?.toLowerCase())
+        : undefined)
+    : undefined;
+  const canonicalCustomerId = customerProfile?.id || activeConv?.customerId || '';
+  const customerWallet = canonicalCustomerId ? dataService.getWallet(canonicalCustomerId) : undefined;
+  const customerGameAccounts = canonicalCustomerId ? dataService.getGameAccounts(canonicalCustomerId) : [];
+  const customerTopUps = canonicalCustomerId ? dataService.getTopUpRequests(canonicalCustomerId) : [];
+  const customerWithdrawals = canonicalCustomerId ? dataService.getWithdrawalRequests(canonicalCustomerId) : [];
 
   const pendingWithdrawalForCustomer = customerWithdrawals.find(
     (w) => w.status === 'submitted' || w.status === 'processing'
