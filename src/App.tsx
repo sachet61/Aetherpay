@@ -34,6 +34,7 @@ import { AdminGameCatalog } from './pages/admin/AdminGameCatalog';
 import { AdminGameCredentials } from './pages/admin/AdminGameCredentials';
 import { AdminConfig } from './pages/admin/AdminConfig';
 import { AdminAudit } from './pages/admin/AdminAudit';
+import { AdminUsers } from './pages/admin/AdminUsers';
 
 import {
   Gamepad2,
@@ -320,6 +321,14 @@ export default function App() {
                 onNavigateTab={handleNavigateTab}
                 highlightConvId={tabMeta?.highlightConvId}
                 onActiveChatChange={(isOpen) => setIsMobileChatActive(isOpen)}
+              />
+            )}
+
+            {/* User Directory & Staff Governance */}
+            {activeTab === 'ops_users' && (
+              <AdminUsers
+                currentUser={currentUser}
+                onNavigateTab={handleNavigateTab}
               />
             )}
 

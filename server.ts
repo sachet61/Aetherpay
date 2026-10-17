@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import { createClient } from '@supabase/supabase-js';
+import { telegramEngine } from './src/server/telegramEngine';
 
 dotenv.config();
 
@@ -511,6 +512,51 @@ app.post('/api/auth/register', async (req, res) => {
     }
   });
 
+  // ==========================================
+  // Telegram Bot 24/7 Engine Endpoints
+  // ==========================================
+
+  // Get current engine status
+  app.get('/api/telegram/status', (_req, res) => {
+    return res.json(telegramEngine.getStatus());
+  });
+
+  // Save & dynamically reload Telegram Bot configuration
+  app.post('/api/telegram/config', async (req, res) => {
+    try {
+      const { botToken, channelId, enabled } = req.body;
+      const status = await telegramEngine.reloadConfig(
+        botToken || '',
+        channelId || '',
+        enabled !== false
+      );
+      return res.json({ success: true, status });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to update Telegram configuration' });
+    }
+  });
+
+  // Test Telegram Bot Connection
+  app.post('/api/telegram/test', async (req, res) => {
+    try {
+      const { botToken, channelId } = req.body;
+      const result = await telegramEngine.testConnection(botToken || '', channelId || '');
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // Send Event Notification to Telegram Channel
+  app.post('/api/telegram/notify', async (req, res) => {
+    try {
+      const result = await telegramEngine.sendNotification(req.body);
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   // Create Vite server in middleware mode
   const vite = await createViteServer({
     server: { middlewareMode: true },
@@ -575,6 +621,10 @@ app.post('/api/auth/register', async (req, res) => {
   const port = Number(process.env.PORT) || 3000;
   app.listen(port, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${port}`);
+    // Start continuous 24/7 background Telegram polling
+    telegramEngine.init(supabaseAdmin).catch((err) => {
+      console.warn('[TelegramEngine] Background startup warning:', err);
+    });
   });
 }
 

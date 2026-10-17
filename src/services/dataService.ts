@@ -62,17 +62,17 @@ const STORAGE_KEYS = {
 class DataService {
   private isDemoMode = false;
   private cache: Record<string, any> = {
-    [STORAGE_KEYS.USERS]: [...INITIAL_USERS],
-    [STORAGE_KEYS.WALLETS]: { ...INITIAL_WALLETS },
-    [STORAGE_KEYS.TRANSACTIONS]: [...INITIAL_TRANSACTIONS],
-    [STORAGE_KEYS.TOPUPS]: [...INITIAL_TOPUPS],
-    [STORAGE_KEYS.WITHDRAWALS]: [...INITIAL_WITHDRAWALS],
+    [STORAGE_KEYS.USERS]: [],
+    [STORAGE_KEYS.WALLETS]: {},
+    [STORAGE_KEYS.TRANSACTIONS]: [],
+    [STORAGE_KEYS.TOPUPS]: [],
+    [STORAGE_KEYS.WITHDRAWALS]: [],
     [STORAGE_KEYS.GAME_CATALOG]: [...INITIAL_GAME_CATALOG],
-    [STORAGE_KEYS.GAME_ACCOUNTS]: [...INITIAL_GAME_ACCOUNTS],
-    [STORAGE_KEYS.CONVERSATIONS]: [...INITIAL_CONVERSATIONS],
-    [STORAGE_KEYS.MESSAGES]: { ...INITIAL_MESSAGES },
-    [STORAGE_KEYS.NOTIFICATIONS]: [...INITIAL_NOTIFICATIONS],
-    [STORAGE_KEYS.AUDIT_LOGS]: [...INITIAL_AUDIT_LOGS],
+    [STORAGE_KEYS.GAME_ACCOUNTS]: [],
+    [STORAGE_KEYS.CONVERSATIONS]: [],
+    [STORAGE_KEYS.MESSAGES]: {},
+    [STORAGE_KEYS.NOTIFICATIONS]: [],
+    [STORAGE_KEYS.AUDIT_LOGS]: [],
     [STORAGE_KEYS.CONFIG]: { ...INITIAL_CONFIG },
     [STORAGE_KEYS.WEBHOOK_LOGS]: [],
     [STORAGE_KEYS.FAKED_CASHOUTS]: [],
@@ -84,8 +84,40 @@ class DataService {
   private isSeeding = false;
 
   constructor() {
+    this.cleanLegacyStorage();
     this.loadFromLocalStorage();
     this.initPersistence();
+  }
+
+  private cleanLegacyStorage(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      const CLEAN_FLAG = 'swift_sweeps_prod_clean_v4';
+      if (!localStorage.getItem(CLEAN_FLAG)) {
+        console.log('[SwiftSweeps] Performing clean-slate migration: clearing legacy mock storage...');
+        const keysToClean = [
+          'aetherpay_users',
+          'aetherpay_wallets',
+          'aetherpay_transactions',
+          'aetherpay_topups',
+          'aetherpay_withdrawals',
+          'aetherpay_game_accounts',
+          'aetherpay_conversations',
+          'aetherpay_messages',
+          'aetherpay_notifications',
+          'aetherpay_audit_logs',
+          'aetherpay_faked_cashouts',
+          'aetherpay_webhook_logs',
+          'aetherpay_mock_users',
+        ];
+        for (const k of keysToClean) {
+          localStorage.removeItem(k);
+        }
+        localStorage.setItem(CLEAN_FLAG, 'true');
+      }
+    } catch (e) {
+      console.warn('Storage wipe notice:', e);
+    }
   }
 
   private loadFromLocalStorage(): void {
@@ -128,8 +160,8 @@ class DataService {
     if (!supabase || !isSupabaseConfigured()) return;
 
     // Initial fetch from Supabase
-    this.pollSupabaseChat();
     this.pollSupabaseGeneral();
+    this.pollSupabaseChat();
 
     // 1. High frequency polling for customer care chat & messages (3 seconds)
     const chatTimer = window.setInterval(() => {
@@ -137,10 +169,10 @@ class DataService {
     }, 3000);
     this.pollingIntervals.push(chatTimer);
 
-    // 2. Interval polling for requests, wallet updates, and catalog (15 seconds)
+    // 2. Interval polling for requests, wallet updates, game accounts, and catalog (4 seconds)
     const generalTimer = window.setInterval(() => {
       this.pollSupabaseGeneral();
-    }, 15000);
+    }, 4000);
     this.pollingIntervals.push(generalTimer);
   }
 
@@ -236,13 +268,15 @@ class DataService {
   public async pollSupabaseGeneral(): Promise<void> {
     if (!supabase || !isSupabaseConfigured()) return;
     try {
-      const [topupsRes, withdrawalsRes, walletsRes, catalogRes, cashoutsRes, usersRes] = await Promise.all([
+      const [topupsRes, withdrawalsRes, walletsRes, catalogRes, cashoutsRes, usersRes, gameAccountsRes, appConfigRes] = await Promise.all([
         supabase.from('topups').select('*').order('created_at', { ascending: false }),
         supabase.from('withdrawals').select('*').order('created_at', { ascending: false }),
         supabase.from('wallets').select('*'),
         supabase.from('game_catalog').select('*').order('created_at', { ascending: true }),
         supabase.from('faked_cashouts').select('*').order('timestamp', { ascending: false }).limit(40),
         supabase.from('users').select('*'),
+        supabase.from('game_accounts').select('*').order('created_at', { ascending: false }),
+        supabase.from('app_config').select('data').eq('id', 'main').maybeSingle(),
       ]);
 
       let changed = false;
@@ -355,6 +389,24 @@ class DataService {
         changed = true;
       }
 
+      if (gameAccountsRes.data && gameAccountsRes.data.length > 0) {
+        this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = gameAccountsRes.data.map((ga: any) => ({
+          id: ga.id,
+          gameCatalogId: ga.game_id,
+          customerId: ga.customer_id,
+          gameName: ga.game_title,
+          platformName: 'Sweepstakes',
+          username: ga.username,
+          password: ga.password,
+          status: ga.status || 'active',
+          notes: ga.pin || '',
+          createdAt: ga.created_at || new Date().toISOString(),
+          updatedAt: ga.updated_at || ga.created_at || new Date().toISOString(),
+        }));
+        this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, this.cache[STORAGE_KEYS.GAME_ACCOUNTS]);
+        changed = true;
+      }
+
       if (catalogRes.data && catalogRes.data.length > 0) {
         this.cache[STORAGE_KEYS.GAME_CATALOG] = catalogRes.data.map((g: any) => ({
           id: g.id,
@@ -384,6 +436,16 @@ class DataService {
           timestamp: c.timestamp,
         }));
         this.saveToLocalStorage(STORAGE_KEYS.FAKED_CASHOUTS, this.cache[STORAGE_KEYS.FAKED_CASHOUTS]);
+        changed = true;
+      }
+
+      if (appConfigRes?.data?.data) {
+        const currentConfig = this.getAppConfig();
+        this.cache[STORAGE_KEYS.CONFIG] = {
+          ...currentConfig,
+          ...appConfigRes.data.data,
+        };
+        this.saveToLocalStorage(STORAGE_KEYS.CONFIG, this.cache[STORAGE_KEYS.CONFIG]);
         changed = true;
       }
 
@@ -1325,11 +1387,169 @@ class DataService {
 
   // Users
   public getUsers(): UserProfile[] {
-    return this.load<UserProfile[]>(STORAGE_KEYS.USERS, INITIAL_USERS);
+    return this.load<UserProfile[]>(STORAGE_KEYS.USERS, []);
   }
 
   public getUserById(userId: string): UserProfile | undefined {
-    return this.getUsers().find((u) => u.id === userId);
+    if (!userId) return undefined;
+    const users = this.getUsers();
+    const found = users.find((u) => u.id === userId || u.email?.toLowerCase() === userId.toLowerCase());
+    if (found) return found;
+
+    // Try fetching from Supabase if not in cache yet
+    if (supabase && isSupabaseConfigured()) {
+      supabase
+        .from('users')
+        .select('*')
+        .or(`id.eq.${userId},email.ilike.${userId}`)
+        .maybeSingle()
+        .then(({ data }) => {
+          if (data) {
+            const u: UserProfile = {
+              id: data.id,
+              email: data.email,
+              displayName: data.display_name || data.email?.split('@')[0] || 'Player',
+              role: data.role || 'customer',
+              phone: data.phone,
+              avatarUrl: data.avatar_url,
+              status: data.status || 'active',
+              emailVerified: Boolean(data.email_verified),
+              referralCode: `REF_${data.id.slice(-5).toUpperCase()}`,
+              referredBy: data.referred_by,
+              createdAt: data.created_at || new Date().toISOString(),
+              lastLoginAt: new Date().toISOString(),
+            };
+            const cur = this.getUsers();
+            if (!cur.some((x) => x.id === u.id)) {
+              this.cache[STORAGE_KEYS.USERS] = [...cur, u];
+              this.saveToLocalStorage(STORAGE_KEYS.USERS, this.cache[STORAGE_KEYS.USERS]);
+              window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'users' } }));
+            }
+          }
+        })
+        .catch(() => {});
+    }
+
+    return undefined;
+  }
+
+  public getUserByEmail(email: string): UserProfile | undefined {
+    if (!email) return undefined;
+    const clean = email.trim().toLowerCase();
+    return this.getUsers().find((u) => u.email?.toLowerCase() === clean);
+  }
+
+  public isProtectedParentAdmin(emailOrId: string): boolean {
+    if (!emailOrId) return false;
+    const clean = emailOrId.trim().toLowerCase();
+    return (
+      clean === 'koofrkolagi@gmail.com' ||
+      clean === 'admin@swiftsweeps.com' ||
+      clean === 'usr_admin_master'
+    );
+  }
+
+  public async updateUserRole(
+    targetUserId: string,
+    newRole: UserRole,
+    actingUser: UserProfile
+  ): Promise<{ success: boolean; message: string; user?: UserProfile }> {
+    if (actingUser.role !== 'admin') {
+      return {
+        success: false,
+        message: 'Access Denied: Only administrators have authority to promote or change user roles.',
+      };
+    }
+
+    const targetUser = this.getUserById(targetUserId) || this.getUserByEmail(targetUserId);
+    if (!targetUser) {
+      return { success: false, message: 'User not found.' };
+    }
+
+    if (this.isProtectedParentAdmin(targetUser.email) || this.isProtectedParentAdmin(targetUser.id)) {
+      if (newRole !== 'admin') {
+        return {
+          success: false,
+          message: 'Security Guard: The primary platform creator is permanently designated as Super Admin and cannot be demoted.',
+        };
+      }
+    }
+
+    targetUser.role = newRole;
+    const allUsers = this.getUsers().map((u) => (u.id === targetUser.id ? { ...u, role: newRole } : u));
+    this.cache[STORAGE_KEYS.USERS] = allUsers;
+    this.saveToLocalStorage(STORAGE_KEYS.USERS, allUsers);
+
+    if (supabase && isSupabaseConfigured()) {
+      await supabase.from('users').update({ role: newRole, updated_at: new Date().toISOString() }).eq('id', targetUser.id);
+    }
+
+    this.logAudit({
+      actorId: actingUser.id,
+      actorName: actingUser.displayName,
+      actorRole: actingUser.role,
+      action: 'USER_ROLE_UPDATED',
+      entityType: 'user',
+      entityId: targetUser.id,
+      details: `Role for ${targetUser.displayName} (${targetUser.email}) changed to ${newRole} by ${actingUser.displayName}.`,
+    });
+
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_role_updated' } }));
+    return {
+      success: true,
+      message: `Role successfully updated to ${newRole.toUpperCase()} for ${targetUser.displayName}.`,
+      user: targetUser,
+    };
+  }
+
+  public getCmsPolicies(): {
+    cashoutPolicyHtml: string;
+    privacyPolicyHtml: string;
+    termsPolicyHtml: string;
+    supportedPartners: Array<{
+      id: string;
+      platform: 'facebook' | 'instagram' | 'telegram' | 'whatsapp' | 'other';
+      label: string;
+      url: string;
+      active: boolean;
+    }>;
+  } {
+    const config = this.getAppConfig();
+    const policies = (config as any).policies || {};
+    return {
+      cashoutPolicyHtml:
+        policies.cashoutPolicyHtml ||
+        `<p>All withdrawals require verified identification and prior deposit history through the matching payout channel.</p><p><strong>Important Warning:</strong> Please review your cashtag before submission. Once sent the amount cannot be refunded.</p><p>Standard processing window is 15-45 minutes during operational desk hours.</p>`,
+      privacyPolicyHtml:
+        policies.privacyPolicyHtml ||
+        `<p>Swift Sweeps respects your privacy and complies with industry data security standards. We never sell or share player personal records with unauthorized third parties.</p>`,
+      termsPolicyHtml:
+        policies.termsPolicyHtml ||
+        `<p>Participation in games is restricted to eligible players of legal age in their respective jurisdiction. Wagering and bonus turnover terms apply.</p>`,
+      supportedPartners: (config as any).supportedPartners || [
+        { id: 'p_fb', platform: 'facebook', label: 'Official Facebook Page', url: 'https://facebook.com', active: true },
+        { id: 'p_ig', platform: 'instagram', label: 'Official Instagram Community', url: 'https://instagram.com', active: true },
+        { id: 'p_tg', platform: 'telegram', label: 'Official VIP Telegram Channel', url: 'https://t.me', active: true },
+      ],
+    };
+  }
+
+  public updateCmsPolicies(updated: Partial<{
+    cashoutPolicyHtml: string;
+    privacyPolicyHtml: string;
+    termsPolicyHtml: string;
+    supportedPartners: any[];
+  }>): { success: boolean; message: string } {
+    const config = this.getAppConfig();
+    (config as any).policies = {
+      ...this.getCmsPolicies(),
+      ...updated,
+    };
+    if (updated.supportedPartners) {
+      (config as any).supportedPartners = updated.supportedPartners;
+    }
+    this.save(STORAGE_KEYS.CONFIG, config);
+    return { success: true, message: 'Policy & Partner settings saved successfully!' };
   }
 
   public getUserRegisteredMethod(userId: string): {

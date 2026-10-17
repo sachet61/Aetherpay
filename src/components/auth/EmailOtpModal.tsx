@@ -275,6 +275,10 @@ export const EmailOtpModal: React.FC<EmailOtpModalProps> = ({
           </button>
         </div>
 
+        <div className="w-full p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-center text-[11px] text-amber-200/90 leading-relaxed">
+          <span className="font-semibold text-amber-300">Note:</span> Please check your <strong className="text-white">Spam or Junk folder</strong> if the OTP code is not found in your Inbox.
+        </div>
+
         {onBackToSignIn && (
           <button
             type="button"

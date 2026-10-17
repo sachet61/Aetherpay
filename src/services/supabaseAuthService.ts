@@ -166,6 +166,30 @@ class SupabaseAuthService {
     const origin = typeof window !== 'undefined' ? window.location.origin : '';
 
     try {
+      // 1. Strict Duplicate Email Prevention across Supabase and local cache
+      if (supabase) {
+        const { data: existingDbUser } = await supabase
+          .from('users')
+          .select('id, email')
+          .ilike('email', cleanEmail)
+          .maybeSingle();
+
+        if (existingDbUser) {
+          return {
+            success: false,
+            error: 'An account with this email address already exists. Please log in or reset your password.',
+          };
+        }
+      }
+
+      const existingLocal = dataService.getUsers().find((u) => u.email.toLowerCase() === cleanEmail);
+      if (existingLocal) {
+        return {
+          success: false,
+          error: 'An account with this email address already exists. Please log in or reset your password.',
+        };
+      }
+
       const { data, error } = await supabase.auth.signUp({
         email: cleanEmail,
         password: params.password,
@@ -181,6 +205,14 @@ class SupabaseAuthService {
 
       if (error) {
         return { success: false, error: error.message };
+      }
+
+      // Check for empty identities array returned by Supabase when user already exists
+      if (data.user?.identities && data.user.identities.length === 0) {
+        return {
+          success: false,
+          error: 'An account with this email address already exists. Please log in or reset your password.',
+        };
       }
 
       const supabaseUserId = data.user?.id || `usr_${Date.now()}`;

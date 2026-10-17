@@ -137,33 +137,24 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
               </span>
             </div>
             <p className="text-xs text-slate-300 leading-relaxed max-w-2xl">
-              Your registered email <span className="font-mono font-semibold text-amber-200">({currentUser.email})</span> is currently unverified. Cashouts and referral earnings are locked until verification is confirmed.
+              Your registered email <span className="font-mono font-semibold text-amber-200">({currentUser.email})</span> is currently unverified. Cashouts and referral earnings are locked until OTP verification is confirmed.
+            </p>
+            <p className="text-[11px] text-amber-300/80">
+              * Please check your Spam or Junk folder if the 6-digit OTP code does not arrive in your Inbox.
             </p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0 w-full lg:w-auto justify-start lg:justify-end pt-1 lg:pt-0">
-          {/* Primary Instant Verify Button */}
-          <button
-            type="button"
-            onClick={handleInstantVerify}
-            disabled={isInstantConfirming}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition disabled:opacity-50 shadow-lg shadow-emerald-600/25 active:scale-95"
-            title="Instantly confirm email verification in Supabase"
-          >
-            <Zap className={`w-3.5 h-3.5 ${isInstantConfirming ? 'animate-bounce' : ''}`} />
-            <span>{isInstantConfirming ? 'Verifying...' : 'Verify Now (Instant)'}</span>
-          </button>
-
           {/* Enter 6-Digit Code Button */}
           <button
             type="button"
             onClick={() => setShowOtpModal(true)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shadow-md shadow-amber-500/20 active:scale-95"
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shadow-md shadow-amber-500/20 active:scale-95"
             title="Enter 6-digit verification code received in email"
           >
             <KeyRound className="w-3.5 h-3.5" />
-            <span>Enter 6-Digit Code</span>
+            <span>Enter OTP Code</span>
           </button>
 
           {/* Resend Supabase Email Code */}

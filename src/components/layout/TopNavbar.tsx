@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { UserProfile, UserWallet } from '../../types';
 import { RoleSwitcher } from '../common/RoleSwitcher';
 import { dataService } from '../../services/dataService';
-import { Bell, Wallet, CheckCircle2, X, LogOut, Shield, Headphones, Gamepad2, Settings } from 'lucide-react';
+import { Bell, Wallet, CheckCircle2, X, LogOut, Shield, Headphones, Gamepad2, Settings, Users } from 'lucide-react';
 import { SwiftSweepsLogo } from '../common/SwiftSweepsLogo';
 
 interface TopNavbarProps {
