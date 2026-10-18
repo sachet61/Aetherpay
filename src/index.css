@@ -44,24 +44,51 @@
   overscroll-behavior-y: contain;
 }
 
-/* Continuous horizontal news marquee animation */
-@keyframes marquee {
+/* GPU-accelerated continuous horizontal marquee for live payouts */
+@keyframes marquee-track {
   0% {
-    transform: translateX(0%);
+    transform: translate3d(0, 0, 0);
   }
   100% {
-    transform: translateX(-50%);
+    transform: translate3d(-100%, 0, 0);
+  }
+}
+
+.animate-marquee-track {
+  display: flex;
+  flex-shrink: 0;
+  animation: marquee-track 55s linear infinite;
+  will-change: transform;
+}
+
+.pause-marquee:hover .animate-marquee-track {
+  animation-play-state: paused;
+}
+
+/* Backward-compatible marquee definition */
+@keyframes marquee {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
   }
 }
 
 .animate-marquee {
   display: flex;
   width: max-content;
-  animation: marquee 135s linear infinite;
+  animation: marquee 110s linear infinite;
   will-change: transform;
 }
 
 .pause-marquee-hover:hover .animate-marquee {
   animation-play-state: paused;
+}
+
+/* Smooth gradient edge mask for tickers */
+.mask-marquee-edges {
+  mask-image: linear-gradient(to right, transparent 0%, black 2.5%, black 97.5%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, black 2.5%, black 97.5%, transparent 100%);
 }
 
