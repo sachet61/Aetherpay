@@ -48,11 +48,13 @@ export const TelegramBotConfigCard: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!botToken.trim()) {
+    const effectiveToken = botToken.trim();
+    if (!effectiveToken && !status?.tokenConfigured) {
       setFeedback({ type: 'error', text: 'Please enter your Telegram Bot API Token.' });
       return;
     }
-    if (!channelId.trim()) {
+    const effectiveChannel = channelId.trim() || status?.channelId || '';
+    if (!effectiveChannel) {
       setFeedback({ type: 'error', text: 'Please enter your Target Channel or Group Chat ID.' });
       return;
     }
@@ -61,7 +63,7 @@ export const TelegramBotConfigCard: React.FC = () => {
     setFeedback({ type: 'info', text: 'Connecting bot to 24/7 server polling engine...' });
 
     try {
-      const res = await telegramService.saveConfig(botToken.trim(), channelId.trim(), isEnabled);
+      const res = await telegramService.saveConfig(effectiveToken, effectiveChannel, isEnabled);
       if (res.success) {
         setStatus(res.status || null);
         setFeedback({
@@ -79,8 +81,14 @@ export const TelegramBotConfigCard: React.FC = () => {
   };
 
   const handleTest = async () => {
-    if (!botToken.trim() || !channelId.trim()) {
-      setFeedback({ type: 'error', text: 'Please enter both Bot Token and Channel ID before testing.' });
+    const effectiveToken = botToken.trim();
+    if (!effectiveToken && !status?.tokenConfigured) {
+      setFeedback({ type: 'error', text: 'Please enter your Telegram Bot Token.' });
+      return;
+    }
+    const effectiveChannel = channelId.trim() || status?.channelId || '';
+    if (!effectiveChannel) {
+      setFeedback({ type: 'error', text: 'Please enter your Target Channel or Group Chat ID.' });
       return;
     }
 
@@ -88,7 +96,7 @@ export const TelegramBotConfigCard: React.FC = () => {
     setFeedback({ type: 'info', text: 'Sending test dispatch through Telegram API...' });
 
     try {
-      const res = await telegramService.testConnection(botToken.trim(), channelId.trim());
+      const res = await telegramService.testConnection(effectiveToken, effectiveChannel);
       if (res.success) {
         setFeedback({ type: 'success', text: res.message });
       } else {
@@ -212,7 +220,11 @@ export const TelegramBotConfigCard: React.FC = () => {
                 type={showToken ? 'text' : 'password'}
                 value={botToken}
                 onChange={(e) => setBotToken(e.target.value)}
-                placeholder="e.g. 7123456789:AAHk..."
+                placeholder={
+                  status?.tokenConfigured
+                    ? `Configured (${status.maskedToken || 'Protected Token'})`
+                    : 'e.g. 7123456789:AAHk...'
+                }
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 font-mono text-white text-xs placeholder-slate-600 focus:outline-none focus:border-sky-500"
               />
               <button

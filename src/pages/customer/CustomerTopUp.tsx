@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { UserProfile, UserWallet, PaymentMethodType } from '../../types';
 import { dataService } from '../../services/dataService';
+import { telegramService } from '../../services/telegramService';
 import {
   ArrowDownToLine,
   CreditCard,
@@ -220,83 +221,69 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
       return;
     }
 
-    // Branch B: Supported 4 Methods
-    if (selectedMethodType === 'chime' && parsedAmount < 20) {
-      setErrorMessage(
-        'Strict Chime Rule: Minimum deposit for Chime Direct is $20.00. Please increase your deposit amount.'
-      );
+    // Branch B: Supported 4 Payment Methods (Proof-First Workflow)
+    if (!screenshotFile) {
+      setErrorMessage('Please upload a screenshot of your payment receipt before submitting.');
       return;
     }
 
-    if (parsedAmount <= 0) {
-      setErrorMessage('Please enter a valid deposit amount.');
-      return;
-    }
-
-    let providerRef = '';
-    let cryptoTx = '';
-
-    if (selectedMethodType === 'cashapp') {
-      if (!customerCashtag.trim()) {
-        setErrorMessage('Please enter your $Cashtag for Verified CashApp.');
-        return;
-      }
-      providerRef = customerCashtag.trim().startsWith('$') ? customerCashtag.trim() : `$${customerCashtag.trim()}`;
-    } else if (selectedMethodType === 'chime') {
-      if (!chimeHandleOrProof.trim()) {
-        setErrorMessage('Please enter your Chime sign, handle, or confirmation reference.');
-        return;
-      }
-      providerRef = chimeHandleOrProof.trim();
-    } else if (selectedMethodType === 'payment_link') {
-      if (!linkPaymentRef.trim()) {
-        setErrorMessage('Please enter the reference / order name used on the payment link checkout.');
-        return;
-      }
-      providerRef = linkPaymentRef.trim();
-    } else if (selectedMethodType === 'crypto') {
-      if (!cryptoTxHash.trim()) {
-        setErrorMessage('Please paste your cryptocurrency transaction hash (TXID) or sender address.');
-        return;
-      }
-      cryptoTx = cryptoTxHash.trim();
-    }
+    const providerRef = 'Payment Screenshot Proof Attached';
 
     setIsSubmitting(true);
     setTimeout(() => {
       try {
-        dataService.submitTopUp({
+        const newReq = dataService.submitTopUp({
           customerId: currentUser.id,
           customerName: currentUser.displayName,
-          amount: parsedAmount,
+          amount: 0, // Admin / Agent verifies exact amount directly from screenshot proof
           method: selectedMethodType,
           methodName: currentMethod.name,
           targetGameCatalogId: selectedGameCatalogId,
           targetGameName: targetGameName,
           targetGameUsername: targetAccount?.username || currentUser.displayName,
-          providerRef: providerRef || undefined,
-          cryptoTxHash: cryptoTx || undefined,
-          cryptoNetwork: selectedMethodType === 'crypto' ? selectedCryptoCoin : undefined,
-          depositAddress: selectedMethodType === 'crypto' ? cryptoAddresses[selectedCryptoCoin] : undefined,
+          providerRef: providerRef,
           receiptUrl: screenshotFile || undefined,
-          receiptName: screenshotName || undefined,
+          receiptName: screenshotName || 'payment_receipt.png',
         });
 
         // Register payment method on the customer
-        dataService.setUserRegisteredMethod(currentUser.id, selectedMethodType, providerRef || cryptoTx);
+        dataService.setUserRegisteredMethod(currentUser.id, selectedMethodType, providerRef);
+
+        // Forward notice to Support Chat so staff sees the proof immediately
+        try {
+          const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
+          dataService.sendChatMessage({
+            conversationId: conv.id,
+            senderId: currentUser.id,
+            senderName: currentUser.displayName,
+            senderRole: 'customer',
+            text: `📷 Payment Proof Forwarded for ${currentMethod.name} -> Target Game: "${targetGameName}". Please review my payment receipt screenshot and credit my account.`,
+            isInternalNote: false,
+          });
+        } catch (chatErr) {
+          console.warn('Customer topup chat notice:', chatErr);
+        }
+
+        // Forward alert to 24/7 Telegram Bot if active
+        telegramService.notify({
+          title: 'New Payment Proof Forwarded',
+          text: `Player ${currentUser.displayName} submitted payment proof for ${currentMethod.name} (Game: ${targetGameName}). Awaiting staff verification of deposit amount.`,
+          customerName: currentUser.displayName,
+          customerEmail: currentUser.email,
+          actionType: 'topup',
+          gameName: targetGameName,
+          proofUrl: screenshotFile,
+        }).catch(() => {});
 
         setIsSubmitting(false);
         setSuccessMessage(
-          `Top-Up Submitted! Base deposit: $${parsedAmount.toFixed(2)}${calculatedBonusAmount > 0 ? ` + $${calculatedBonusAmount.toFixed(2)} Bonus (${dynamicBonusPercent}%)` : ''}. Total $${netCreditToGame.toFixed(2)} submitted for ${targetGameName}. ${screenshotFile ? 'Screenshot attached for Admin verification.' : ''}`
+          `Payment proof successfully forwarded! Our agent/admin desk will verify the amount from your receipt and credit your deposit (+${dynamicBonusPercent}% bonus) to ${targetGameName}.`
         );
-        setCryptoTxHash('');
-        setLinkPaymentRef('');
-        setChimeHandleOrProof('');
         setScreenshotFile(null);
         setScreenshotName('');
       } catch (err: any) {
         setIsSubmitting(false);
-        setErrorMessage(err.message || 'Error processing top-up.');
+        setErrorMessage(err.message || 'Error processing top-up proof.');
       }
     }, 600);
   };
@@ -486,45 +473,15 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
               </div>
             )}
 
-            {/* Deposit Amount */}
+            {/* Direct Top-Up Workflow (No amount input needed - verified by Agent/Admin from receipt proof) */}
             {fundingMode === 'gateway_payment' ? (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-slate-300">
-                    Deposit Amount ($ USD)
-                  </label>
-                  {selectedMethodType === 'chime' && (
-                    <span className="text-[11px] font-medium text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/40">
-                      Minimum $20.00 required for Chime
-                    </span>
-                  )}
-                </div>
-
-                <div className="relative">
-                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-base font-bold text-slate-400">$</span>
-                  <input
-                    type="number"
-                    min={selectedMethodType === 'chime' ? 20 : 1}
-                    step="any"
-                    value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-3 text-lg font-bold text-white font-mono placeholder-slate-600 focus:outline-none focus:border-amber-400"
-                    required
-                  />
-                </div>
-
-                {/* Preset quick buttons */}
-                <div className="flex items-center gap-1.5 pt-1">
-                  {(selectedMethodType === 'chime' ? [20, 50, 100, 200, 250] : [25, 50, 100, 150, 200, 250]).map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() => setAmount(String(preset))}
-                      className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 hover:border-slate-700 text-[11px] font-mono text-slate-300 transition-colors"
-                    >
-                      ${preset}
-                    </button>
-                  ))}
+              <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-2.5">
+                <Sparkles className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="font-semibold text-white">Deposit Amount Verified Directly from Payment Proof</div>
+                  <p className="text-[11px] text-amber-200/80 leading-relaxed">
+                    You don't need to specify an amount or tags. Simply pay using the method link/QR below, upload your payment receipt screenshot, and submit to agent/admin. Our desk reviews your screenshot, credits the verified amount with +{dynamicBonusPercent}% bonus, and checks your game credentials.
+                  </p>
                 </div>
               </div>
             ) : (
@@ -552,11 +509,11 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
               <>
                 {/* 1. Via Link */}
                 {selectedMethodType === 'payment_link' && (
-                  <div className="p-4 rounded-xl bg-slate-950 border border-blue-900/40 space-y-3.5 text-xs">
+                  <div className="p-4 rounded-xl bg-slate-950 border border-blue-900/40 space-y-3 text-xs">
                     <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                       <div className="font-semibold text-white flex items-center gap-2">
                         <ExternalLink className="w-4 h-4 text-blue-400" />
-                        <span>Payment via Link (20% Bonus)</span>
+                        <span>Payment via Link (+20% Bonus)</span>
                       </div>
                       <span className="text-[10px] text-emerald-300 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800/50">
                         +20% Extra Credits
@@ -573,34 +530,25 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                         rel="noreferrer"
                         className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-[11px] flex items-center gap-1 shrink-0 transition-colors"
                       >
-                        <span>Open Link</span>
+                        <span>Open Link to Pay</span>
                         <ExternalLink className="w-3 h-3" />
                       </a>
                     </div>
 
-                    <div className="space-y-1 pt-1">
-                      <label className="text-[11px] font-semibold text-slate-300">
-                        Payment Reference / Name Used
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. John Doe / Receipt #10492"
-                        value={linkPaymentRef}
-                        onChange={(e) => setLinkPaymentRef(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
-                        required
-                      />
+                    <div className="p-2.5 rounded-lg bg-blue-950/30 border border-blue-900/30 text-[11px] text-blue-200/80 flex items-center gap-2">
+                      <Info className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                      <span>Click the link to complete payment, then upload your receipt screenshot below.</span>
                     </div>
                   </div>
                 )}
 
                 {/* 2. Verified CashApp */}
                 {selectedMethodType === 'cashapp' && (
-                  <div className="p-4 rounded-xl bg-slate-950 border border-emerald-900/40 space-y-3.5 text-xs">
+                  <div className="p-4 rounded-xl bg-slate-950 border border-emerald-900/40 space-y-3 text-xs">
                     <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                       <div className="font-semibold text-white flex items-center gap-2">
                         <DollarSign className="w-4 h-4 text-emerald-400" />
-                        <span>Verified CashApp (30% Bonus)</span>
+                        <span>Verified CashApp (+30% Bonus)</span>
                       </div>
                       <span className="text-[10px] text-emerald-300 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800/50">
                         +30% Extra Credits
@@ -638,29 +586,20 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                       </div>
                     )}
 
-                    <div className="space-y-1 pt-1">
-                      <label className="text-[11px] font-semibold text-slate-300">
-                        Your $Cashtag
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="$yourcashtag"
-                        value={customerCashtag}
-                        onChange={(e) => setCustomerCashtag(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
-                        required
-                      />
+                    <div className="p-2.5 rounded-lg bg-emerald-950/30 border border-emerald-900/30 text-[11px] text-emerald-200/80 flex items-center gap-2">
+                      <Info className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span>No cashtag required. Pay via CashApp and upload your payment confirmation screenshot below.</span>
                     </div>
                   </div>
                 )}
 
                 {/* 3. Chime Direct */}
                 {selectedMethodType === 'chime' && (
-                  <div className="p-4 rounded-xl bg-slate-950 border border-teal-900/40 space-y-3.5 text-xs">
+                  <div className="p-4 rounded-xl bg-slate-950 border border-teal-900/40 space-y-3 text-xs">
                     <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                       <div className="font-semibold text-white flex items-center gap-2">
                         <QrCode className="w-4 h-4 text-teal-400" />
-                        <span>Chime Direct (15% Bonus)</span>
+                        <span>Chime Direct (+15% Bonus)</span>
                       </div>
                       <span className="text-[10px] text-amber-300 bg-amber-950/80 px-2 py-0.5 rounded border border-amber-800/50 font-bold">
                         Min $20.00
@@ -727,29 +666,20 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                       </div>
                     </div>
 
-                    <div className="space-y-1 pt-1">
-                      <label className="text-[11px] font-semibold text-slate-300">
-                        Your Chime Sign / Phone / Confirmation
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. $JohnDoe or (555) 123-4567"
-                        value={chimeHandleOrProof}
-                        onChange={(e) => setChimeHandleOrProof(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
-                        required
-                      />
+                    <div className="p-2.5 rounded-lg bg-teal-950/30 border border-teal-900/30 text-[11px] text-teal-200/80 flex items-center gap-2">
+                      <Info className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                      <span>Send to Chime sign above, then upload your transaction screenshot below.</span>
                     </div>
                   </div>
                 )}
 
                 {/* 4. Crypto Payment */}
                 {selectedMethodType === 'crypto' && (
-                  <div className="p-4 rounded-xl bg-slate-950 border border-amber-900/40 space-y-3.5 text-xs">
+                  <div className="p-4 rounded-xl bg-slate-950 border border-amber-900/40 space-y-3 text-xs">
                     <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                       <div className="font-semibold text-white flex items-center gap-2">
                         <Coins className="w-4 h-4 text-amber-400" />
-                        <span>Manual Crypto Vault (30% Bonus)</span>
+                        <span>Manual Crypto Vault (+30% Bonus)</span>
                       </div>
                       <span className="text-[10px] text-emerald-300 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800/50">
                         +30% Extra Credits
@@ -807,18 +737,9 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                       </div>
                     </div>
 
-                    <div className="space-y-1 pt-1">
-                      <label className="text-[11px] font-semibold text-slate-300">
-                        Blockchain TXID / Sender Address
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Paste transaction hash or sender wallet"
-                        value={cryptoTxHash}
-                        onChange={(e) => setCryptoTxHash(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 font-mono text-xs text-white focus:outline-none focus:border-indigo-500"
-                        required
-                      />
+                    <div className="p-2.5 rounded-lg bg-amber-950/30 border border-amber-900/30 text-[11px] text-amber-200/80 flex items-center gap-2">
+                      <Info className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <span>No TXID input needed. Transfer to the address above and upload your wallet confirmation screenshot below.</span>
                     </div>
                   </div>
                 )}
@@ -901,16 +822,16 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
             {/* Submit Button */}
             <button
               type="submit"
-              disabled={isSubmitting || (selectedMethodType === 'chime' && parsedAmount < 20)}
+              disabled={isSubmitting || (fundingMode === 'gateway_payment' && !screenshotFile)}
               className="w-full py-3.5 rounded-xl bg-gradient-to-r from-amber-500 via-yellow-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 disabled:opacity-50 text-slate-950 font-bold text-sm transition-all shadow-lg shadow-amber-500/25 flex items-center justify-center gap-2"
             >
               <ArrowDownToLine className="w-4 h-4" />
               <span>
                 {isSubmitting
-                  ? 'Submitting to Admin...'
+                  ? 'Submitting Proof to Admin...'
                   : fundingMode === 'referral_rewards'
                   ? `Load $${parsedRefAmount.toFixed(2)} Referral Bonus`
-                  : `Confirm Top-Up ($${netCreditToGame.toFixed(2)} to ${targetGameName})`}
+                  : `Forward Payment Proof for ${targetGameName} (+${dynamicBonusPercent}% Bonus)`}
               </span>
             </button>
           </form>
@@ -923,7 +844,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Zap className="w-4 h-4 text-amber-400" />
-                <h2 className="text-sm font-bold text-white">Selected Bonus Details</h2>
+                <h2 className="text-sm font-bold text-white">Promotional Bonus Details</h2>
               </div>
               <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] font-bold border border-emerald-500/30">
                 +{dynamicBonusPercent}% EXTRA
@@ -932,36 +853,49 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
 
             <div className="space-y-3 text-xs">
               <div className="flex items-center justify-between text-slate-300">
-                <span>Game to Load</span>
+                <span>Game Platform</span>
                 <span className="font-semibold text-white">{targetGameName}</span>
               </div>
 
               <div className="flex items-center justify-between text-slate-300">
-                <span>Deposit Base Amount</span>
-                <span className="font-mono font-bold text-white">${parsedAmount.toFixed(2)}</span>
+                <span>Payment Channel</span>
+                <span className="font-semibold text-amber-300">{currentMethod?.name}</span>
               </div>
 
               <div className="flex items-center justify-between text-slate-300">
-                <span>Method Promotional Bonus</span>
+                <span>Promotional Bonus</span>
                 <span className="font-mono font-bold text-emerald-400">
-                  +{dynamicBonusPercent}%
+                  +{dynamicBonusPercent}% Extra Credits
                 </span>
               </div>
 
-              {calculatedBonusAmount > 0 && (
-                <div className="flex items-center justify-between text-emerald-400">
-                  <span>Bonus Free Game Credit</span>
-                  <span className="font-mono font-bold">+${calculatedBonusAmount.toFixed(2)}</span>
-                </div>
-              )}
+              <div className="flex items-center justify-between text-slate-300">
+                <span>Deposit Base Amount</span>
+                <span className="font-mono text-amber-300">
+                  {fundingMode === 'gateway_payment' ? 'Verified by Admin from Proof' : `$${parsedRefAmount.toFixed(2)}`}
+                </span>
+              </div>
 
-              <div className="pt-3 border-t border-slate-800 flex items-center justify-between">
-                <div>
-                  <div className="text-xs font-bold text-white">Total Game Credits Loaded</div>
-                  <div className="text-[10px] text-slate-400">Direct game server credit</div>
+              <div className="pt-3 border-t border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-bold text-white">Total Game Credits Loaded</div>
+                    <div className="text-[10px] text-slate-400">Direct game account credit</div>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-sm font-bold font-mono text-emerald-400">
+                      Amount + {dynamicBonusPercent}% Bonus
+                    </span>
+                  </div>
                 </div>
-                <div className="text-xl font-bold font-mono text-emerald-400">
-                  ${netCreditToGame.toFixed(2)}
+
+                <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-400 space-y-1">
+                  <div className="font-semibold text-slate-200">How it works:</div>
+                  <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
+                    <li>Click link / scan QR / copy address to complete payment</li>
+                    <li>Upload your completed payment receipt screenshot</li>
+                    <li>Submit proof to agent/admin for instant verification and crediting</li>
+                  </ol>
                 </div>
               </div>
             </div>
@@ -970,10 +904,10 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
             <div className="p-3.5 rounded-xl bg-slate-950 border border-amber-500/30 text-xs text-slate-300 space-y-1.5">
               <div className="font-semibold text-white flex items-center gap-1.5 text-[11px]">
                 <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
-                <span>Verified Payment Method Rule</span>
+                <span>Verified Payment Channel Rule</span>
               </div>
               <p className="text-[11px] text-slate-400 leading-relaxed">
-                Depositing via <strong className="text-amber-300">{currentMethod?.name}</strong> registers this channel. Cashouts will be processed through this same method manually via support chat.
+                Depositing via <strong className="text-amber-300">{currentMethod?.name}</strong> registers this channel. Cashouts will be processed through this same verified method.
               </p>
             </div>
           </div>

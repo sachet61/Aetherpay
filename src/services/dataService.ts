@@ -2050,17 +2050,20 @@ class DataService {
     wallets[req.customerId] = wallet;
     this.save(STORAGE_KEYS.WALLETS, wallets);
 
-    // Direct game account crediting
-    if (req.targetGameCatalogId) {
-      const allAccounts = this.getGameAccounts();
-      const gameAcc = allAccounts.find(
-        (a) => a.customerId === req.customerId && a.gameCatalogId === req.targetGameCatalogId
-      );
-      if (gameAcc) {
-        gameAcc.balance = (gameAcc.balance || 0) + req.finalWalletCredit;
-        gameAcc.updatedAt = new Date().toISOString();
-        this.save(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
-      }
+    // Direct game account crediting & credential verification
+    const allAccounts = this.getGameAccounts();
+    const gameAcc = allAccounts.find(
+      (a) =>
+        a.customerId === req.customerId &&
+        (a.gameCatalogId === req.targetGameCatalogId ||
+          a.gameName.toLowerCase() === req.targetGameName?.toLowerCase())
+    );
+    const hasActiveCredentials = Boolean(gameAcc && gameAcc.status === 'active' && gameAcc.username);
+
+    if (hasActiveCredentials && gameAcc) {
+      gameAcc.balance = (gameAcc.balance || 0) + req.finalWalletCredit;
+      gameAcc.updatedAt = new Date().toISOString();
+      this.save(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
     }
 
     // Ledger records
@@ -2120,7 +2123,37 @@ class DataService {
     });
 
     // Update transaction card in chat thread and post confirmation
-    this.updateChatTransactionStatus(req.id, 'completed', params.reviewerName, params.notes);
+    this.updateChatTransactionStatus(req.id, 'completed', params.reviewerName, params.notes, {
+      amount: req.amount,
+      bonusAmount: req.bonusAmount,
+      finalCredit: req.finalWalletCredit,
+    });
+
+    // Dispatch chat confirmation with Game ID & password or reminder
+    try {
+      const conv = this.getOrCreateConversationForCustomer(req.customerId, req.customerName);
+      if (hasActiveCredentials && gameAcc) {
+        this.sendChatMessage({
+          conversationId: conv.id,
+          senderId: params.reviewerId,
+          senderName: params.reviewerName,
+          senderRole: 'agent',
+          text: `🎉 Verified Deposit Approved & Loaded!\n\n💵 Deposit Base: $${req.amount.toFixed(2)}${req.bonusAmount > 0 ? ` (+ $${req.bonusAmount.toFixed(2)} bonus = $${req.finalWalletCredit.toFixed(2)} total credits)` : ''}\n🎯 Target Game: ${req.targetGameName || 'Game'}\n\n🔑 Your Active Game Credentials:\nUsername: "${gameAcc.username}"\nPassword: "${gameAcc.password || '•••••'}"\n\nYour game credits have been loaded. Good luck and have fun!`,
+          isInternalNote: false,
+        });
+      } else {
+        this.sendChatMessage({
+          conversationId: conv.id,
+          senderId: params.reviewerId,
+          senderName: params.reviewerName,
+          senderRole: 'agent',
+          text: `🎉 Verified Deposit Approved & Credited!\n\n💵 Deposit Base: $${req.amount.toFixed(2)}${req.bonusAmount > 0 ? ` (+ $${req.bonusAmount.toFixed(2)} bonus = $${req.finalWalletCredit.toFixed(2)} total credits)` : ''}\n🎯 Target Game: ${req.targetGameName || 'Game'}\n\n⚠️ IMPORTANT ACTION REQUIRED: We noticed you do not have an active Game ID for "${req.targetGameName || 'this game'}" yet.\n👉 Please open your "Game IDs & Passwords" portal and tap "Request Game ID & Password" so our desk can create and provision your credentials right away!`,
+          isInternalNote: false,
+        });
+      }
+    } catch (chatErr) {
+      console.warn('Top-up approval chat dispatch warning:', chatErr);
+    }
 
     return { success: true, message: 'Deposit successfully approved and credited.' };
   }
@@ -3151,7 +3184,8 @@ class DataService {
     requestId: string,
     status: 'completed' | 'rejected',
     reviewerName: string,
-    notes?: string
+    notes?: string,
+    updatedValues?: { amount?: number; bonusAmount?: number; finalCredit?: number }
   ): void {
     const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
     let updated = false;
@@ -3165,6 +3199,11 @@ class DataService {
           msg.transactionData.approvedBy = reviewerName;
           msg.transactionData.approvedAt = new Date().toISOString();
           if (notes) msg.transactionData.notes = notes;
+          if (updatedValues) {
+            if (updatedValues.amount !== undefined) msg.transactionData.amount = updatedValues.amount;
+            if (updatedValues.bonusAmount !== undefined) msg.transactionData.bonusAmount = updatedValues.bonusAmount;
+            if (updatedValues.finalCredit !== undefined) msg.transactionData.finalCredit = updatedValues.finalCredit;
+          }
           updated = true;
           targetConvId = convId;
           txData = msg.transactionData;

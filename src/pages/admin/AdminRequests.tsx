@@ -159,6 +159,12 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
   // Top-Up Handlers
   const handleApproveTopUp = (req: TopUpRequest) => {
     const customAmt = verifiedAmount.trim() ? parseFloat(verifiedAmount) : undefined;
+    const customerAccounts = dataService.getGameAccounts(req.customerId);
+    const targetAcc = customerAccounts.find(
+      (a) => a.gameCatalogId === req.targetGameCatalogId || a.gameName.toLowerCase() === req.targetGameName?.toLowerCase()
+    );
+    const hasActiveCredentials = Boolean(targetAcc && targetAcc.status === 'active' && targetAcc.username);
+
     const res = dataService.approveTopUp({
       requestId: req.id,
       reviewerId: currentUser.id,
@@ -172,7 +178,11 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
         ? customAmt + (customAmt * (req.bonusPercentage || 0)) / 100
         : req.finalWalletCredit;
       setFeedbackMsg({
-        text: `Approved deposit #${req.id}. Credited $${finalAmt.toFixed(2)} to ${req.customerName}.`,
+        text: `Approved deposit #${req.id}. Credited $${finalAmt.toFixed(2)} to ${req.customerName}. ${
+          hasActiveCredentials
+            ? `Game ID (${targetAcc?.username}) & password dispatched to player chat.`
+            : `Player reminded in chat to request Game ID for ${req.targetGameName || 'this game'}.`
+        }`,
         type: 'success',
       });
       setActionTopUp(null);
@@ -758,36 +768,58 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
                 })()}
               </div>
 
-              {/* Automatic Game ID & Password Status Check */}
+              {/* Automatic Game ID & Password Status Check & Chat Dispatch Indicator */}
               {(() => {
                 const customerGameAccounts = dataService.getGameAccounts(actionTopUp.customerId);
                 const targetGameAccount = customerGameAccounts.find(
                   (a) => a.gameCatalogId === actionTopUp.targetGameCatalogId || a.gameName.toLowerCase() === actionTopUp.targetGameName?.toLowerCase()
                 );
-                const hasActiveGameId = targetGameAccount && targetGameAccount.status === 'active';
+                const hasActiveGameId = Boolean(targetGameAccount && targetGameAccount.status === 'active' && targetGameAccount.username);
 
-                if (hasActiveGameId) {
+                if (hasActiveGameId && targetGameAccount) {
                   return (
-                    <div className="p-3 rounded-xl bg-emerald-950/40 border border-emerald-800 text-xs space-y-1">
-                      <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
-                        <CheckCircle2 className="w-4 h-4 shrink-0" />
-                        <span>Active Game ID Confirmed: <strong className="text-white font-mono">{targetGameAccount.username}</strong></span>
+                    <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-800 text-xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5 text-emerald-400 font-bold">
+                          <CheckCircle2 className="w-4 h-4 shrink-0" />
+                          <span>Active Game ID & Password Verified</span>
+                        </div>
+                        <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono border border-emerald-500/30">
+                          Ready for Chat Dispatch
+                        </span>
                       </div>
-                      <p className="text-[11px] text-emerald-200/70">
-                        Player has verified credentials for {actionTopUp.targetGameName || 'this game'}. Credits can be loaded immediately.
+
+                      <div className="grid grid-cols-2 gap-2 p-2 rounded-lg bg-slate-900/90 border border-slate-800 font-mono text-[11px]">
+                        <div>
+                          <span className="text-slate-400 block text-[10px] font-sans">Game ID / Username:</span>
+                          <span className="text-white font-bold">{targetGameAccount.username}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-400 block text-[10px] font-sans">Password:</span>
+                          <span className="text-amber-300 font-bold">{targetGameAccount.password || '••••••'}</span>
+                        </div>
+                      </div>
+
+                      <p className="text-[11px] text-emerald-200/80 leading-relaxed">
+                        ✓ On approval, these login credentials and loaded credit confirmation will automatically be forwarded to the customer's chat.
                       </p>
                     </div>
                   );
                 }
 
                 return (
-                  <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-800 text-xs space-y-1">
-                    <div className="flex items-center gap-1.5 text-amber-400 font-semibold">
-                      <AlertCircle className="w-4 h-4 shrink-0" />
-                      <span>No Active Game ID for {actionTopUp.targetGameName || 'this game'}</span>
+                  <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-800 text-xs space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-amber-400 font-bold">
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                        <span>No Active Game ID for {actionTopUp.targetGameName || 'this game'}</span>
+                      </div>
+                      <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded font-mono border border-amber-500/30">
+                        Reminder Will Be Dispatched
+                      </span>
                     </div>
-                    <p className="text-[11px] text-amber-200/70">
-                      Player does not have provisioned credentials for this game platform yet. Please assign a Game ID or alert customer care.
+                    <p className="text-[11px] text-amber-200/80 leading-relaxed">
+                      ⚠️ Player does not have an active Game ID for this title yet. On approval, our system will automatically notify the customer in chat to request their Game ID so staff can provision credentials.
                     </p>
                   </div>
                 );

@@ -13,6 +13,8 @@ interface TelegramEngineStatus {
   lastPollTime?: string;
   updatesReceived: number;
   lastError?: string;
+  tokenConfigured?: boolean;
+  maskedToken?: string;
 }
 
 class TelegramEngine {
@@ -67,9 +69,11 @@ class TelegramEngine {
 
   public async reloadConfig(botToken: string, channelId: string, enabled: boolean = true) {
     console.log('[TelegramEngine] Reloading bot configuration...');
+    const finalToken = botToken.trim() || this.config.botToken;
+    const finalChannel = channelId.trim() || this.config.channelId;
     this.config = {
-      botToken: botToken.trim(),
-      channelId: channelId.trim(),
+      botToken: finalToken,
+      channelId: finalChannel,
       enabled,
     };
 
@@ -116,6 +120,10 @@ class TelegramEngine {
       lastPollTime: this.lastPollTime,
       updatesReceived: this.updatesReceived,
       lastError: this.lastError,
+      tokenConfigured: Boolean(this.config.botToken),
+      maskedToken: this.config.botToken
+        ? `${this.config.botToken.slice(0, 5)}...${this.config.botToken.slice(-6)}`
+        : undefined,
     };
   }
 
@@ -345,11 +353,11 @@ class TelegramEngine {
   }
 
   public async testConnection(token: string, chatId: string): Promise<{ success: boolean; message: string }> {
-    const cleanToken = token.trim();
-    const cleanChatId = chatId.trim();
+    const cleanToken = token.trim() || this.config.botToken;
+    const cleanChatId = chatId.trim() || this.config.channelId;
 
-    if (!cleanToken) return { success: false, message: 'Please provide a Telegram Bot Token.' };
-    if (!cleanChatId) return { success: false, message: 'Please provide a Target Chat / Channel ID.' };
+    if (!cleanToken) return { success: false, message: 'Please provide a Telegram Bot Token or configure one first.' };
+    if (!cleanChatId) return { success: false, message: 'Please provide a Target Chat / Channel ID or configure one first.' };
 
     try {
       // 1. Validate token with getMe
