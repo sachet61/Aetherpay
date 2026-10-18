@@ -278,18 +278,6 @@ class SupabaseAuthService {
           };
         }
 
-        // If credentials failed in Supabase, also check local demo users for instant ease-of-use
-        const localUser = dataService.getUsers().find((u) => u.email.toLowerCase() === cleanEmail);
-        if (localUser) {
-          authSessionService.createSessionForUser(
-            localUser.id,
-            localUser.email,
-            localUser.displayName,
-            localUser.role
-          );
-          return { success: true, user: localUser };
-        }
-
         return { success: false, error: error.message };
       }
 
@@ -324,6 +312,14 @@ class SupabaseAuthService {
         }
         userProfile.emailVerified = isConfirmed;
         dataService.registerUser(userProfile);
+        if (isConfirmed && supabase && isSupabaseConfigured()) {
+          Promise.resolve(
+            supabase
+              .from('users')
+              .update({ email_verified: true, updated_at: new Date().toISOString() })
+              .eq('id', userProfile.id)
+          ).catch(() => {});
+        }
       }
 
       authSessionService.createSessionForUser(
@@ -544,6 +540,16 @@ class SupabaseAuthService {
       if (userProfile) {
         userProfile.emailVerified = true;
         dataService.registerUser(userProfile);
+        authSessionService.updateUserProfile(userProfile);
+        if (supabase && isSupabaseConfigured()) {
+          Promise.resolve(
+            supabase
+              .from('users')
+              .update({ email_verified: true, updated_at: new Date().toISOString() })
+              .eq('id', userProfile.id)
+          ).catch(() => {});
+        }
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
       } else {
         const dName = authUser?.user_metadata?.displayName || cleanEmail.split('@')[0];
         userProfile = {

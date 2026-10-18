@@ -52,6 +52,7 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
   const [rejectReason, setRejectReason] = useState('');
   const [payoutRef, setPayoutRef] = useState('');
   const [internalNote, setInternalNote] = useState('');
+  const [verifiedAmount, setVerifiedAmount] = useState('');
 
   // Game ID assignment inputs
   const [assignedUsername, setAssignedUsername] = useState('');
@@ -157,20 +158,26 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
 
   // Top-Up Handlers
   const handleApproveTopUp = (req: TopUpRequest) => {
+    const customAmt = verifiedAmount.trim() ? parseFloat(verifiedAmount) : undefined;
     const res = dataService.approveTopUp({
       requestId: req.id,
       reviewerId: currentUser.id,
       reviewerName: currentUser.displayName,
       notes: internalNote.trim() || undefined,
+      verifiedAmount: customAmt && customAmt > 0 ? customAmt : undefined,
     });
 
     if (res.success) {
+      const finalAmt = customAmt && customAmt > 0
+        ? customAmt + (customAmt * (req.bonusPercentage || 0)) / 100
+        : req.finalWalletCredit;
       setFeedbackMsg({
-        text: `Approved deposit #${req.id}. Credited $${req.finalWalletCredit.toFixed(2)} to ${req.customerName}.`,
+        text: `Approved deposit #${req.id}. Credited $${finalAmt.toFixed(2)} to ${req.customerName}.`,
         type: 'success',
       });
       setActionTopUp(null);
       setInternalNote('');
+      setVerifiedAmount('');
     } else {
       setFeedbackMsg({ text: res.message, type: 'error' });
     }
@@ -496,7 +503,9 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
                         {isTopUp ? (
                           <button
                             onClick={() => {
-                              setActionTopUp(item.original as TopUpRequest);
+                              const r = item.original as TopUpRequest;
+                              setActionTopUp(r);
+                              setVerifiedAmount(r.amount ? String(r.amount) : '');
                               setRejectReason('');
                               setInternalNote('');
                             }}
@@ -663,31 +672,23 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
               </button>
             </div>
 
-            <div className="space-y-2.5 text-xs">
+            <div className="space-y-3 text-xs">
               <div className="flex justify-between py-1 border-b border-slate-800/60">
                 <span className="text-slate-400">Player:</span>
                 <span className="font-semibold text-white">{actionTopUp.customerName}</span>
               </div>
               <div className="flex justify-between py-1 border-b border-slate-800/60">
-                <span className="text-slate-400">Deposit Amount:</span>
-                <span className="font-mono font-bold text-white">${actionTopUp.amount.toFixed(2)}</span>
+                <span className="text-slate-400">Target Game Platform:</span>
+                <span className="font-semibold text-amber-300">{actionTopUp.targetGameName || 'Standard Game'}</span>
               </div>
               <div className="flex justify-between py-1 border-b border-slate-800/60">
-                <span className="text-slate-400">Eligible Promo Bonus:</span>
-                <span className="font-mono text-emerald-400">+${actionTopUp.bonusAmount.toFixed(2)} ({actionTopUp.bonusPercentage}%)</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-slate-800/60">
-                <span className="text-slate-400">Total Credit to Issue:</span>
-                <span className="font-mono font-bold text-indigo-300 text-sm">${actionTopUp.finalWalletCredit.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-slate-800/60">
-                <span className="text-slate-400">Method:</span>
+                <span className="text-slate-400">Payment Method:</span>
                 <span className="text-slate-200">{actionTopUp.methodName}</span>
               </div>
 
               {actionTopUp.providerRef && (
                 <div className="flex justify-between py-1 border-b border-slate-800/60">
-                  <span className="text-slate-400">Bank Reference / Memo:</span>
+                  <span className="text-slate-400">Player Reference / Notes:</span>
                   <span className="font-mono text-white">{actionTopUp.providerRef}</span>
                 </div>
               )}
@@ -699,17 +700,98 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
                 </div>
               )}
 
-              {actionTopUp.receiptUrl && (
-                <div className="py-2">
+              {/* Uploaded Screenshot Proof Preview */}
+              {actionTopUp.receiptUrl ? (
+                <div className="py-1">
                   <button
+                    type="button"
                     onClick={() => setViewReceiptUrl(actionTopUp.receiptUrl || null)}
-                    className="w-full py-2 rounded-lg bg-slate-950 border border-slate-800 hover:border-slate-700 text-indigo-400 font-medium text-xs flex items-center justify-center gap-1.5 transition-colors"
+                    className="w-full py-2.5 rounded-xl bg-indigo-950/60 border border-indigo-700/60 hover:border-indigo-500 text-indigo-300 font-semibold text-xs flex items-center justify-center gap-2 transition-colors shadow-sm"
                   >
-                    <Eye className="w-3.5 h-3.5" />
-                    <span>Inspect Uploaded Receipt ({actionTopUp.receiptName || 'receipt.jpg'})</span>
+                    <Eye className="w-4 h-4 text-indigo-400" />
+                    <span>Inspect Payment Proof ({actionTopUp.receiptName || 'receipt.jpg'})</span>
                   </button>
                 </div>
+              ) : (
+                <div className="p-2 rounded-lg bg-slate-950 text-slate-500 text-center text-[11px]">
+                  No screenshot uploaded by player.
+                </div>
               )}
+
+              {/* Verified Deposit Amount & Dynamic Bonus Calculator */}
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-white">
+                    Verified Deposit Amount ($ USD)
+                  </label>
+                  <span className="text-[10px] text-amber-400 font-mono font-medium">Verify from Proof</span>
+                </div>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-400">$</span>
+                  <input
+                    type="number"
+                    step="any"
+                    min="0"
+                    value={verifiedAmount}
+                    onChange={(e) => setVerifiedAmount(e.target.value)}
+                    placeholder="Enter verified amount"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-7 pr-3 py-2 text-sm font-bold text-white font-mono focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                {(() => {
+                  const numAmt = parseFloat(verifiedAmount) || (actionTopUp.amount || 0);
+                  const bonusPct = actionTopUp.bonusPercentage || 0;
+                  const bonusAmt = (numAmt * bonusPct) / 100;
+                  const totalCredit = numAmt + bonusAmt;
+                  return (
+                    <div className="space-y-1 pt-1 text-xs">
+                      <div className="flex justify-between text-slate-400">
+                        <span>Calculated Bonus ({bonusPct}%):</span>
+                        <span className="font-mono text-emerald-400">+${bonusAmt.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between font-bold border-t border-slate-800 pt-1">
+                        <span className="text-white">Total Credit to Issue:</span>
+                        <span className="font-mono text-indigo-300 text-sm">${totalCredit.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Automatic Game ID & Password Status Check */}
+              {(() => {
+                const customerGameAccounts = dataService.getGameAccounts(actionTopUp.customerId);
+                const targetGameAccount = customerGameAccounts.find(
+                  (a) => a.gameCatalogId === actionTopUp.targetGameCatalogId || a.gameName.toLowerCase() === actionTopUp.targetGameName?.toLowerCase()
+                );
+                const hasActiveGameId = targetGameAccount && targetGameAccount.status === 'active';
+
+                if (hasActiveGameId) {
+                  return (
+                    <div className="p-3 rounded-xl bg-emerald-950/40 border border-emerald-800 text-xs space-y-1">
+                      <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                        <span>Active Game ID Confirmed: <strong className="text-white font-mono">{targetGameAccount.username}</strong></span>
+                      </div>
+                      <p className="text-[11px] text-emerald-200/70">
+                        Player has verified credentials for {actionTopUp.targetGameName || 'this game'}. Credits can be loaded immediately.
+                      </p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-800 text-xs space-y-1">
+                    <div className="flex items-center gap-1.5 text-amber-400 font-semibold">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>No Active Game ID for {actionTopUp.targetGameName || 'this game'}</span>
+                    </div>
+                    <p className="text-[11px] text-amber-200/70">
+                      Player does not have provisioned credentials for this game platform yet. Please assign a Game ID or alert customer care.
+                    </p>
+                  </div>
+                );
+              })()}
             </div>
 
             {actionTopUp.status !== 'completed' && (

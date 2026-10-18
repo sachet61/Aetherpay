@@ -195,6 +195,7 @@ export default function App() {
                 const updated = { ...currentUser, emailVerified: verified };
                 dataService.registerUser(updated);
                 authSessionService.updateUserProfile(updated);
+                window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
               }}
             />
           )}

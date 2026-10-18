@@ -106,6 +106,7 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
           message: res.message || 'Email verified successfully! Cashouts and referral bonuses unlocked.',
         });
         if (onStatusChanged) onStatusChanged(true);
+        setTimeout(() => setIsDismissed(true), 2000);
       } else {
         setFeedback({
           type: 'error',

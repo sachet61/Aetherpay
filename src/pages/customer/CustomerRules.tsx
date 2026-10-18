@@ -57,6 +57,7 @@ export const CustomerRules: React.FC<CustomerRulesProps> = ({ onNavigateTab }) =
       <div className="space-y-4">
         {sections.map((sec, idx) => {
           const Icon = sec.icon;
+          const isHtml = sec.text && (sec.text.includes('<p>') || sec.text.includes('<h3>') || sec.text.includes('<ul>') || sec.text.includes('<strong>'));
           return (
             <div
               key={idx}
@@ -66,13 +67,63 @@ export const CustomerRules: React.FC<CustomerRulesProps> = ({ onNavigateTab }) =
                 <Icon className="w-4 h-4 text-indigo-400 shrink-0" />
                 <h3>{sec.title}</h3>
               </div>
-              <p className="text-xs text-slate-300 leading-relaxed pl-6">
-                {sec.text}
-              </p>
+              {isHtml ? (
+                <div
+                  className="text-xs text-slate-300 leading-relaxed pl-6 space-y-2 prose prose-invert max-w-none"
+                  dangerouslySetInnerHTML={{ __html: sec.text }}
+                />
+              ) : (
+                <p className="text-xs text-slate-300 leading-relaxed pl-6 whitespace-pre-line">
+                  {sec.text}
+                </p>
+              )}
             </div>
           );
         })}
       </div>
+
+      {/* Official Community & Partner Channels */}
+      {(() => {
+        const anyConfig = config as any;
+        const partnerLinks = anyConfig.partnerLinks || anyConfig.partner_links || [];
+        const telegramChannel = anyConfig.telegramChannel || anyConfig.telegram_channel;
+
+        if (partnerLinks.length === 0 && !telegramChannel) return null;
+
+        return (
+          <div className="p-5 rounded-2xl border border-slate-800 bg-slate-900/90 space-y-3">
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <span>Official Community &amp; Verified Partner Channels</span>
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 pt-1">
+              {telegramChannel && (
+                <a
+                  href={`https://t.me/${telegramChannel.replace('@', '')}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="p-3 rounded-xl bg-slate-950 border border-cyan-800/60 hover:border-cyan-500 text-xs text-cyan-300 flex items-center justify-between transition-colors shadow-xs"
+                >
+                  <div className="font-semibold text-white">Telegram Channel</div>
+                  <span className="text-[11px] text-cyan-400 font-mono">@{telegramChannel.replace('@', '')} &rarr;</span>
+                </a>
+              )}
+              {partnerLinks.filter((p: any) => p.active !== false).map((p: any, i: number) => (
+                <a
+                  key={i}
+                  href={p.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="p-3 rounded-xl bg-slate-950 border border-slate-800 hover:border-slate-700 text-xs text-slate-300 flex items-center justify-between transition-colors shadow-xs"
+                >
+                  <span className="font-semibold text-white capitalize">{p.label || p.platform}</span>
+                  <span className="text-[10px] text-indigo-400 font-mono">Visit &rarr;</span>
+                </a>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col justify-between gap-4">

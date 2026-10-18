@@ -1398,12 +1398,14 @@ class DataService {
 
     // Try fetching from Supabase if not in cache yet
     if (supabase && isSupabaseConfigured()) {
-      supabase
-        .from('users')
-        .select('*')
-        .or(`id.eq.${userId},email.ilike.${userId}`)
-        .maybeSingle()
-        .then(({ data }) => {
+      (async () => {
+        try {
+          const { data } = await supabase
+            .from('users')
+            .select('*')
+            .or(`id.eq.${userId},email.ilike.${userId}`)
+            .maybeSingle();
+
           if (data) {
             const u: UserProfile = {
               id: data.id,
@@ -1426,8 +1428,10 @@ class DataService {
               window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'users' } }));
             }
           }
-        })
-        .catch(() => {});
+        } catch {
+          // Ignore background fetch error
+        }
+      })();
     }
 
     return undefined;
@@ -1500,6 +1504,81 @@ class DataService {
       message: `Role successfully updated to ${newRole.toUpperCase()} for ${targetUser.displayName}.`,
       user: targetUser,
     };
+  }
+
+  public async deleteUserCompletely(
+    targetUserId: string,
+    actingUser: UserProfile
+  ): Promise<{ success: boolean; message: string }> {
+    if (actingUser.role !== 'admin') {
+      return { success: false, message: 'Access Denied: Only administrators can delete users.' };
+    }
+
+    const targetUser = this.getUserById(targetUserId) || this.getUserByEmail(targetUserId);
+    if (!targetUser) {
+      return { success: false, message: 'User not found.' };
+    }
+
+    if (this.isProtectedParentAdmin(targetUser.email) || this.isProtectedParentAdmin(targetUser.id)) {
+      return { success: false, message: 'Security Guard: Cannot delete the permanent Super/Parent Administrator.' };
+    }
+
+    try {
+      // 1. Call server API to delete from Supabase Auth and all SQL tables
+      const resp = await fetch(`/api/admin/users/${targetUser.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        return { success: false, message: data.error || 'Failed to delete user on server.' };
+      }
+
+      // 2. Remove from local caches
+      const users = this.getUsers().filter((u) => u.id !== targetUser.id && u.email !== targetUser.email);
+      this.cache[STORAGE_KEYS.USERS] = users;
+      this.saveToLocalStorage(STORAGE_KEYS.USERS, users);
+
+      // Clean wallets
+      const wallets = { ...this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, {}) };
+      delete wallets[targetUser.id];
+      this.cache[STORAGE_KEYS.WALLETS] = wallets;
+      this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
+
+      // Clean game accounts
+      const accounts = this.getGameAccounts().filter((a) => a.customerId !== targetUser.id);
+      this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = accounts;
+      this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, accounts);
+
+      // Clean topups & withdrawals
+      const topups = this.getTopUpRequests().filter((t) => t.customerId !== targetUser.id);
+      this.cache[STORAGE_KEYS.TOPUPS] = topups;
+      this.saveToLocalStorage(STORAGE_KEYS.TOPUPS, topups);
+
+      const withdrawals = this.getWithdrawalRequests().filter((w) => w.customerId !== targetUser.id);
+      this.cache[STORAGE_KEYS.WITHDRAWALS] = withdrawals;
+      this.saveToLocalStorage(STORAGE_KEYS.WITHDRAWALS, withdrawals);
+
+      // Clean conversations
+      const convs = this.getConversations().filter((c) => c.customerId !== targetUser.id);
+      this.cache[STORAGE_KEYS.CONVERSATIONS] = convs;
+      this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, convs);
+
+      this.logAudit({
+        actorId: actingUser.id,
+        actorName: actingUser.displayName,
+        actorRole: actingUser.role,
+        action: 'USER_DELETED',
+        entityType: 'user',
+        entityId: targetUser.id,
+        details: `Administrator ${actingUser.displayName} permanently deleted user ${targetUser.email} (${targetUser.displayName}) and purged all related records.`,
+      });
+
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_deleted' } }));
+      return { success: true, message: `User ${targetUser.displayName} (${targetUser.email}) and all associated records have been completely purged.` };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Error executing complete user deletion.' };
+    }
   }
 
   public getCmsPolicies(): {
@@ -1930,11 +2009,19 @@ class DataService {
     reviewerId: string;
     reviewerName: string;
     notes?: string;
+    verifiedAmount?: number;
   }): { success: boolean; message: string } {
     const allReqs = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
     const req = allReqs.find((r) => r.id === params.requestId);
     if (!req) return { success: false, message: 'Request not found' };
     if (req.status === 'completed') return { success: false, message: 'Request is already completed (Double credit prevented).' };
+
+    if (params.verifiedAmount !== undefined && params.verifiedAmount > 0) {
+      req.amount = params.verifiedAmount;
+      const bonusPct = req.bonusPercentage || 0;
+      req.bonusAmount = Number(((req.amount * bonusPct) / 100).toFixed(2));
+      req.finalWalletCredit = Number((req.amount + req.bonusAmount).toFixed(2));
+    }
 
     req.status = 'completed';
     req.reviewerId = params.reviewerId;

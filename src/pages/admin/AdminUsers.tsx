@@ -18,6 +18,7 @@ import {
   Lock,
   MessageSquare,
   ShieldAlert,
+  Trash2,
 } from 'lucide-react';
 
 interface AdminUsersProps {
@@ -35,6 +36,8 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
   const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isUpdating, setIsUpdating] = useState<string | null>(null);
+  const [userToDelete, setUserToDelete] = useState<UserProfile | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const loadUsers = () => {
     setUsers(dataService.getUsers());
@@ -80,6 +83,27 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
       setFeedback({ type: 'error', text: err.message || 'Failed to update user role.' });
     } finally {
       setIsUpdating(null);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!userToDelete) return;
+    setIsDeleting(true);
+    setFeedback(null);
+    try {
+      const res = await dataService.deleteUserCompletely(userToDelete.id, currentUser);
+      if (res.success) {
+        setFeedback({ type: 'success', text: res.message });
+        setUsers(dataService.getUsers());
+        setUserToDelete(null);
+        setSelectedUser(null);
+      } else {
+        setFeedback({ type: 'error', text: res.message });
+      }
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message || 'Failed to delete user.' });
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -453,26 +477,91 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
               </div>
             </div>
 
-            {/* Quick Chat Link */}
-            <div className="pt-2 flex items-center gap-2">
+            {/* Quick Actions Footer */}
+            <div className="pt-2 flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedUser(null)}
+                  className="flex-1 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const conv = dataService.getOrCreateConversationForCustomer(selectedUser.id, selectedUser.displayName);
+                    setSelectedUser(null);
+                    onNavigateTab('ops_chat', { highlightConvId: conv.id });
+                  }}
+                  className="flex-1 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center justify-center gap-1.5 shadow-md shadow-indigo-600/20"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>Open Support Chat</span>
+                </button>
+              </div>
+
+              {isAdmin && !dataService.isProtectedParentAdmin(selectedUser.email) && (
+                <button
+                  type="button"
+                  onClick={() => setUserToDelete(selectedUser)}
+                  className="w-full py-2 rounded-xl bg-rose-950/50 hover:bg-rose-900/70 border border-rose-800/80 text-rose-300 font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Delete User &amp; Purge All Records</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Permanent Delete Confirmation Modal */}
+      {userToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm" onClick={() => !isDeleting && setUserToDelete(null)} />
+          <div className="relative w-full max-w-md bg-slate-900 border border-rose-700/80 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3 text-rose-400">
+              <div className="w-10 h-10 rounded-xl bg-rose-950 border border-rose-800 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5 text-rose-400" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Permanently Delete User?</h3>
+                <div className="text-xs text-rose-300/80">Irreversible Database Purge</div>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-rose-950/30 border border-rose-800/60 text-xs text-rose-200 leading-relaxed space-y-2">
+              <p>
+                You are about to completely delete <strong className="text-white">{userToDelete.displayName}</strong> (<span className="font-mono text-rose-300">{userToDelete.email}</span>).
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-slate-300 text-[11px]">
+                <li>Purges user from Supabase Auth &amp; database</li>
+                <li>Deletes wallet balance, transactions &amp; cashouts</li>
+                <li>Cleans provisioned game IDs and chat records</li>
+              </ul>
+              <p className="font-semibold text-amber-300 text-[11px] pt-1">
+                ⚠️ This action cannot be reversed.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setSelectedUser(null)}
-                className="flex-1 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
+                disabled={isDeleting}
+                onClick={() => setUserToDelete(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition cursor-pointer"
               >
-                Close
+                Cancel
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  const conv = dataService.getOrCreateConversationForCustomer(selectedUser.id, selectedUser.displayName);
-                  setSelectedUser(null);
-                  onNavigateTab('ops_chat', { highlightConvId: conv.id });
-                }}
-                className="flex-1 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center justify-center gap-1.5 shadow-md shadow-indigo-600/20"
+                disabled={isDeleting}
+                onClick={handleConfirmDelete}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold text-xs transition shadow-lg shadow-rose-600/30 flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
               >
-                <MessageSquare className="w-3.5 h-3.5" />
-                <span>Open Support Chat</span>
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeleting ? 'Purging Records...' : 'Yes, Delete Completely'}</span>
               </button>
             </div>
           </div>

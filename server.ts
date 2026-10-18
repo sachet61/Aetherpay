@@ -498,6 +498,13 @@ app.post('/api/auth/register', async (req, res) => {
       }
 
       const isVerified = Boolean(targetUser.email_confirmed_at);
+      if (isVerified) {
+        await supabaseAdmin
+          .from('users')
+          .update({ email_verified: true, updated_at: new Date().toISOString() })
+          .eq('id', targetUser.id);
+      }
+
       return res.json({
         exists: true,
         verified: isVerified,
@@ -509,6 +516,50 @@ app.post('/api/auth/register', async (req, res) => {
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Verification check failed' });
+    }
+  });
+
+  // Delete user completely from all tables and Supabase Auth
+  app.delete('/api/admin/users/:userId', async (req, res) => {
+    try {
+      const { userId } = req.params;
+      if (!userId) return res.status(400).json({ error: 'User ID is required' });
+
+      // Check if user is protected parent admin
+      const { data: targetUser } = await supabaseAdmin.from('users').select('*').eq('id', userId).maybeSingle();
+      if (targetUser?.email?.toLowerCase() === 'koofrkolagi@gmail.com') {
+        return res.status(403).json({ error: 'Cannot delete the protected Super/Parent Administrator.' });
+      }
+
+      // 1. Delete conversations & messages
+      const { data: convs } = await supabaseAdmin.from('conversations').select('id').eq('customer_id', userId);
+      if (convs && convs.length > 0) {
+        const convIds = convs.map((c) => c.id);
+        await supabaseAdmin.from('messages').delete().in('conversation_id', convIds);
+      }
+      await supabaseAdmin.from('messages').delete().eq('sender_id', userId);
+      await supabaseAdmin.from('conversations').delete().eq('customer_id', userId);
+
+      // 2. Delete topups & withdrawals
+      await supabaseAdmin.from('topups').delete().eq('customer_id', userId);
+      await supabaseAdmin.from('withdrawals').delete().eq('customer_id', userId);
+
+      // 3. Delete game accounts & wallets
+      await supabaseAdmin.from('game_accounts').delete().eq('customer_id', userId);
+      await supabaseAdmin.from('wallets').delete().eq('customer_id', userId);
+
+      // 4. Delete public.users record
+      await supabaseAdmin.from('users').delete().eq('id', userId);
+
+      // 5. Delete Supabase Auth user
+      await supabaseAdmin.auth.admin.deleteUser(userId).catch((err) => {
+        console.warn('Supabase auth.admin.deleteUser notice:', err.message);
+      });
+
+      return res.json({ success: true, message: `User ${userId} and all related records deleted completely.` });
+    } catch (err: any) {
+      console.error('Delete user error:', err);
+      return res.status(500).json({ error: err.message || 'Failed to delete user' });
     }
   });
 

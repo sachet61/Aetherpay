@@ -177,13 +177,28 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
         </div>
       )}
 
-      {/* Dynamic List of Games from Admin Catalog */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {catalog.map((game) => {
-          // Find matching account for current player
-          const account = playerAccounts.find(
-            (a) => a.gameCatalogId === game.id || a.gameName.toLowerCase() === game.title.toLowerCase()
-          );
+      {/* Dynamic List of Games from Admin Catalog - Priority Sorted: Active IDs First, Pending Second, Available to Request Third */}
+      {(() => {
+        const sortedCatalog = [...catalog].sort((a, b) => {
+          const accA = playerAccounts.find((acc) => acc.gameCatalogId === a.id || acc.gameName.toLowerCase() === a.title.toLowerCase());
+          const accB = playerAccounts.find((acc) => acc.gameCatalogId === b.id || acc.gameName.toLowerCase() === b.title.toLowerCase());
+          const getScore = (acc?: GameAccount) => {
+            if (acc?.status === 'active') return 0;
+            if (acc?.status === 'pending_assignment' || acc?.status === 'pending_reset') return 1;
+            return 2;
+          };
+          const scoreDiff = getScore(accA) - getScore(accB);
+          if (scoreDiff !== 0) return scoreDiff;
+          return a.title.localeCompare(b.title);
+        });
+
+        return (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {sortedCatalog.map((game) => {
+              // Find matching account for current player
+              const account = playerAccounts.find(
+                (a) => a.gameCatalogId === game.id || a.gameName.toLowerCase() === game.title.toLowerCase()
+              );
 
           const isRevealed = account ? !!revealedPasswords[account.id] : false;
           const hasActiveCredentials = account && account.status === 'active';
@@ -427,6 +442,8 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
           );
         })}
       </div>
+    );
+  })()}
 
       {/* Confirmation Modal for Requesting New Game ID */}
       {showRequestConfirmModal && (

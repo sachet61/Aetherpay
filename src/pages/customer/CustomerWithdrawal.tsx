@@ -59,6 +59,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
 
   // Destination handle
   const [payoutAccountHandle, setPayoutAccountHandle] = useState(registeredInfo.details || '');
+  const [cashtagAcknowledged, setCashtagAcknowledged] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -84,6 +85,11 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
 
     if (!currentUser.emailVerified) {
       setErrorMessage('Email verification required. Please verify your email before requesting a cashout.');
+      return;
+    }
+
+    if (!cashtagAcknowledged) {
+      setErrorMessage('Please confirm you have reviewed your payout cashtag and understand it cannot be refunded once sent.');
       return;
     }
 
@@ -314,6 +320,27 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
               />
             </div>
 
+            {/* Non-Refundable Cashtag Warning Notice */}
+            <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500/50 text-xs text-amber-200 space-y-2.5">
+              <div className="flex items-start gap-2.5">
+                <AlertCircle className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
+                <div className="font-semibold text-white leading-relaxed text-xs">
+                  ⚠️ Please review your cashtag before submission. Once sent the amount cannot be refunded.
+                </div>
+              </div>
+              <label className="flex items-center gap-2.5 cursor-pointer pt-1 text-slate-200 select-none">
+                <input
+                  type="checkbox"
+                  checked={cashtagAcknowledged}
+                  onChange={(e) => setCashtagAcknowledged(e.target.checked)}
+                  className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-amber-500"
+                />
+                <span className="text-[11px] font-medium text-slate-300">
+                  I have carefully checked my payout handle ({payoutAccountHandle || 'payout details'}) and understand it cannot be refunded or recalled once sent.
+                </span>
+              </label>
+            </div>
+
             {/* Support Notice */}
             <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/30 text-xs text-slate-300 flex items-start gap-2.5">
               <MessageCircle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
@@ -350,13 +377,15 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
             {/* Submit Button */}
             <button
               type="submit"
-              disabled={isSubmitting || !lastPaymentMethod || !currentUser.emailVerified}
-              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
+              disabled={isSubmitting || !lastPaymentMethod || !currentUser.emailVerified || !cashtagAcknowledged}
+              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
             >
               <ArrowUpFromLine className="w-4 h-4" />
               <span>
                 {!currentUser.emailVerified
                   ? 'Verify Email to Request Cashout'
+                  : !cashtagAcknowledged
+                  ? 'Confirm Cashtag Warning to Continue'
                   : isSubmitting
                   ? 'Initiating Support Cashout...'
                   : `Request Cashout ($${parsedAmount.toFixed(2)}) & Open Support Chat`}
