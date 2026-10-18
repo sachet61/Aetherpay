@@ -6,7 +6,6 @@ import { INITIAL_USERS } from './seedData';
 
 export const PREDEFINED_ADMINS = [
   'blithesweeps@gmail.com',
-  'sachet61@gmail.com',
   'admin@aetherpay.com',
   'support@aetherpay.com',
 ];
@@ -69,11 +68,11 @@ export const SEED_CREDENTIALS: Record<string, { email: string; pass: string; rol
     role: 'admin',
     name: 'Dev Admin',
   },
-  owner: {
+  sachet: {
     email: 'sachet61@gmail.com',
-    pass: 'Admin@123456',
-    role: 'admin',
-    name: 'Sachet (Admin Owner)',
+    pass: 'Player@123456',
+    role: 'customer',
+    name: 'Sachet Basukala',
   },
   alex: {
     email: 'alex.cross@aetherpay.com',

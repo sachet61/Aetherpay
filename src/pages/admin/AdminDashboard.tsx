@@ -98,7 +98,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       </div>
 
       {/* Role-Specific Quick Capabilities Banner */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {/* Capability 1: Game Credentials Desk */}
         <div
           onClick={() => onNavigateTab('ops_game_credentials')}
@@ -160,7 +160,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <span className="text-[9px] font-mono text-amber-400 uppercase tracking-wider">Admin Only</span>
               </div>
               <p className="text-[11px] text-amber-200/70 truncate">
-                Manage and configure {catalog.length} games shown to players
+                Configure {catalog.length} games shown to players
               </p>
             </div>
           </div>
@@ -182,6 +182,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
         )}
+
+        {/* Capability 4: User Directory & Staff Role Governance */}
+        <div
+          onClick={() => onNavigateTab('ops_users')}
+          className={`cursor-pointer p-4 rounded-xl border transition-colors flex items-center gap-3.5 ${
+            isAdmin
+              ? 'border-amber-900/40 bg-amber-950/20 hover:border-amber-500/50'
+              : 'border-slate-800 bg-slate-900/90 hover:border-cyan-500/50'
+          }`}
+        >
+          <div
+            className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${
+              isAdmin ? 'bg-amber-950 text-amber-400' : 'bg-cyan-950 text-cyan-400'
+            }`}
+          >
+            <Users className="w-5 h-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold text-white">
+                {isAdmin ? 'Users & Governance' : 'User Directory'}
+              </h3>
+              <span
+                className={`text-[9px] font-mono px-1.5 py-0.2 rounded uppercase ${
+                  isAdmin ? 'text-amber-400 bg-amber-950/80' : 'text-cyan-400 bg-cyan-950/80'
+                }`}
+              >
+                {isAdmin ? 'Role Admin' : 'Read-Only'}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-400 truncate">
+              {isAdmin
+                ? 'Manage roles (Agent / Admin). Parent Admin locked.'
+                : 'Inspect customer profiles, balances & game IDs'}
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* KPI Cards Strip */}

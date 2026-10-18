@@ -198,6 +198,17 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
               </button>
 
               <button
+                onClick={() => onNavigateTab('ops_users')}
+                className={`transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                  activeTab === 'ops_users' ? 'text-amber-400 font-bold' : 'hover:text-slate-200'
+                }`}
+                title="View customer profiles, game accounts & details (Agent read-only)"
+              >
+                <Users className="w-3.5 h-3.5 text-cyan-400" />
+                <span>User Directory</span>
+              </button>
+
+              <button
                 onClick={() => onNavigateTab('ops_dashboard')}
                 className={`transition-colors whitespace-nowrap ${
                   activeTab === 'ops_dashboard' ? 'text-amber-400 font-bold' : 'hover:text-slate-200'
@@ -218,6 +229,17 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                 }`}
               >
                 Overview
+              </button>
+
+              <button
+                onClick={() => onNavigateTab('ops_users')}
+                className={`transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                  activeTab === 'ops_users' ? 'text-amber-400 font-bold' : 'hover:text-slate-200'
+                }`}
+                title="Manage users, view profiles, and govern staff roles (Admin authority)"
+              >
+                <Users className="w-3.5 h-3.5 text-amber-400" />
+                <span>Users &amp; Roles</span>
               </button>
 
               <button

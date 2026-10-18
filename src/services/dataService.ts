@@ -1443,13 +1443,23 @@ class DataService {
     return this.getUsers().find((u) => u.email?.toLowerCase() === clean);
   }
 
-  public isProtectedParentAdmin(emailOrId: string): boolean {
+  public isProtectedParentAdmin(emailOrId?: string, user?: UserProfile): boolean {
+    if (user && user.role !== 'admin') return false;
+    if (user?.isParentAdmin && user.role === 'admin') return true;
     if (!emailOrId) return false;
+
+    const foundUser = this.getUserById(emailOrId) || this.getUserByEmail(emailOrId);
+    if (foundUser && foundUser.role !== 'admin') return false;
+
     const clean = emailOrId.trim().toLowerCase();
     return (
-      clean === 'koofrkolagi@gmail.com' ||
       clean === 'admin@swiftsweeps.com' ||
-      clean === 'usr_admin_master'
+      clean === 'admin@aetherpay.com' ||
+      clean === 'alex.cross@aetherpay.com' ||
+      clean === 'nduphasetwo@gmail.com' ||
+      clean === 'blithesweeps@gmail.com' ||
+      clean === 'usr_admin_master' ||
+      clean === 'usr_admin_1'
     );
   }
 
@@ -1461,26 +1471,69 @@ class DataService {
     if (actingUser.role !== 'admin') {
       return {
         success: false,
-        message: 'Access Denied: Only administrators have authority to promote or change user roles.',
+        message: 'Access Denied: Support Agents have read-only permissions. Only Administrators can promote or alter user roles.',
       };
     }
 
     const targetUser = this.getUserById(targetUserId) || this.getUserByEmail(targetUserId);
     if (!targetUser) {
-      return { success: false, message: 'User not found.' };
+      return { success: false, message: 'User not found in system directory.' };
     }
 
-    if (this.isProtectedParentAdmin(targetUser.email) || this.isProtectedParentAdmin(targetUser.id)) {
+    const isParentAdmin =
+      this.isProtectedParentAdmin(targetUser.email, targetUser) ||
+      this.isProtectedParentAdmin(targetUser.id, targetUser) ||
+      targetUser.isParentAdmin;
+
+    if (isParentAdmin) {
       if (newRole !== 'admin') {
         return {
           success: false,
-          message: 'Security Guard: The primary platform creator is permanently designated as Super Admin and cannot be demoted.',
+          message: 'Security Guard: Newly appointed administrators cannot demote the Parent Admin. The primary platform administrator role is permanently protected.',
         };
       }
     }
 
+    if (actingUser.id === targetUser.id && newRole !== 'admin') {
+      return {
+        success: false,
+        message: 'Self-Demotion Guard: You cannot demote your own administrator account. Another admin must perform this action.',
+      };
+    }
+
+    try {
+      // 1. Synchronize to server API and Supabase
+      const resp = await fetch(`/api/admin/users/${targetUser.id}/role`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          newRole,
+          actingUserId: actingUser.id,
+          actingUserRole: actingUser.role,
+        }),
+      });
+
+      if (!resp.ok) {
+        const errorData = await resp.json().catch(() => ({}));
+        if (resp.status === 403) {
+          return {
+            success: false,
+            message: errorData.error || 'Security Guard: Newly appointed administrators cannot demote the Parent Admin.',
+          };
+        }
+      }
+    } catch (e) {
+      console.warn('Server role sync notice:', e);
+    }
+
     targetUser.role = newRole;
-    const allUsers = this.getUsers().map((u) => (u.id === targetUser.id ? { ...u, role: newRole } : u));
+    targetUser.promotedBy = actingUser.id;
+    targetUser.promotedByName = actingUser.displayName;
+    targetUser.promotedAt = new Date().toISOString();
+
+    const allUsers = this.getUsers().map((u) =>
+      u.id === targetUser.id ? { ...u, role: newRole, promotedBy: actingUser.id, promotedByName: actingUser.displayName, promotedAt: targetUser.promotedAt } : u
+    );
     this.cache[STORAGE_KEYS.USERS] = allUsers;
     this.saveToLocalStorage(STORAGE_KEYS.USERS, allUsers);
 
@@ -1495,10 +1548,10 @@ class DataService {
       action: 'USER_ROLE_UPDATED',
       entityType: 'user',
       entityId: targetUser.id,
-      details: `Role for ${targetUser.displayName} (${targetUser.email}) changed to ${newRole} by ${actingUser.displayName}.`,
+      details: `Role for ${targetUser.displayName} (${targetUser.email}) changed to ${newRole.toUpperCase()} by ${actingUser.displayName}.`,
     });
 
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_role_updated' } }));
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_role_updated', userId: targetUser.id, newRole } }));
     return {
       success: true,
       message: `Role successfully updated to ${newRole.toUpperCase()} for ${targetUser.displayName}.`,
@@ -3423,8 +3476,29 @@ class DataService {
       dirty = true;
     }
     if (!cfg.cashoutFeed) {
-      cfg.cashoutFeed = INITIAL_CONFIG.cashoutFeed;
+      cfg.cashoutFeed = { ...INITIAL_CONFIG.cashoutFeed };
       dirty = true;
+    } else {
+      if (cfg.cashoutFeed.enabled === undefined) {
+        cfg.cashoutFeed.enabled = true;
+        dirty = true;
+      }
+      if (!cfg.cashoutFeed.namesPool || cfg.cashoutFeed.namesPool.length === 0) {
+        cfg.cashoutFeed.namesPool = [...INITIAL_CONFIG.cashoutFeed.namesPool];
+        dirty = true;
+      }
+      if (!cfg.cashoutFeed.probableAmounts || cfg.cashoutFeed.probableAmounts.length === 0) {
+        cfg.cashoutFeed.probableAmounts = [...INITIAL_CONFIG.cashoutFeed.probableAmounts];
+        dirty = true;
+      }
+      if (!cfg.cashoutFeed.minAmount) {
+        cfg.cashoutFeed.minAmount = 50;
+        dirty = true;
+      }
+      if (!cfg.cashoutFeed.maxAmount) {
+        cfg.cashoutFeed.maxAmount = 250;
+        dirty = true;
+      }
     }
     if (dirty) {
       this.save(STORAGE_KEYS.CONFIG, cfg);
@@ -3543,7 +3617,7 @@ class DataService {
 
   public getMixedCashoutFeed(limit: number = 20): CashoutFeedItem[] {
     const cfg = this.getAppConfig();
-    if (!cfg.cashoutFeed.enabled) return [];
+    if (cfg.cashoutFeed?.enabled === false) return [];
 
     // 1. Gather Real Cashouts (from completed or processing withdrawals)
     const realWithdrawals = this.getWithdrawalRequests();
@@ -3551,13 +3625,14 @@ class DataService {
       .filter((w) => w.status === 'completed' || w.status === 'processing')
       .map((w) => ({
         id: `real_${w.id}`,
+        playerHandle: w.customerName,
         customerName: w.customerName,
         amount: w.amount,
         currency: w.currency,
         methodName: w.methodName || 'Bank Transfer',
-        gameName: 'Platform Vault',
+        gameName: w.sourceGameName || 'Platform Vault',
         isFake: false,
-        timestamp: w.createdAt,
+        timestamp: w.updatedAt || w.createdAt || new Date().toISOString(),
       }));
 
     // 2. Load stored faked cashouts or generate initial seed batch
@@ -3604,6 +3679,7 @@ class DataService {
 
       items.push({
         id: `fake_${now}_${i}`,
+        playerHandle: name,
         customerName: name,
         amount: finalAmt,
         currency: cfg.currency || 'USD',
@@ -3619,13 +3695,13 @@ class DataService {
 
   public injectNewFakeCashout(): CashoutFeedItem | null {
     const cfg = this.getAppConfig();
-    if (!cfg.cashoutFeed?.enabled) return null;
+    if (cfg.cashoutFeed?.enabled === false) return null;
 
-    const pool = cfg.cashoutFeed.namesPool?.length ? cfg.cashoutFeed.namesPool : ['Player_' + Math.floor(Math.random() * 1000)];
+    const pool = cfg.cashoutFeed?.namesPool?.length ? cfg.cashoutFeed.namesPool : ['Marcus_V', 'Elena_R', 'Tyler_K', 'LuckyHunter', 'ApexPro', 'Chloe_B'];
     const randomName = pool[Math.floor(Math.random() * pool.length)];
-    const min = cfg.cashoutFeed.minAmount || 50;
-    const max = cfg.cashoutFeed.maxAmount || 250;
-    const probableAmounts = cfg.cashoutFeed.probableAmounts?.length
+    const min = cfg.cashoutFeed?.minAmount || 50;
+    const max = cfg.cashoutFeed?.maxAmount || 250;
+    const probableAmounts = cfg.cashoutFeed?.probableAmounts?.length
       ? cfg.cashoutFeed.probableAmounts
       : [50, 75, 100, 120, 140, 150, 180, 200, 220, 250];
 
@@ -3639,6 +3715,7 @@ class DataService {
 
     const newItem: CashoutFeedItem = {
       id: `fake_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      playerHandle: randomName,
       customerName: randomName,
       amount,
       currency: cfg.currency || 'USD',
@@ -3653,6 +3730,7 @@ class DataService {
     if (currentFakes.length > 40) currentFakes.pop();
     this.saveFakedCashouts(currentFakes);
 
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'cashout_feed_updated' } }));
     return newItem;
   }
 

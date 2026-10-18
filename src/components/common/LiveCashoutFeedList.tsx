@@ -75,7 +75,7 @@ export const LiveCashoutFeedList: React.FC<LiveCashoutFeedListProps> = ({
               </div>
               <div className="min-w-0">
                 <div className="font-semibold text-white truncate max-w-[140px] sm:max-w-[200px]">
-                  {item.customerName}
+                  {item.customerName || item.playerHandle || 'Player'}
                 </div>
                 <div className="text-[11px] text-slate-400 flex items-center gap-1 truncate">
                   <span>{item.methodName}</span>

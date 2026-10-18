@@ -376,8 +376,8 @@ app.post('/api/auth/register', async (req, res) => {
       // Update password in Supabase Auth via admin API
       try {
         const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
-        const targetUser = userList?.users?.find(
-          (u) => u.email?.toLowerCase() === record.email.toLowerCase()
+        const targetUser = (userList?.users as any[])?.find(
+          (u: any) => u.email?.toLowerCase() === record.email.toLowerCase()
         );
         if (targetUser) {
           await supabaseAdmin.auth.admin.updateUserById(targetUser.id, {
@@ -449,8 +449,8 @@ app.post('/api/auth/register', async (req, res) => {
       const cleanEmail = email.trim().toLowerCase();
 
       const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
-      const targetUser = userList?.users?.find(
-        (u) => u.email?.toLowerCase() === cleanEmail
+      const targetUser = (userList?.users as any[])?.find(
+        (u: any) => u.email?.toLowerCase() === cleanEmail
       );
       if (!targetUser) {
         return res.status(404).json({ error: 'User not found in Supabase Auth' });
@@ -485,8 +485,8 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(400).json({ error: error.message });
       }
 
-      const targetUser = userList?.users?.find(
-        (u) => u.email?.toLowerCase() === cleanEmail
+      const targetUser = (userList?.users as any[])?.find(
+        (u: any) => u.email?.toLowerCase() === cleanEmail
       );
 
       if (!targetUser) {
@@ -519,6 +519,78 @@ app.post('/api/auth/register', async (req, res) => {
     }
   });
 
+  // Update user role with Parent Admin protection
+  app.patch('/api/admin/users/:userId/role', async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { newRole, actingUserId, actingUserRole } = req.body;
+
+      if (!userId || !newRole) {
+        return res.status(400).json({ error: 'User ID and newRole are required' });
+      }
+
+      if (!['customer', 'agent', 'admin'].includes(newRole)) {
+        return res.status(400).json({ error: 'Invalid role specified. Must be customer, agent, or admin.' });
+      }
+
+      if (actingUserRole && actingUserRole !== 'admin') {
+        return res.status(403).json({ error: 'Access Denied: Only administrators can modify roles.' });
+      }
+
+      // Check target user
+      const { data: targetUser, error: findErr } = await supabaseAdmin
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (findErr || !targetUser) {
+        return res.status(404).json({ error: 'User not found in database.' });
+      }
+
+      const protectedEmails = [
+        'admin@swiftsweeps.com',
+        'admin@aetherpay.com',
+        'alex.cross@aetherpay.com',
+        'nduphasetwo@gmail.com',
+        'blithesweeps@gmail.com',
+      ];
+      const isParentAdmin =
+        targetUser.role === 'admin' &&
+        (protectedEmails.includes(targetUser.email?.toLowerCase()) ||
+          userId === 'usr_admin_master' ||
+          userId === 'usr_admin_1');
+
+      if (isParentAdmin && newRole !== 'admin') {
+        return res.status(403).json({
+          error: 'Security Guard: Newly appointed administrators cannot demote the Parent Admin. The primary platform administrator role is permanently protected.',
+        });
+      }
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from('users')
+        .update({
+          role: newRole,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', userId)
+        .select()
+        .single();
+
+      if (updateErr) {
+        return res.status(500).json({ error: updateErr.message || 'Failed to update user role in database' });
+      }
+
+      return res.json({
+        success: true,
+        message: `Role successfully updated to ${newRole.toUpperCase()} for ${targetUser.display_name}.`,
+        user: updated,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to update role' });
+    }
+  });
+
   // Delete user completely from all tables and Supabase Auth
   app.delete('/api/admin/users/:userId', async (req, res) => {
     try {
@@ -527,7 +599,19 @@ app.post('/api/auth/register', async (req, res) => {
 
       // Check if user is protected parent admin
       const { data: targetUser } = await supabaseAdmin.from('users').select('*').eq('id', userId).maybeSingle();
-      if (targetUser?.email?.toLowerCase() === 'koofrkolagi@gmail.com') {
+      const protectedEmails = [
+        'admin@swiftsweeps.com',
+        'admin@aetherpay.com',
+        'alex.cross@aetherpay.com',
+        'nduphasetwo@gmail.com',
+        'blithesweeps@gmail.com',
+      ];
+      if (
+        targetUser?.role === 'admin' &&
+        (protectedEmails.includes(targetUser?.email?.toLowerCase()) ||
+          userId === 'usr_admin_master' ||
+          userId === 'usr_admin_1')
+      ) {
         return res.status(403).json({ error: 'Cannot delete the protected Super/Parent Administrator.' });
       }
 

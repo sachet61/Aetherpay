@@ -183,7 +183,7 @@ export default function App() {
         />
 
         {/* Continuous News-Style Horizontal Live Cashouts Marquee Ticker */}
-        {isCustomer && <LiveCashoutTicker />}
+        <LiveCashoutTicker />
 
         {/* Main Content Viewport */}
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 w-full max-w-7xl mx-auto">
