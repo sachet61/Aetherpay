@@ -1,64 +1,75 @@
-# Implementation Plan: Fix Uncapped Queries & Eliminate Supabase Egress Spikes
+# Implementation Plan: Eliminate High REST API Egress & Transition to Pure Scoped Realtime
 
-Resolve the massive data transfer spikes (16 GB limit exhaustion) and PostgreSQL statement timeouts (HTTP 500 errors) caused by uncapped `select('*')` queries across `topups`, `messages`, and transaction tables. Implement query capping and on-demand pagination ("Load More") for older records.
+Address the root cause of continuous Supabase REST request spikes (~16,000+ daily GET requests across `messages`, `conversations`, `wallets`, `users`, `topups`, `withdrawals`, etc.) by removing redundant REST `syncDelta` bursts, scoping queries strictly to the active authenticated user, and relying on pure event-driven WebSocket payloads for real-time updates.
 
 ---
 
-## User Review Required
+## Root Cause Analysis
 
-> [!IMPORTANT]
-> The database timeouts (`canceling statement due to statement timeout` returning HTTP 500 on `GET /topups?select=*&order=created_at.desc`) occurred because the query attempted to scan and download the entire table on app load without a `limit`.
-> 
-> By capping initial loads to the most recent records (e.g., 50 topups, 50-100 messages) and adding an on-demand "Load More" mechanism, initial query payload drops by over 90%, preventing timeouts and excessive bandwidth consumption.
+1. **Redundant REST Catch-Up Loop (`syncDelta`)**:
+   - Every time a browser tab regained focus or the Realtime WebSocket connection re-established, `syncDelta()` dispatched 7 parallel REST requests across `topups`, `withdrawals`, `wallets`, `users`, `game_accounts`, `conversations`, and `messages`.
+   - With multiple users or tab-switching, this generated 1,700–2,480 REST calls per table within 24 hours.
+
+2. **Unscoped Global Table Reads**:
+   - Customers opening the app triggered queries for all users and all wallets in the database rather than scoping solely to their own record (`customer_id = currentUser.id`).
+   - Every client-side wallet or user state save triggered a bulk upsert of the entire cache, broadcasting change events to all connected clients and creating broadcast amplification.
+
+3. **Duplication Between Realtime & REST**:
+   - Supabase Realtime already delivers the updated row directly inside `payload.new`. Fetching the entire table again via REST upon receiving a change or reconnecting was completely redundant.
 
 ---
 
 ## Proposed Changes
 
-### Data Access Layer (`src/services/dataService.ts`)
+### 1. Data Access & Synchronization Layer (`src/services/dataService.ts`)
 
-#### 1. Cap Topups & Transaction Queries
-- In `fetchTopups` / `getTopups`:
-  - Add default limit: `.limit(50)` ordered by `created_at desc`.
-  - Add pagination support `fetchTopups(offset = 0, limit = 50)` or cursor-based range query `.range(offset, offset + limit - 1)`.
-- In `fetchWithdrawals` / `getWithdrawals`:
-  - Apply `.limit(50)` and range pagination instead of uncapped `select('*')`.
-- In `fetchTransactions` / `getTransactions`:
-  - Enforce `.limit(50)` to prevent multi-megabyte payloads.
+#### A. Remove Automatic REST Catch-Up (`syncDelta`) on Focus & Reconnect
+- Remove the automatic multi-table `syncDelta()` trigger inside `document.addEventListener('visibilitychange')`.
+- Remove `this.syncDelta()` call on WebSocket channel `SUBSCRIBED` status.
+- Ensure the app stays connected to Realtime without firing 7 parallel REST queries every time a tab is clicked.
 
-#### 2. Cap Messages & Chat Queries
-- In `fetchMessages` / `getMessages`:
-  - Add query limit `.limit(100)` ordered by `created_at desc` (reversed in UI for standard chat display) or `.order('created_at', { ascending: true }).limit(100)` for active channel/conversation.
-  - Add `loadOlderMessages(conversationId, beforeTimestamp, limit = 50)` to load previous chat messages only when the user scrolls up or clicks "Load Older Messages".
+#### B. Direct Event-Driven Ingestion from Realtime Payloads
+- Update `queueRealtimeMutation` and `flushRealtimeMutations`:
+  - Directly apply `payload.new` into local in-memory cache and dispatch `aetherpay_state_changed`.
+  - Never trigger a background REST query when processing Realtime stream events.
 
-#### 3. Audit Other Tables
-- Check `conversations`, `wallets`, `game_catalog`, `users`, and `faked_cashouts` queries in `dataService.ts`.
-- Ensure appropriate column selection (avoiding unnecessary large fields) and sensible upper bounds (`limit(50)` to `limit(100)`).
+#### C. Role & User-Scoped Queries
+- Update `initialCompactLoad()` and customer hydration methods:
+  - **For Customers**:
+    - `wallets`: `.eq('customer_id', currentUserId).maybeSingle()`
+    - `game_accounts`: `.eq('customer_id', currentUserId)`
+    - `topups`: `.eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20)`
+    - `withdrawals`: `.eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20)`
+    - `conversations`: `.eq('customer_id', currentUserId).maybeSingle()`
+    - Do NOT query the global `users` table or other customers' wallets.
+  - **For Admins**:
+    - Load administrative queues on-demand when the admin navigates to the respective dashboard view, using query limits (`limit(30)`) and pagination.
 
----
-
-### UI Components
-
-#### 4. Topup & Transaction History ("Load More")
-- Update transaction and topup history views (e.g. `TransactionHistoryModal`, `AdminTransactionsView`, or user profile sections):
-  - Display the initial 50 records.
-  - Add a clean "Load More" button or infinite scroll trigger when more records exist.
-  - Prevent duplicate requests while loading.
-
-#### 5. Chat & Messages ("Load Older Messages")
-- Update chat interface (`ChatModal`, `MessageList`, etc.):
-  - Load the latest 50-100 messages by default.
-  - Add a "Load Older Messages" button at the top of the chat thread.
-  - Seamlessly prepend older messages without resetting scroll position.
+#### D. Single-Record Upserts
+- Replace bulk table upserts in `saveToSupabase` with targeted single-record upserts:
+  - When a user's wallet changes, upsert only that user's wallet record.
+  - When an individual request or message is created, upsert/insert only that single row.
 
 ---
 
-## Verification Plan
+### 2. Chat & Communication Layer (`src/pages/customer/CustomerChat.tsx` & `src/pages/admin/AdminChat.tsx`)
 
-### Automated Build & Type Checking
-- Run `compile_applet` to ensure TypeScript types and build succeed with no regressions.
-- Run `lint_applet` to verify no import or syntax issues.
+#### A. Pure WebSocket Realtime for Live Messages
+- Listen to Supabase Realtime `INSERT` on `messages` table filtered by `conversation_id=eq.{id}`.
+- Append new incoming messages directly from `payload.new` without re-querying the REST API.
 
-### Query & Egress Verification
-- Verify that every Supabase PostgREST query on `topups`, `messages`, and `withdrawals` now includes `.limit(...)` or `.range(...)`.
-- Confirm query URLs generated by the Supabase client will send `limit=50` / `limit=100` instead of unbounded `select=*`.
+#### B. Scoped Initial Chat Load with Pagination
+- Load only the most recent 40 messages for the active conversation on open.
+- Load older messages only when the user explicitly clicks "Load Older Messages" via `fetchOlderMessages(conversationId, beforeTimestamp, 40)`.
+
+---
+
+### 3. Verification & Metrics
+
+- **Build & Syntax Verification**:
+  - Run `compile_applet` and `lint_applet` to confirm zero TypeScript compilation errors and clean builds.
+- **REST Request Validation**:
+  - Verify that tab switching or WebSocket reconnects do not trigger any REST requests in the network panel.
+  - Verify that customer session loads only fire targeted queries for their own records.
+- **Realtime Responsiveness**:
+  - Test chat sending and live status updates to confirm instant delivery over WebSocket.

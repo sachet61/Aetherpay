@@ -105,8 +105,8 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     setMessages(dataService.getMessages(conv.id));
     dataService.markConversationRead(conv.id, 'customer');
 
-    // Asynchronously hydrate messages directly from PostgreSQL to ensure no messages are missed
-    dataService.fetchMessagesForConversation(conv.id).then((freshMsgs) => {
+    // Asynchronously hydrate messages directly from PostgreSQL capped strictly to 40 records
+    dataService.fetchMessagesForConversation(conv.id, { limit: 40 }).then((freshMsgs) => {
       if (freshMsgs && freshMsgs.length > 0) {
         setMessages(freshMsgs);
       }

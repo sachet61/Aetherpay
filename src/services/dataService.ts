@@ -192,20 +192,18 @@ class DataService {
     }
 
     if (document.visibilityState === 'visible') {
-      console.log('[SwiftSweeps] Browser tab active. Resuming synchronization.');
-      this.syncStatus = 'syncing';
+      console.log('[SwiftSweeps] Browser tab active. Realtime WebSocket stream maintaining live state with 0 polling egress.');
+      this.syncStatus = 'connected';
       window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
 
       const now = Date.now();
       const lastSync = this.lastSyncTimestamp ? new Date(this.lastSyncTimestamp).getTime() : 0;
       const hoursDormant = (now - lastSync) / (1000 * 60 * 60);
 
+      // Only run a compact refresh if the user returns after a dormant overnight session (>12 hours)
       if (!this.lastSyncTimestamp || hoursDormant > 12) {
-        console.log('[SwiftSweeps] Tab dormant for >12h or fresh session. Running initial compact load.');
+        console.log('[SwiftSweeps] Tab dormant for >12h. Running targeted initial compact load.');
         this.initialCompactLoad();
-      } else {
-        console.log(`[SwiftSweeps] Catching up delta mutations since ${this.lastSyncTimestamp}...`);
-        this.syncDelta();
       }
     }
   }
@@ -262,9 +260,7 @@ class DataService {
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           this.syncStatus = 'connected';
-          if (this.lastSyncTimestamp) {
-            this.syncDelta();
-          }
+          // Rely purely on Realtime events; do NOT burst REST sync queries upon subscription
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
           this.syncStatus = 'reconnecting';
         }
@@ -356,35 +352,89 @@ class DataService {
     window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
 
     try {
-      const [topupsRes, withdrawalsRes, walletsRes, cashoutsRes, usersRes, gameAccountsRes, appConfigRes, convsRes, msgsRes] =
-        await Promise.all([
-          supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(25),
-          supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(25),
-          supabase.from('wallets').select('*').limit(50),
-          supabase.from('faked_cashouts').select('*').order('timestamp', { ascending: false }).limit(25),
-          supabase.from('users').select('*').limit(50),
-          supabase.from('game_accounts').select('*').order('created_at', { ascending: false }).limit(25),
-          supabase.from('app_config').select('data').eq('id', 'main').maybeSingle(),
-          supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
-          supabase.from('messages').select('*').order('created_at', { ascending: false }).limit(40),
-        ]);
+      const user = this.getCurrentUser();
+      const isAdmin = user?.role === 'admin' || user?.role === 'agent';
+      const currentUserId = user?.id;
 
+      // Always load app config (single row)
+      const appConfigPromise = supabase.from('app_config').select('data').eq('id', 'main').maybeSingle();
+
+      // Load public live ticker cashouts (limit 15)
+      const cashoutsPromise = supabase.from('faked_cashouts').select('*').order('timestamp', { ascending: false }).limit(15);
+
+      // Load game catalog if not in local cache
+      let catPromise: Promise<any> = Promise.resolve({ data: null });
       if (!this.cache[STORAGE_KEYS.GAME_CATALOG] || (this.cache[STORAGE_KEYS.GAME_CATALOG] as any[]).length === 0) {
-        const { data: catData } = await supabase.from('game_catalog').select('*').order('created_at', { ascending: true }).limit(30);
-        if (catData && catData.length > 0) {
-          this.applyCatalogRows(catData);
-        }
+        catPromise = Promise.resolve(
+          supabase.from('game_catalog').select('*').order('created_at', { ascending: true }).limit(30)
+        );
       }
 
-      if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
-      if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
-      if (walletsRes.data) this.applyWalletRows(walletsRes.data);
-      if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
-      if (usersRes.data) this.applyUserRows(usersRes.data);
-      if (gameAccountsRes.data) this.applyGameAccountRows(gameAccountsRes.data, true);
-      if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
-      if (convsRes.data) this.applyConversationRows(convsRes.data, true);
-      if (msgsRes.data) this.applyMessageRows(msgsRes.data);
+      if (isAdmin) {
+        // Staff/Admin session: bounded administrative queue queries
+        const [appConfigRes, cashoutsRes, catRes, topupsRes, withdrawalsRes, walletsRes, convsRes, usersRes] =
+          await Promise.all([
+            appConfigPromise,
+            cashoutsPromise,
+            catPromise,
+            supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(25),
+            supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(25),
+            supabase.from('wallets').select('*').limit(25),
+            supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
+            supabase.from('users').select('*').limit(25),
+          ]);
+
+        if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
+        if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
+        if (catRes?.data && catRes.data.length > 0) this.applyCatalogRows(catRes.data);
+        if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
+        if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
+        if (walletsRes.data) this.applyWalletRows(walletsRes.data);
+        if (convsRes.data) this.applyConversationRows(convsRes.data, true);
+        if (usersRes.data) this.applyUserRows(usersRes.data);
+      } else if (currentUserId) {
+        // Customer session: strictly scoped to CURRENT user only (no global table downloads)
+        const [appConfigRes, cashoutsRes, catRes, walletRes, topupsRes, withdrawalsRes, gameAccsRes, convRes] =
+          await Promise.all([
+            appConfigPromise,
+            cashoutsPromise,
+            catPromise,
+            supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
+            supabase.from('topups').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20),
+            supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20),
+            supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(20),
+            supabase.from('conversations').select('*').eq('customer_id', currentUserId).maybeSingle(),
+          ]);
+
+        if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
+        if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
+        if (catRes?.data && catRes.data.length > 0) this.applyCatalogRows(catRes.data);
+        if (walletRes.data) this.applyWalletRows([walletRes.data]);
+        if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
+        if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
+        if (gameAccsRes.data) this.applyGameAccountRows(gameAccsRes.data, true);
+        if (convRes.data) {
+          this.applyConversationRows([convRes.data], false);
+          // Hydrate customer's active chat messages capped at 40
+          const { data: msgData } = await supabase
+            .from('messages')
+            .select('*')
+            .eq('conversation_id', convRes.data.id)
+            .order('created_at', { ascending: false })
+            .limit(40);
+          if (msgData) this.applyMessageRows(msgData);
+        }
+      } else {
+        // Unauthenticated visitor: only public app config, catalog, and ticker
+        const [appConfigRes, cashoutsRes, catRes] = await Promise.all([
+          appConfigPromise,
+          cashoutsPromise,
+          catPromise,
+        ]);
+        if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
+        if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
+        if (catRes?.data && catRes.data.length > 0) this.applyCatalogRows(catRes.data);
+      }
 
       this.lastSyncTimestamp = new Date().toISOString();
       this.syncStatus = 'connected';
@@ -404,47 +454,48 @@ class DataService {
     this.syncStatus = 'syncing';
     window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
 
-    const sinceIso = this.lastSyncTimestamp || new Date(Date.now() - 60000).toISOString();
     try {
-      const [topupsRes, withdrawalsRes, walletsRes, usersRes, gameAccountsRes, convsRes, msgsRes] =
-        await Promise.all([
-          supabase.from('topups').select('*').gt('updated_at', sinceIso).limit(50),
-          supabase.from('withdrawals').select('*').gt('updated_at', sinceIso).limit(50),
-          supabase.from('wallets').select('*').gt('updated_at', sinceIso).limit(50),
-          supabase.from('users').select('*').gt('updated_at', sinceIso).limit(50),
-          supabase.from('game_accounts').select('*').gt('updated_at', sinceIso).limit(50),
-          supabase.from('conversations').select('*').gt('last_message_at', sinceIso).limit(50),
-          supabase.from('messages').select('*').gt('created_at', sinceIso).limit(50),
-        ]);
+      const user = this.getCurrentUser();
+      const isAdmin = user?.role === 'admin' || user?.role === 'agent';
+      const currentUserId = user?.id;
 
       let changed = false;
-      if (topupsRes.data && topupsRes.data.length > 0) {
-        this.applyTopupRows(topupsRes.data, false);
-        changed = true;
-      }
-      if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
-        this.applyWithdrawalRows(withdrawalsRes.data, false);
-        changed = true;
-      }
-      if (walletsRes.data && walletsRes.data.length > 0) {
-        this.applyWalletRows(walletsRes.data);
-        changed = true;
-      }
-      if (usersRes.data && usersRes.data.length > 0) {
-        this.applyUserRows(usersRes.data);
-        changed = true;
-      }
-      if (gameAccountsRes.data && gameAccountsRes.data.length > 0) {
-        this.applyGameAccountRows(gameAccountsRes.data, false);
-        changed = true;
-      }
-      if (convsRes.data && convsRes.data.length > 0) {
-        this.applyConversationRows(convsRes.data, false);
-        changed = true;
-      }
-      if (msgsRes.data && msgsRes.data.length > 0) {
-        this.applyMessageRows(msgsRes.data);
-        changed = true;
+
+      if (!isAdmin && currentUserId) {
+        // Customer: only refresh user's own wallet and recent requests
+        const [walletRes, topupsRes, withdrawalsRes] = await Promise.all([
+          supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
+          supabase.from('topups').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(10),
+          supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(10),
+        ]);
+
+        if (walletRes.data) {
+          this.applyWalletRows([walletRes.data]);
+          changed = true;
+        }
+        if (topupsRes.data && topupsRes.data.length > 0) {
+          this.applyTopupRows(topupsRes.data, false);
+          changed = true;
+        }
+        if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
+          this.applyWithdrawalRows(withdrawalsRes.data, false);
+          changed = true;
+        }
+      } else if (isAdmin) {
+        // Admin: only refresh recent topups and withdrawals queue
+        const [topupsRes, withdrawalsRes] = await Promise.all([
+          supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(15),
+          supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(15),
+        ]);
+
+        if (topupsRes.data && topupsRes.data.length > 0) {
+          this.applyTopupRows(topupsRes.data, false);
+          changed = true;
+        }
+        if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
+          this.applyWithdrawalRows(withdrawalsRes.data, false);
+          changed = true;
+        }
       }
 
       this.lastSyncTimestamp = new Date().toISOString();
@@ -1022,168 +1073,152 @@ class DataService {
     try {
       if (key === STORAGE_KEYS.CONFIG) {
         await supabase.from('app_config').upsert({ id: 'main', data: value });
-      } else if (key === STORAGE_KEYS.USERS && Array.isArray(value)) {
-        const rows = value.map((u: UserProfile) => ({
-          id: u.id,
-          email: u.email,
-          display_name: u.displayName,
-          role: u.role,
-          phone: u.phone || null,
-          avatar_url: u.avatarUrl || null,
-          status: u.status || 'active',
-          email_verified: Boolean(u.emailVerified),
-          referred_by: u.referredBy || null,
-          created_at: u.createdAt || new Date().toISOString(),
-        }));
-        await supabase.from('users').upsert(rows);
+      } else if (key === STORAGE_KEYS.USERS && Array.isArray(value) && value.length > 0) {
+        const currentUser = this.getCurrentUser();
+        const target = currentUser ? (value.find((u: UserProfile) => u.id === currentUser.id) || value[0]) : value[0];
+        if (target && target.id) {
+          await supabase.from('users').upsert({
+            id: target.id,
+            email: target.email,
+            display_name: target.displayName,
+            role: target.role,
+            phone: target.phone || null,
+            avatar_url: target.avatarUrl || null,
+            status: target.status || 'active',
+            email_verified: Boolean(target.emailVerified),
+            referred_by: target.referredBy || null,
+            created_at: target.createdAt || new Date().toISOString(),
+          });
+        }
       } else if (key === STORAGE_KEYS.WALLETS && typeof value === 'object' && value !== null) {
-        const rows = Object.values(value as Record<string, UserWallet>).map((w) => ({
-          customer_id: w.customerId,
-          balance: w.availableBalance || 0,
-          pending_withdrawal: w.reservedBalance || 0,
-          pending_deposit: w.pendingDepositBalance || 0,
-          total_deposited: w.lastTopUpAmount || 0,
-          total_withdrawn: 0,
-          currency: w.currency || 'USD',
-        }));
-        await supabase.from('wallets').upsert(rows);
-      } else if (key === STORAGE_KEYS.TRANSACTIONS && Array.isArray(value)) {
-        const recent = value.slice(0, 10).map((t: WalletTransaction) => ({
-          id: t.id,
-          customer_id: t.customerId,
-          amount: t.amount,
-          type: t.type,
-          status: t.status,
-          description: t.description,
-          reference_id: t.relatedRequestId || null,
-          game_name: t.targetGameName || null,
-          created_at: t.createdAt,
-        }));
-        await supabase.from('transactions').upsert(recent);
-      } else if (key === STORAGE_KEYS.TOPUPS && Array.isArray(value)) {
-        const recent = value.slice(0, 10).map((top: TopUpRequest) => ({
-          id: top.id,
-          customer_id: top.customerId,
-          customer_name: top.customerName,
-          amount: top.amount,
-          bonus_amount: top.bonusAmount || 0,
-          payment_method_id: top.method || 'payment_link',
-          payment_method_name: top.methodName || 'Payment Link',
-          status: top.status,
-          proof_url: top.receiptUrl || null,
-          target_game_name: top.targetGameName || null,
-          target_game_account_id: top.targetGameCatalogId || null,
-          customer_notes: null,
-          reviewer_id: top.reviewerId || null,
-          reviewer_name: top.reviewerName || null,
-          review_notes: top.reviewNotes || null,
-          created_at: top.createdAt,
-          updated_at: top.updatedAt,
-        }));
-        await supabase.from('topups').upsert(recent);
-      } else if (key === STORAGE_KEYS.WITHDRAWALS && Array.isArray(value)) {
-        const recent = value.slice(0, 10).map((w: WithdrawalRequest) => ({
-          id: w.id,
-          customer_id: w.customerId,
-          customer_name: w.customerName,
-          amount: w.amount,
-          fee: w.feeAmount || 0,
-          net_amount: w.netPayout,
-          payout_method_id: w.method || 'bank_transfer',
-          payout_method_name: w.methodName || 'Bank Transfer',
-          payout_details: w.payoutDetails || {},
-          status: w.status,
-          reviewer_id: w.reviewerId || null,
-          reviewer_name: w.reviewerName || null,
-          review_notes: w.reviewNotes || null,
-          transaction_hash: w.payoutReference || null,
-          created_at: w.createdAt,
-          updated_at: w.updatedAt,
-        }));
-        await supabase.from('withdrawals').upsert(recent);
-      } else if (key === STORAGE_KEYS.GAME_CATALOG && Array.isArray(value)) {
-        const rows = value.map((g: GameCatalogItem) => ({
-          id: g.id,
-          title: g.title,
-          category: g.platform || 'General',
-          description: g.description || null,
-          min_load: 5.0,
-          bonus_pct: 0.0,
-          is_active: g.enabled !== false,
-          icon_url: g.iconUrl || null,
-          image_url: g.imageUrl || null,
-          created_at: g.createdAt || new Date().toISOString(),
-        }));
-        await supabase.from('game_catalog').upsert(rows);
-      } else if (key === STORAGE_KEYS.GAME_ACCOUNTS && Array.isArray(value)) {
-        const rows = value.map((a: GameAccount) => ({
-          id: a.id,
-          customer_id: a.customerId,
-          game_id: a.gameCatalogId,
-          game_title: a.gameName,
-          username: a.username,
-          password: a.password || '',
-          pin: null,
-          status: a.status,
-          created_at: a.createdAt,
-          updated_at: a.updatedAt,
-        }));
-        await supabase.from('game_accounts').upsert(rows);
-      } else if (key === STORAGE_KEYS.CONVERSATIONS && Array.isArray(value)) {
-        for (const c of value as SupportConversation[]) {
-          if (!c.id || !c.customerId) continue;
-          supabase
-            .from('conversations')
-            .upsert({
-              id: c.id,
-              customer_id: c.customerId,
-              customer_name: c.customerName,
-              agent_id: c.assignedAgentId || null,
-              agent_name: c.assignedAgentName || null,
-              status: c.status,
-              last_message: c.lastMessageText,
-              last_message_at: c.lastMessageTimestamp,
-              created_at: c.createdAt,
-            })
-            .then(
-              () => {},
-              (err) => console.warn('Supabase conv persist notice for ' + c.id + ':', err)
-            );
+        const currentUserId = this.getCurrentUser()?.id;
+        const allWallets = Object.values(value as Record<string, UserWallet>);
+        const target = currentUserId ? (value[currentUserId] || allWallets[0]) : allWallets[0];
+        if (target && target.customerId) {
+          await supabase.from('wallets').upsert({
+            customer_id: target.customerId,
+            balance: target.availableBalance || 0,
+            pending_withdrawal: target.reservedBalance || 0,
+            pending_deposit: target.pendingDepositBalance || 0,
+            total_deposited: target.lastTopUpAmount || 0,
+            total_withdrawn: 0,
+            currency: target.currency || 'USD',
+          });
         }
-      } else if (key === STORAGE_KEYS.MESSAGES && typeof value === 'object' && value !== null) {
-        for (const [convId, msgs] of Object.entries(value as Record<string, ChatMessage[]>)) {
-          if (!Array.isArray(msgs)) continue;
-          for (const m of msgs.slice(-5)) {
-            supabase
-              .from('messages')
-              .upsert({
-                id: m.id,
-                conversation_id: m.conversationId || convId,
-                sender_id: m.senderId,
-                sender_name: m.senderName,
-                sender_role: m.senderRole,
-                content: m.text,
-                transaction_data: m.transactionData || null,
-                created_at: m.createdAt,
-              })
-              .then(
-                () => {},
-                (err) => console.warn('Supabase msg persist notice for ' + m.id + ':', err)
-              );
-          }
+      } else if (key === STORAGE_KEYS.TRANSACTIONS && Array.isArray(value) && value.length > 0) {
+        const t = value[0];
+        if (t && t.id) {
+          await supabase.from('transactions').upsert({
+            id: t.id,
+            customer_id: t.customerId,
+            amount: t.amount,
+            type: t.type,
+            status: t.status,
+            description: t.description,
+            reference_id: t.relatedRequestId || null,
+            game_name: t.targetGameName || null,
+            created_at: t.createdAt,
+          });
         }
-      } else if (key === STORAGE_KEYS.FAKED_CASHOUTS && Array.isArray(value)) {
-        const rows = value.slice(0, 20).map((f: CashoutFeedItem) => ({
-          id: f.id,
-          customer_name: f.customerName,
-          amount: f.amount,
-          currency: f.currency,
-          method_name: f.methodName,
-          game_name: f.gameName,
-          is_fake: f.isFake,
-          timestamp: f.timestamp,
-        }));
-        await supabase.from('faked_cashouts').upsert(rows);
+      } else if (key === STORAGE_KEYS.TOPUPS && Array.isArray(value) && value.length > 0) {
+        const top = value[0];
+        if (top && top.id) {
+          await supabase.from('topups').upsert({
+            id: top.id,
+            customer_id: top.customerId,
+            customer_name: top.customerName,
+            amount: top.amount,
+            bonus_amount: top.bonusAmount || 0,
+            payment_method_id: top.method || 'payment_link',
+            payment_method_name: top.methodName || 'Payment Link',
+            status: top.status,
+            proof_url: top.receiptUrl || null,
+            target_game_name: top.targetGameName || null,
+            target_game_account_id: top.targetGameCatalogId || null,
+            customer_notes: null,
+            reviewer_id: top.reviewerId || null,
+            reviewer_name: top.reviewerName || null,
+            review_notes: top.reviewNotes || null,
+            created_at: top.createdAt,
+            updated_at: top.updatedAt,
+          });
+        }
+      } else if (key === STORAGE_KEYS.WITHDRAWALS && Array.isArray(value) && value.length > 0) {
+        const w = value[0];
+        if (w && w.id) {
+          await supabase.from('withdrawals').upsert({
+            id: w.id,
+            customer_id: w.customerId,
+            customer_name: w.customerName,
+            amount: w.amount,
+            fee: w.feeAmount || 0,
+            net_amount: w.netPayout,
+            payout_method_id: w.method || 'bank_transfer',
+            payout_method_name: w.methodName || 'Bank Transfer',
+            payout_details: w.payoutDetails || {},
+            status: w.status,
+            reviewer_id: w.reviewerId || null,
+            reviewer_name: w.reviewerName || null,
+            review_notes: w.reviewNotes || null,
+            transaction_hash: w.payoutReference || null,
+            created_at: w.createdAt,
+            updated_at: w.updatedAt,
+          });
+        }
+      } else if (key === STORAGE_KEYS.GAME_CATALOG && Array.isArray(value) && value.length > 0) {
+        const g = value[0];
+        if (g && g.id) {
+          await supabase.from('game_catalog').upsert({
+            id: g.id,
+            title: g.title,
+            category: g.platform || 'General',
+            description: g.description || null,
+            min_load: 5.0,
+            bonus_pct: 0.0,
+            is_active: g.enabled !== false,
+            icon_url: g.iconUrl || null,
+            image_url: g.imageUrl || null,
+            created_at: g.createdAt || new Date().toISOString(),
+          });
+        }
+      } else if (key === STORAGE_KEYS.GAME_ACCOUNTS && Array.isArray(value) && value.length > 0) {
+        const a = value[0];
+        if (a && a.id) {
+          await supabase.from('game_accounts').upsert({
+            id: a.id,
+            customer_id: a.customerId,
+            game_id: a.gameCatalogId,
+            game_title: a.gameName,
+            username: a.username,
+            password: a.password || '',
+            pin: null,
+            status: a.status,
+            created_at: a.createdAt,
+            updated_at: a.updatedAt,
+          });
+        }
+      } else if (key === STORAGE_KEYS.CONVERSATIONS && Array.isArray(value) && value.length > 0) {
+        const currentUserId = this.getCurrentUser()?.id;
+        const c = currentUserId
+          ? ((value as SupportConversation[]).find((x) => x.customerId === currentUserId) || value[0])
+          : value[0];
+        if (c && c.id && c.customerId) {
+          await supabase.from('conversations').upsert({
+            id: c.id,
+            customer_id: c.customerId,
+            customer_name: c.customerName,
+            agent_id: c.assignedAgentId || null,
+            agent_name: c.assignedAgentName || null,
+            status: c.status,
+            last_message: c.lastMessageText,
+            last_message_at: c.lastMessageTimestamp,
+            created_at: c.createdAt,
+          });
+        }
+      } else if (key === STORAGE_KEYS.MESSAGES) {
+        // Individual messages are already persisted directly in sendChatMessage() without triggering query bursts
+      } else if (key === STORAGE_KEYS.FAKED_CASHOUTS) {
+        // Client-side simulated ticker cashouts remain purely local and are never synced to Supabase
       }
     } catch (err) {
       console.warn('Supabase async persist notice:', err);
@@ -4194,7 +4229,9 @@ class DataService {
   }
 
   public saveFakedCashouts(items: CashoutFeedItem[]): void {
-    this.save(STORAGE_KEYS.FAKED_CASHOUTS, items);
+    this.cache[STORAGE_KEYS.FAKED_CASHOUTS] = items;
+    this.saveToLocalStorage(STORAGE_KEYS.FAKED_CASHOUTS, items);
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.FAKED_CASHOUTS } }));
   }
 
   public getMixedCashoutFeed(limit: number = 20): CashoutFeedItem[] {

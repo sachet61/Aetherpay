@@ -108,21 +108,15 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   const allUsers = dataService.getUsers().filter((u) => u.role === 'customer');
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
 
-  // Sync conversations and messages
-  const loadData = () => {
+  // Sync conversations and messages from in-memory cache without REST overhead
+  const syncFromMemory = () => {
     const list = dataService.getConversations();
     setConversations(list);
 
-    // If on desktop and nothing selected, select first; on mobile leave empty so Messenger list shows
     if (selectedConvId) {
       const active = list.find((c) => c.id === selectedConvId);
       if (active) {
         setMessages(dataService.getMessages(selectedConvId));
-        dataService.fetchMessagesForConversation(selectedConvId).then((fresh) => {
-          if (fresh && fresh.length > 0) {
-            setMessages(fresh);
-          }
-        });
       }
     }
   };
@@ -143,8 +137,20 @@ export const AdminChat: React.FC<AdminChatProps> = ({
 
   useEffect(() => {
     setHasMoreOlder(true);
-    loadData();
-    const handleSync = () => loadData();
+    // 1. Initial in-memory render
+    syncFromMemory();
+
+    // 2. Fetch latest messages from Supabase ONCE when conversation selection changes
+    if (selectedConvId) {
+      dataService.fetchMessagesForConversation(selectedConvId, { limit: 40 }).then((fresh) => {
+        if (fresh && fresh.length > 0) {
+          setMessages(fresh);
+        }
+      });
+    }
+
+    // 3. Reactive updates from Realtime events: purely read from memory cache, ZERO REST calls!
+    const handleSync = () => syncFromMemory();
     window.addEventListener('aetherpay_state_changed', handleSync);
     window.addEventListener('storage', handleSync);
     return () => {
@@ -220,7 +226,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
         if (payload && payload.id) {
           dataService.appendIncomingMessage(payload);
-          loadData();
+          syncFromMemory();
           if (payload.conversationId === selectedConvId) {
             setMessages((prev) => {
               if (prev.some((m) => m.id === payload.id)) return prev;
@@ -262,7 +268,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
             };
 
             dataService.appendIncomingMessage(incoming);
-            loadData();
+            syncFromMemory();
 
             if (incoming.conversationId === selectedConvId) {
               setMessages((prev) => {
