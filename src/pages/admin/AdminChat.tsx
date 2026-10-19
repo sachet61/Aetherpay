@@ -116,6 +116,11 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       const active = list.find((c) => c.id === selectedConvId);
       if (active) {
         setMessages(dataService.getMessages(selectedConvId));
+        dataService.fetchMessagesForConversation(selectedConvId).then((fresh) => {
+          if (fresh && fresh.length > 0) {
+            setMessages(fresh);
+          }
+        });
       }
     }
   };

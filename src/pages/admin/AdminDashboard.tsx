@@ -1,6 +1,7 @@
 import React from 'react';
 import { UserProfile } from '../../types';
 import { dataService } from '../../services/dataService';
+import { RealtimeSyncBadge } from '../../components/common/RealtimeSyncBadge';
 import {
   ShieldAlert,
   ArrowDownToLine,
@@ -68,6 +69,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               {isAdmin ? <Shield className="w-3 h-3 text-amber-400" /> : <Headphones className="w-3 h-3 text-cyan-400" />}
               <span>{isAdmin ? 'Super Admin Privileges' : 'Customer Support Specialist'}</span>
             </span>
+            <RealtimeSyncBadge />
           </div>
           <p className="text-xs text-slate-400 mt-1">
             {isAdmin

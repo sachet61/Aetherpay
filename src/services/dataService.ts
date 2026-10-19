@@ -40,6 +40,15 @@ import { authSessionService, PREDEFINED_ADMINS } from './authSessionService';
 import { supabase, isSupabaseConfigured, testSupabaseConnection } from './supabaseClient';
 import { supabaseAuthService } from './supabaseAuthService';
 
+export type RealtimeSyncStatus = 'connected' | 'syncing' | 'sleeping' | 'disconnected' | 'reconnecting';
+
+export interface SyncHealthInfo {
+  status: RealtimeSyncStatus;
+  lastSyncAt: string | null;
+  egressReductionActive: boolean;
+  dormantPaused: boolean;
+}
+
 const STORAGE_KEYS = {
   USERS: 'aetherpay_users',
   WALLETS: 'aetherpay_wallets',
@@ -83,10 +92,18 @@ class DataService {
   private pollingIntervals: number[] = [];
   private isSeeding = false;
   private lastPolledMessageTime: string | null = null;
+  private syncStatus: RealtimeSyncStatus = 'disconnected';
+  private lastSyncTimestamp: string | null = null;
+  private realtimeChannel: any = null;
+  private mutationQueue: Array<{ table: string; eventType: string; newRow: any; oldRow: any }> = [];
+  private mutationDebounceTimer: number | null = null;
+  private isVisibilityListenerAttached = false;
+  private isSyncingDelta = false;
 
   constructor() {
     this.cleanLegacyStorage();
     this.loadFromLocalStorage();
+    this.attachVisibilityListener();
     this.initPersistence();
   }
 
@@ -148,331 +165,662 @@ class DataService {
     }
   }
 
+  public getSyncHealth(): SyncHealthInfo {
+    return {
+      status: this.syncStatus,
+      lastSyncAt: this.lastSyncTimestamp,
+      egressReductionActive: true,
+      dormantPaused: this.syncStatus === 'sleeping',
+    };
+  }
+
+  private attachVisibilityListener(): void {
+    if (typeof document === 'undefined' || this.isVisibilityListenerAttached) return;
+    this.isVisibilityListenerAttached = true;
+    document.addEventListener('visibilitychange', () => this.handleVisibilityChange());
+  }
+
+  private handleVisibilityChange(): void {
+    if (typeof document === 'undefined') return;
+
+    if (document.visibilityState === 'hidden') {
+      console.log('[SwiftSweeps] Browser tab backgrounded. Suspending queries — 0 egress transmitted.');
+      this.syncStatus = 'sleeping';
+      this.lastSyncTimestamp = new Date().toISOString();
+      window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+      return;
+    }
+
+    if (document.visibilityState === 'visible') {
+      console.log('[SwiftSweeps] Browser tab active. Resuming synchronization.');
+      this.syncStatus = 'syncing';
+      window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+
+      const now = Date.now();
+      const lastSync = this.lastSyncTimestamp ? new Date(this.lastSyncTimestamp).getTime() : 0;
+      const hoursDormant = (now - lastSync) / (1000 * 60 * 60);
+
+      if (!this.lastSyncTimestamp || hoursDormant > 12) {
+        console.log('[SwiftSweeps] Tab dormant for >12h or fresh session. Running initial compact load.');
+        this.initialCompactLoad();
+      } else {
+        console.log(`[SwiftSweeps] Catching up delta mutations since ${this.lastSyncTimestamp}...`);
+        this.syncDelta();
+      }
+    }
+  }
+
   private initPersistence(): void {
     if (isSupabaseConfigured() && supabase) {
-      console.log('[SwiftSweeps] Supabase PostgreSQL mode active. Initializing table polling.');
-      this.initSupabasePolling();
+      console.log('[SwiftSweeps] Supabase PostgreSQL mode active. Initializing Realtime stream.');
+      this.initSupabaseRealtimeSync();
+      this.initialCompactLoad();
     } else {
       console.log('[SwiftSweeps] Supabase credentials pending in .env. Running in in-memory mode with LocalStorage persistence.');
     }
   }
 
-  private initSupabasePolling(): void {
+  private initSupabaseRealtimeSync(): void {
     if (!supabase || !isSupabaseConfigured()) return;
+    if (this.realtimeChannel) {
+      try {
+        supabase.removeChannel(this.realtimeChannel);
+      } catch (e) {}
+    }
 
-    // Initial fetch from Supabase
-    this.pollSupabaseGeneral();
-    this.pollSupabaseChat();
+    this.syncStatus = 'syncing';
+    window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
 
-    // 1. High frequency polling for customer care chat & messages (3 seconds)
-    const chatTimer = window.setInterval(() => {
-      this.pollSupabaseChat();
-    }, 3000);
-    this.pollingIntervals.push(chatTimer);
+    const channel = supabase.channel('swiftsweeps_realtime_stream')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, (p) => {
+        this.queueRealtimeMutation('messages', p.eventType, p.new, p.old);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, (p) => {
+        this.queueRealtimeMutation('conversations', p.eventType, p.new, p.old);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'topups' }, (p) => {
+        this.queueRealtimeMutation('topups', p.eventType, p.new, p.old);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'withdrawals' }, (p) => {
+        this.queueRealtimeMutation('withdrawals', p.eventType, p.new, p.old);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'wallets' }, (p) => {
+        this.queueRealtimeMutation('wallets', p.eventType, p.new, p.old);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'game_accounts' }, (p) => {
+        this.queueRealtimeMutation('game_accounts', p.eventType, p.new, p.old);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, (p) => {
+        this.queueRealtimeMutation('users', p.eventType, p.new, p.old);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'faked_cashouts' }, (p) => {
+        this.queueRealtimeMutation('faked_cashouts', p.eventType, p.new, p.old);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'app_config' }, (p) => {
+        this.queueRealtimeMutation('app_config', p.eventType, p.new, p.old);
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          this.syncStatus = 'connected';
+          if (this.lastSyncTimestamp) {
+            this.syncDelta();
+          }
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          this.syncStatus = 'reconnecting';
+        }
+        window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+      });
 
-    // 2. Interval polling for requests, wallet updates, game accounts, and catalog (4 seconds)
-    const generalTimer = window.setInterval(() => {
-      this.pollSupabaseGeneral();
-    }, 4000);
-    this.pollingIntervals.push(generalTimer);
+    this.realtimeChannel = channel;
   }
 
-  public async pollSupabaseChat(): Promise<void> {
+  private queueRealtimeMutation(table: string, eventType: string, newRow: any, oldRow: any): void {
+    this.mutationQueue.push({ table, eventType, newRow, oldRow });
+    if (this.mutationDebounceTimer !== null) {
+      window.clearTimeout(this.mutationDebounceTimer);
+    }
+    this.mutationDebounceTimer = window.setTimeout(() => {
+      this.flushRealtimeMutations();
+    }, 300);
+  }
+
+  private flushRealtimeMutations(): void {
+    if (this.mutationQueue.length === 0) return;
+    const queued = [...this.mutationQueue];
+    this.mutationQueue = [];
+    this.mutationDebounceTimer = null;
+
+    const tablesModified = new Set<string>();
+    const rowsByTable: Record<string, any[]> = {};
+    for (const item of queued) {
+      if (!rowsByTable[item.table]) rowsByTable[item.table] = [];
+      if (item.newRow && Object.keys(item.newRow).length > 0) {
+        rowsByTable[item.table].push(item.newRow);
+      }
+    }
+
+    if (rowsByTable['messages']?.length) {
+      this.applyMessageRows(rowsByTable['messages']);
+      tablesModified.add('messages');
+    }
+    if (rowsByTable['conversations']?.length) {
+      this.applyConversationRows(rowsByTable['conversations'], false);
+      tablesModified.add('conversations');
+    }
+    if (rowsByTable['topups']?.length) {
+      this.applyTopupRows(rowsByTable['topups'], false);
+      tablesModified.add('topups');
+    }
+    if (rowsByTable['withdrawals']?.length) {
+      this.applyWithdrawalRows(rowsByTable['withdrawals'], false);
+      tablesModified.add('withdrawals');
+    }
+    if (rowsByTable['wallets']?.length) {
+      this.applyWalletRows(rowsByTable['wallets']);
+      tablesModified.add('wallets');
+    }
+    if (rowsByTable['game_accounts']?.length) {
+      this.applyGameAccountRows(rowsByTable['game_accounts'], false);
+      tablesModified.add('game_accounts');
+    }
+    if (rowsByTable['users']?.length) {
+      this.applyUserRows(rowsByTable['users']);
+      tablesModified.add('users');
+    }
+    if (rowsByTable['faked_cashouts']?.length) {
+      this.applyCashoutRows(rowsByTable['faked_cashouts'], false);
+      tablesModified.add('faked_cashouts');
+    }
+    if (rowsByTable['app_config']?.length) {
+      const latest = rowsByTable['app_config'][rowsByTable['app_config'].length - 1];
+      if (latest?.data) {
+        this.applyAppConfig(latest.data);
+        tablesModified.add('app_config');
+      }
+    }
+
+    if (tablesModified.size > 0) {
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'realtime_batch', tables: Array.from(tablesModified) },
+        })
+      );
+    }
+    this.lastSyncTimestamp = new Date().toISOString();
+    window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+  }
+
+  public async initialCompactLoad(): Promise<void> {
     if (!supabase || !isSupabaseConfigured()) return;
+    this.syncStatus = 'syncing';
+    window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+
     try {
-      let msgsQuery = supabase.from('messages').select('*');
-      if (this.lastPolledMessageTime) {
-        msgsQuery = msgsQuery.gt('created_at', this.lastPolledMessageTime).order('created_at', { ascending: true });
-      } else {
-        msgsQuery = msgsQuery.order('created_at', { ascending: false }).limit(60);
+      const [topupsRes, withdrawalsRes, walletsRes, cashoutsRes, usersRes, gameAccountsRes, appConfigRes, convsRes, msgsRes] =
+        await Promise.all([
+          supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(25),
+          supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(25),
+          supabase.from('wallets').select('*').limit(50),
+          supabase.from('faked_cashouts').select('*').order('timestamp', { ascending: false }).limit(25),
+          supabase.from('users').select('*').limit(50),
+          supabase.from('game_accounts').select('*').order('created_at', { ascending: false }).limit(25),
+          supabase.from('app_config').select('data').eq('id', 'main').maybeSingle(),
+          supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
+          supabase.from('messages').select('*').order('created_at', { ascending: false }).limit(40),
+        ]);
+
+      if (!this.cache[STORAGE_KEYS.GAME_CATALOG] || (this.cache[STORAGE_KEYS.GAME_CATALOG] as any[]).length === 0) {
+        const { data: catData } = await supabase.from('game_catalog').select('*').order('created_at', { ascending: true }).limit(30);
+        if (catData && catData.length > 0) {
+          this.applyCatalogRows(catData);
+        }
       }
 
-      const [convsRes, msgsRes] = await Promise.all([
-        supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(40),
-        msgsQuery,
-      ]);
+      if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
+      if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
+      if (walletsRes.data) this.applyWalletRows(walletsRes.data);
+      if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
+      if (usersRes.data) this.applyUserRows(usersRes.data);
+      if (gameAccountsRes.data) this.applyGameAccountRows(gameAccountsRes.data, true);
+      if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
+      if (convsRes.data) this.applyConversationRows(convsRes.data, true);
+      if (msgsRes.data) this.applyMessageRows(msgsRes.data);
+
+      this.lastSyncTimestamp = new Date().toISOString();
+      this.syncStatus = 'connected';
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'initial_compact_load' } }));
+      window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+    } catch (e) {
+      console.warn('Initial compact load notice:', e);
+      this.syncStatus = 'connected';
+      window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+    }
+  }
+
+  public async syncDelta(): Promise<void> {
+    if (!supabase || !isSupabaseConfigured()) return;
+    if (this.isSyncingDelta) return;
+    this.isSyncingDelta = true;
+    this.syncStatus = 'syncing';
+    window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+
+    const sinceIso = this.lastSyncTimestamp || new Date(Date.now() - 60000).toISOString();
+    try {
+      const [topupsRes, withdrawalsRes, walletsRes, usersRes, gameAccountsRes, convsRes, msgsRes] =
+        await Promise.all([
+          supabase.from('topups').select('*').gt('updated_at', sinceIso).limit(50),
+          supabase.from('withdrawals').select('*').gt('updated_at', sinceIso).limit(50),
+          supabase.from('wallets').select('*').gt('updated_at', sinceIso).limit(50),
+          supabase.from('users').select('*').gt('updated_at', sinceIso).limit(50),
+          supabase.from('game_accounts').select('*').gt('updated_at', sinceIso).limit(50),
+          supabase.from('conversations').select('*').gt('last_message_at', sinceIso).limit(50),
+          supabase.from('messages').select('*').gt('created_at', sinceIso).limit(50),
+        ]);
 
       let changed = false;
-
+      if (topupsRes.data && topupsRes.data.length > 0) {
+        this.applyTopupRows(topupsRes.data, false);
+        changed = true;
+      }
+      if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
+        this.applyWithdrawalRows(withdrawalsRes.data, false);
+        changed = true;
+      }
+      if (walletsRes.data && walletsRes.data.length > 0) {
+        this.applyWalletRows(walletsRes.data);
+        changed = true;
+      }
+      if (usersRes.data && usersRes.data.length > 0) {
+        this.applyUserRows(usersRes.data);
+        changed = true;
+      }
+      if (gameAccountsRes.data && gameAccountsRes.data.length > 0) {
+        this.applyGameAccountRows(gameAccountsRes.data, false);
+        changed = true;
+      }
       if (convsRes.data && convsRes.data.length > 0) {
-        const remoteConvs: SupportConversation[] = convsRes.data.map((c: any) => {
-          const user = this.getUserById(c.customer_id);
-          return {
-            id: c.id,
-            customerId: c.customer_id,
-            customerName: c.customer_name || user?.displayName || 'Customer',
-            customerEmail: user?.email || c.customer_email || `${c.customer_id}@player.com`,
-            assignedAgentId: c.agent_id || undefined,
-            assignedAgentName: c.agent_name || undefined,
-            status: c.status || 'open',
-            lastMessageText: c.last_message || '',
-            lastMessageTimestamp: c.last_message_at || new Date().toISOString(),
-            unreadCountCustomer: 0,
-            unreadCountStaff: 0,
-            createdAt: c.created_at || new Date().toISOString(),
-            updatedAt: c.last_message_at || c.created_at || new Date().toISOString(),
-          };
-        });
-
-        // Safely merge with current conversations so in-flight items aren't discarded
-        const currentList = this.getConversations();
-        const convMap = new Map<string, SupportConversation>();
-        for (const c of remoteConvs) {
-          convMap.set(c.id, c);
-        }
-        for (const c of currentList) {
-          if (!convMap.has(c.id)) {
-            convMap.set(c.id, c);
-          }
-        }
-        const mergedList = Array.from(convMap.values()).sort(
-          (a, b) => new Date(b.lastMessageTimestamp).getTime() - new Date(a.lastMessageTimestamp).getTime()
-        );
-        this.cache[STORAGE_KEYS.CONVERSATIONS] = mergedList;
-        this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, mergedList);
+        this.applyConversationRows(convsRes.data, false);
         changed = true;
       }
-
       if (msgsRes.data && msgsRes.data.length > 0) {
-        const currentMsgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-        const msgMap: Record<string, ChatMessage[]> = { ...currentMsgs };
-        let newestTimestamp = this.lastPolledMessageTime;
-
-        for (const m of msgsRes.data) {
-          const item: ChatMessage = {
-            id: m.id,
-            conversationId: m.conversation_id,
-            senderId: m.sender_id,
-            senderName: m.sender_name,
-            senderRole: m.sender_role || 'customer',
-            text: m.content || '',
-            isInternalNote: false,
-            isRead: true,
-            transactionData: m.transaction_data || undefined,
-            createdAt: m.created_at || new Date().toISOString(),
-          };
-          if (!msgMap[m.conversation_id]) {
-            msgMap[m.conversation_id] = [];
-          }
-          const idx = msgMap[m.conversation_id].findIndex((x) => x.id === item.id);
-          if (idx >= 0) {
-            msgMap[m.conversation_id][idx] = item;
-          } else {
-            msgMap[m.conversation_id].push(item);
-          }
-
-          if (!newestTimestamp || new Date(item.createdAt).getTime() > new Date(newestTimestamp).getTime()) {
-            newestTimestamp = item.createdAt;
-          }
-        }
-
-        if (newestTimestamp) {
-          this.lastPolledMessageTime = newestTimestamp;
-        }
-
-        this.cache[STORAGE_KEYS.MESSAGES] = msgMap;
-        this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, msgMap);
+        this.applyMessageRows(msgsRes.data);
         changed = true;
       }
 
+      this.lastSyncTimestamp = new Date().toISOString();
+      this.syncStatus = 'connected';
       if (changed) {
-        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'chat_polled' } }));
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'delta_sync' } }));
       }
+      window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
     } catch (e) {
-      console.warn('Supabase chat poll notice:', e);
+      console.warn('Delta sync notice:', e);
+      this.syncStatus = 'connected';
+      window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+    } finally {
+      this.isSyncingDelta = false;
     }
+  }
+
+  // Backward compatible on-demand poll methods (now route to targeted delta sync)
+  public async pollSupabaseChat(): Promise<void> {
+    return this.syncDelta();
   }
 
   public async pollSupabaseGeneral(): Promise<void> {
-    if (!supabase || !isSupabaseConfigured()) return;
+    return this.syncDelta();
+  }
+
+  // Conversation-specific direct fetch for 100% reliable message hydration
+  public async fetchMessagesForConversation(conversationId: string): Promise<ChatMessage[]> {
+    if (!conversationId) return [];
+    const localMsgs = this.getMessages(conversationId);
+
+    if (!supabase || !isSupabaseConfigured()) {
+      return localMsgs;
+    }
+
     try {
-      const [topupsRes, withdrawalsRes, walletsRes, catalogRes, cashoutsRes, usersRes, gameAccountsRes, appConfigRes] = await Promise.all([
-        supabase.from('topups').select('*').order('created_at', { ascending: false }),
-        supabase.from('withdrawals').select('*').order('created_at', { ascending: false }),
-        supabase.from('wallets').select('*'),
-        supabase.from('game_catalog').select('*').order('created_at', { ascending: true }),
-        supabase.from('faked_cashouts').select('*').order('timestamp', { ascending: false }).limit(40),
-        supabase.from('users').select('*'),
-        supabase.from('game_accounts').select('*').order('created_at', { ascending: false }),
-        supabase.from('app_config').select('data').eq('id', 'main').maybeSingle(),
-      ]);
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', conversationId)
+        .order('created_at', { ascending: true })
+        .limit(100);
 
-      let changed = false;
+      if (error) {
+        console.warn('fetchMessagesForConversation notice:', error);
+        return localMsgs;
+      }
 
-      // 1. Sync all users from Supabase so all devices and staff know about registered users
-      if (usersRes.data && usersRes.data.length > 0) {
-        const currentUsers = this.getUsers();
-        const userMap = new Map<string, UserProfile>();
-        for (const u of currentUsers) {
-          userMap.set(u.id, u);
+      if (data && data.length > 0) {
+        const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+        const currentList = all[conversationId] || [];
+        const msgMap = new Map<string, ChatMessage>();
+
+        for (const m of currentList) {
+          msgMap.set(m.id, m);
         }
-        for (const dbU of usersRes.data) {
-          const existing =
-            userMap.get(dbU.id) ||
-            currentUsers.find((u) => u.email.toLowerCase() === (dbU.email || '').toLowerCase());
-          const merged: UserProfile = {
-            id: dbU.id,
-            email: dbU.email,
-            displayName: dbU.display_name || existing?.displayName || dbU.email?.split('@')[0] || 'User',
-            role: (dbU.role as any) || existing?.role || 'customer',
-            phone: dbU.phone || existing?.phone,
-            avatarUrl: dbU.avatar_url || existing?.avatarUrl,
-            status: dbU.status || 'active',
-            emailVerified: Boolean(dbU.email_verified),
-            referralCode: existing?.referralCode || `REF_${dbU.id.slice(-5).toUpperCase()}`,
-            referredBy: dbU.referred_by || existing?.referredBy,
-            createdAt: dbU.created_at || existing?.createdAt || new Date().toISOString(),
-            lastLoginAt: existing?.lastLoginAt || new Date().toISOString(),
+
+        for (const row of data) {
+          const item: ChatMessage = {
+            id: row.id,
+            conversationId: row.conversation_id,
+            senderId: row.sender_id,
+            senderName: row.sender_name,
+            senderRole: row.sender_role || 'customer',
+            text: row.content || '',
+            attachmentUrl: row.attachment_url,
+            attachmentName: row.attachment_name,
+            isInternalNote: false,
+            transactionData: row.transaction_data || undefined,
+            createdAt: row.created_at || new Date().toISOString(),
+            isRead: true,
           };
-          if (existing && existing.id !== dbU.id) {
-            userMap.delete(existing.id);
-          }
-          userMap.set(dbU.id, merged);
+          msgMap.set(item.id, item);
         }
-        const updatedUsers = Array.from(userMap.values());
-        this.cache[STORAGE_KEYS.USERS] = updatedUsers;
-        this.saveToLocalStorage(STORAGE_KEYS.USERS, updatedUsers);
-        changed = true;
-      }
 
-      if (topupsRes.data && topupsRes.data.length > 0) {
-        this.cache[STORAGE_KEYS.TOPUPS] = topupsRes.data.map((t: any) => ({
-          id: t.id,
-          customerId: t.customer_id,
-          customerName: t.customer_name,
-          amount: Number(t.amount),
-          currency: 'USD',
-          bonusAmount: Number(t.bonus_amount || 0),
-          bonusPercentage: 0,
-          feeAmount: 0,
-          finalWalletCredit: Number(t.amount) + Number(t.bonus_amount || 0),
-          method: (t.payment_method_id as any) || 'payment_link',
-          methodName: t.payment_method_name || 'Payment Link',
-          status: t.status || 'submitted',
-          receiptUrl: t.proof_url || undefined,
-          targetGameName: t.target_game_name || undefined,
-          targetGameCatalogId: t.target_game_account_id || undefined,
-          reviewerId: t.reviewer_id || undefined,
-          reviewerName: t.reviewer_name || undefined,
-          reviewNotes: t.review_notes || undefined,
-          createdAt: t.created_at,
-          updatedAt: t.updated_at || t.created_at,
-        }));
-        this.saveToLocalStorage(STORAGE_KEYS.TOPUPS, this.cache[STORAGE_KEYS.TOPUPS]);
-        changed = true;
-      }
+        const merged = Array.from(msgMap.values()).sort(
+          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
 
-      if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
-        this.cache[STORAGE_KEYS.WITHDRAWALS] = withdrawalsRes.data.map((w: any) => ({
-          id: w.id,
-          customerId: w.customer_id,
-          customerName: w.customer_name,
-          amount: Number(w.amount),
-          currency: 'USD',
-          feeAmount: Number(w.fee || 0),
-          netPayout: Number(w.net_amount || w.amount),
-          reservedAmount: Number(w.amount),
-          method: w.payout_method_id || 'bank_transfer',
-          methodName: w.payout_method_name || 'Bank Transfer',
-          payoutDetails: w.payout_details || {},
-          status: w.status || 'submitted',
-          reviewerId: w.reviewer_id || undefined,
-          reviewerName: w.reviewer_name || undefined,
-          reviewNotes: w.review_notes || undefined,
-          payoutReference: w.transaction_hash || undefined,
-          timeline: [],
-          createdAt: w.created_at,
-          updatedAt: w.updated_at || w.created_at,
-        }));
-        this.saveToLocalStorage(STORAGE_KEYS.WITHDRAWALS, this.cache[STORAGE_KEYS.WITHDRAWALS]);
-        changed = true;
-      }
-
-      if (walletsRes.data && walletsRes.data.length > 0) {
-        const walletMap: Record<string, UserWallet> = {};
-        for (const w of walletsRes.data) {
-          walletMap[w.customer_id] = {
-            customerId: w.customer_id,
-            currency: w.currency || 'USD',
-            availableBalance: Number(w.balance || 0),
-            referralBonusBalance: 0,
-            reservedBalance: Number(w.pending_withdrawal || 0),
-            pendingDepositBalance: Number(w.pending_deposit || 0),
-            lastTopUpAmount: Number(w.total_deposited || 0),
-            lastUpdatedAt: new Date().toISOString(),
-          };
-        }
-        this.cache[STORAGE_KEYS.WALLETS] = walletMap;
-        this.saveToLocalStorage(STORAGE_KEYS.WALLETS, walletMap);
-        changed = true;
-      }
-
-      if (gameAccountsRes.data && gameAccountsRes.data.length > 0) {
-        this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = gameAccountsRes.data.map((ga: any) => ({
-          id: ga.id,
-          gameCatalogId: ga.game_id,
-          customerId: ga.customer_id,
-          gameName: ga.game_title,
-          platformName: 'Sweepstakes',
-          username: ga.username,
-          password: ga.password,
-          status: ga.status || 'active',
-          notes: ga.pin || '',
-          createdAt: ga.created_at || new Date().toISOString(),
-          updatedAt: ga.updated_at || ga.created_at || new Date().toISOString(),
-        }));
-        this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, this.cache[STORAGE_KEYS.GAME_ACCOUNTS]);
-        changed = true;
-      }
-
-      if (catalogRes.data && catalogRes.data.length > 0) {
-        this.cache[STORAGE_KEYS.GAME_CATALOG] = catalogRes.data.map((g: any) => ({
-          id: g.id,
-          title: g.title,
-          platform: g.category || 'General',
-          gameUrl: '#',
-          description: g.description || '',
-          enabled: g.is_active !== false,
-          iconUrl: g.icon_url,
-          imageUrl: g.image_url,
-          createdAt: g.created_at || new Date().toISOString(),
-          updatedAt: g.created_at || new Date().toISOString(),
-        }));
-        this.saveToLocalStorage(STORAGE_KEYS.GAME_CATALOG, this.cache[STORAGE_KEYS.GAME_CATALOG]);
-        changed = true;
-      }
-
-      if (cashoutsRes.data && cashoutsRes.data.length > 0) {
-        this.cache[STORAGE_KEYS.FAKED_CASHOUTS] = cashoutsRes.data.map((c: any) => ({
-          id: c.id,
-          customerName: c.customer_name,
-          amount: Number(c.amount),
-          currency: c.currency,
-          methodName: c.method_name,
-          gameName: c.game_name,
-          isFake: c.is_fake,
-          timestamp: c.timestamp,
-        }));
-        this.saveToLocalStorage(STORAGE_KEYS.FAKED_CASHOUTS, this.cache[STORAGE_KEYS.FAKED_CASHOUTS]);
-        changed = true;
-      }
-
-      if (appConfigRes?.data?.data) {
-        const currentConfig = this.getAppConfig();
-        this.cache[STORAGE_KEYS.CONFIG] = {
-          ...currentConfig,
-          ...appConfigRes.data.data,
-        };
-        this.saveToLocalStorage(STORAGE_KEYS.CONFIG, this.cache[STORAGE_KEYS.CONFIG]);
-        changed = true;
-      }
-
-      if (changed) {
-        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'general_polled' } }));
+        all[conversationId] = merged;
+        this.cache[STORAGE_KEYS.MESSAGES] = all;
+        this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'conversation_messages_fetched', conversationId },
+          })
+        );
+        return merged;
       }
     } catch (e) {
-      console.warn('Supabase general poll notice:', e);
+      console.warn('fetchMessagesForConversation exception:', e);
     }
+
+    return localMsgs;
+  }
+
+  // Row application helpers supporting soft-delete tracking
+  private applyUserRows(rows: any[]): void {
+    const currentUsers = this.getUsers();
+    const userMap = new Map<string, UserProfile>();
+    for (const u of currentUsers) {
+      userMap.set(u.id, u);
+    }
+    for (const dbU of rows) {
+      if (dbU.deleted_at) {
+        userMap.delete(dbU.id);
+        continue;
+      }
+      const existing =
+        userMap.get(dbU.id) ||
+        currentUsers.find((u) => u.email.toLowerCase() === (dbU.email || '').toLowerCase());
+      const merged: UserProfile = {
+        id: dbU.id,
+        email: dbU.email,
+        displayName: dbU.display_name || existing?.displayName || dbU.email?.split('@')[0] || 'User',
+        role: (dbU.role as any) || existing?.role || 'customer',
+        phone: dbU.phone || existing?.phone,
+        avatarUrl: dbU.avatar_url || existing?.avatarUrl,
+        status: dbU.status || 'active',
+        emailVerified: Boolean(dbU.email_verified),
+        referralCode: existing?.referralCode || `REF_${dbU.id.slice(-5).toUpperCase()}`,
+        referredBy: dbU.referred_by || existing?.referredBy,
+        createdAt: dbU.created_at || existing?.createdAt || new Date().toISOString(),
+        lastLoginAt: existing?.lastLoginAt || new Date().toISOString(),
+      };
+      if (existing && existing.id !== dbU.id) {
+        userMap.delete(existing.id);
+      }
+      userMap.set(dbU.id, merged);
+    }
+    const updatedUsers = Array.from(userMap.values());
+    this.cache[STORAGE_KEYS.USERS] = updatedUsers;
+    this.saveToLocalStorage(STORAGE_KEYS.USERS, updatedUsers);
+  }
+
+  private applyTopupRows(rows: any[], replaceAll: boolean = false): void {
+    const current = replaceAll ? [] : (this.cache[STORAGE_KEYS.TOPUPS] as TopUpRequest[]) || [];
+    const topupMap = new Map<string, TopUpRequest>();
+    for (const t of current) {
+      topupMap.set(t.id, t);
+    }
+    for (const t of rows) {
+      if (t.deleted_at) {
+        topupMap.delete(t.id);
+        continue;
+      }
+      topupMap.set(t.id, {
+        id: t.id,
+        customerId: t.customer_id,
+        customerName: t.customer_name,
+        amount: Number(t.amount),
+        currency: 'USD',
+        bonusAmount: Number(t.bonus_amount || 0),
+        bonusPercentage: 0,
+        feeAmount: 0,
+        finalWalletCredit: Number(t.amount) + Number(t.bonus_amount || 0),
+        method: (t.payment_method_id as any) || 'payment_link',
+        methodName: t.payment_method_name || 'Payment Link',
+        status: t.status || 'submitted',
+        receiptUrl: t.proof_url || undefined,
+        targetGameName: t.target_game_name || undefined,
+        targetGameCatalogId: t.target_game_account_id || undefined,
+        reviewerId: t.reviewer_id || undefined,
+        reviewerName: t.reviewer_name || undefined,
+        reviewNotes: t.review_notes || undefined,
+        createdAt: t.created_at,
+        updatedAt: t.updated_at || t.created_at,
+      });
+    }
+    const updated = Array.from(topupMap.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    this.cache[STORAGE_KEYS.TOPUPS] = updated;
+    this.saveToLocalStorage(STORAGE_KEYS.TOPUPS, updated);
+  }
+
+  private applyWithdrawalRows(rows: any[], replaceAll: boolean = false): void {
+    const current = replaceAll ? [] : (this.cache[STORAGE_KEYS.WITHDRAWALS] as WithdrawalRequest[]) || [];
+    const withMap = new Map<string, WithdrawalRequest>();
+    for (const w of current) {
+      withMap.set(w.id, w);
+    }
+    for (const w of rows) {
+      if (w.deleted_at) {
+        withMap.delete(w.id);
+        continue;
+      }
+      withMap.set(w.id, {
+        id: w.id,
+        customerId: w.customer_id,
+        customerName: w.customer_name,
+        amount: Number(w.amount),
+        currency: 'USD',
+        feeAmount: Number(w.fee || 0),
+        netPayout: Number(w.net_amount || w.amount),
+        reservedAmount: Number(w.amount),
+        method: w.payout_method_id || 'bank_transfer',
+        methodName: w.payout_method_name || 'Bank Transfer',
+        payoutDetails: w.payout_details || {},
+        status: w.status || 'submitted',
+        reviewerId: w.reviewer_id || undefined,
+        reviewerName: w.reviewer_name || undefined,
+        reviewNotes: w.review_notes || undefined,
+        payoutReference: w.transaction_hash || undefined,
+        timeline: [],
+        createdAt: w.created_at,
+        updatedAt: w.updated_at || w.created_at,
+      });
+    }
+    const updated = Array.from(withMap.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    this.cache[STORAGE_KEYS.WITHDRAWALS] = updated;
+    this.saveToLocalStorage(STORAGE_KEYS.WITHDRAWALS, updated);
+  }
+
+  private applyWalletRows(rows: any[]): void {
+    const walletMap = { ...((this.cache[STORAGE_KEYS.WALLETS] as Record<string, UserWallet>) || {}) };
+    for (const w of rows) {
+      walletMap[w.customer_id] = {
+        customerId: w.customer_id,
+        currency: w.currency || 'USD',
+        availableBalance: Number(w.balance || 0),
+        referralBonusBalance: 0,
+        reservedBalance: Number(w.pending_withdrawal || 0),
+        pendingDepositBalance: Number(w.pending_deposit || 0),
+        lastTopUpAmount: Number(w.total_deposited || 0),
+        lastUpdatedAt: w.updated_at || new Date().toISOString(),
+      };
+    }
+    this.cache[STORAGE_KEYS.WALLETS] = walletMap;
+    this.saveToLocalStorage(STORAGE_KEYS.WALLETS, walletMap);
+  }
+
+  private applyGameAccountRows(rows: any[], replaceAll: boolean = false): void {
+    const current = replaceAll ? [] : (this.cache[STORAGE_KEYS.GAME_ACCOUNTS] as GameAccount[]) || [];
+    const accMap = new Map<string, GameAccount>();
+    for (const a of current) {
+      accMap.set(a.id, a);
+    }
+    for (const ga of rows) {
+      if (ga.deleted_at) {
+        accMap.delete(ga.id);
+        continue;
+      }
+      accMap.set(ga.id, {
+        id: ga.id,
+        gameCatalogId: ga.game_id,
+        customerId: ga.customer_id,
+        gameName: ga.game_title,
+        platformName: 'Sweepstakes',
+        username: ga.username,
+        password: ga.password,
+        status: ga.status || 'active',
+        notes: ga.pin || '',
+        createdAt: ga.created_at || new Date().toISOString(),
+        updatedAt: ga.updated_at || ga.created_at || new Date().toISOString(),
+      });
+    }
+    const updated = Array.from(accMap.values());
+    this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = updated;
+    this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, updated);
+  }
+
+  private applyCatalogRows(rows: any[]): void {
+    const updated = rows.map((g: any) => ({
+      id: g.id,
+      title: g.title,
+      platform: g.category || 'General',
+      gameUrl: '#',
+      description: g.description || '',
+      enabled: g.is_active !== false,
+      iconUrl: g.icon_url,
+      imageUrl: g.image_url,
+      createdAt: g.created_at || new Date().toISOString(),
+      updatedAt: g.created_at || new Date().toISOString(),
+    }));
+    this.cache[STORAGE_KEYS.GAME_CATALOG] = updated;
+    this.saveToLocalStorage(STORAGE_KEYS.GAME_CATALOG, updated);
+  }
+
+  private applyCashoutRows(rows: any[], replaceAll: boolean = false): void {
+    const mapped = rows.map((c: any) => ({
+      id: c.id,
+      customerName: c.customer_name,
+      amount: Number(c.amount),
+      currency: c.currency,
+      methodName: c.method_name,
+      gameName: c.game_name,
+      isFake: c.is_fake,
+      timestamp: c.timestamp,
+    }));
+    if (replaceAll) {
+      this.cache[STORAGE_KEYS.FAKED_CASHOUTS] = mapped;
+    } else {
+      const existing = (this.cache[STORAGE_KEYS.FAKED_CASHOUTS] as any[]) || [];
+      const map = new Map<string, any>();
+      for (const m of existing) map.set(m.id, m);
+      for (const m of mapped) map.set(m.id, m);
+      this.cache[STORAGE_KEYS.FAKED_CASHOUTS] = Array.from(map.values()).slice(0, 50);
+    }
+    this.saveToLocalStorage(STORAGE_KEYS.FAKED_CASHOUTS, this.cache[STORAGE_KEYS.FAKED_CASHOUTS]);
+  }
+
+  private applyConversationRows(rows: any[], replaceAll: boolean = false): void {
+    const currentList = replaceAll ? [] : this.getConversations();
+    const convMap = new Map<string, SupportConversation>();
+    for (const c of currentList) {
+      convMap.set(c.id, c);
+    }
+    for (const c of rows) {
+      const user = this.getUserById(c.customer_id);
+      convMap.set(c.id, {
+        id: c.id,
+        customerId: c.customer_id,
+        customerName: c.customer_name || user?.displayName || 'Customer',
+        customerEmail: user?.email || c.customer_email || `${c.customer_id}@player.com`,
+        assignedAgentId: c.agent_id || undefined,
+        assignedAgentName: c.agent_name || undefined,
+        status: c.status || 'open',
+        lastMessageText: c.last_message || '',
+        lastMessageTimestamp: c.last_message_at || new Date().toISOString(),
+        unreadCountCustomer: 0,
+        unreadCountStaff: 0,
+        createdAt: c.created_at || new Date().toISOString(),
+        updatedAt: c.last_message_at || c.created_at || new Date().toISOString(),
+      });
+    }
+    const mergedList = Array.from(convMap.values()).sort(
+      (a, b) => new Date(b.lastMessageTimestamp).getTime() - new Date(a.lastMessageTimestamp).getTime()
+    );
+    this.cache[STORAGE_KEYS.CONVERSATIONS] = mergedList;
+    this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, mergedList);
+  }
+
+  private applyMessageRows(rows: any[]): void {
+    const currentMsgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+    const msgMap: Record<string, ChatMessage[]> = { ...currentMsgs };
+
+    for (const m of rows) {
+      const item: ChatMessage = {
+        id: m.id,
+        conversationId: m.conversation_id,
+        senderId: m.sender_id,
+        senderName: m.sender_name,
+        senderRole: m.sender_role || 'customer',
+        text: m.content || '',
+        isInternalNote: false,
+        isRead: true,
+        attachmentUrl: m.attachment_url,
+        attachmentName: m.attachment_name,
+        transactionData: m.transaction_data || undefined,
+        createdAt: m.created_at || new Date().toISOString(),
+      };
+      if (!msgMap[m.conversation_id]) {
+        msgMap[m.conversation_id] = [];
+      }
+      const idx = msgMap[m.conversation_id].findIndex((x) => x.id === item.id);
+      if (idx >= 0) {
+        msgMap[m.conversation_id][idx] = item;
+      } else {
+        msgMap[m.conversation_id].push(item);
+      }
+    }
+
+    this.cache[STORAGE_KEYS.MESSAGES] = msgMap;
+    this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, msgMap);
+  }
+
+  private applyAppConfig(data: any): void {
+    const currentConfig = this.getAppConfig();
+    this.cache[STORAGE_KEYS.CONFIG] = {
+      ...currentConfig,
+      ...data,
+    };
+    this.saveToLocalStorage(STORAGE_KEYS.CONFIG, this.cache[STORAGE_KEYS.CONFIG]);
   }
 
   private load<T>(key: string, defaultValue: T): T {
@@ -3010,9 +3358,35 @@ class DataService {
     // 2. If not found by ID, look by email (handles ID migrations / account recreation)
     if (!conv && userEmail) {
       conv = list.find((c) => c.customerEmail && c.customerEmail.toLowerCase() === userEmail);
-      if (conv) {
+    }
+
+    // 3. Look by customer name
+    if (!conv && customerName) {
+      const cleanName = customerName.trim().toLowerCase();
+      conv = list.find((c) => c.customerName && c.customerName.trim().toLowerCase() === cleanName);
+    }
+
+    // 4. Look by conv ID alias (e.g. conv_haude_maxe)
+    if (!conv && customerName) {
+      const idAlias = `conv_${customerName.toLowerCase().replace(/\s+/g, '_')}`;
+      conv = list.find((c) => c.id.toLowerCase() === idAlias);
+    }
+
+    if (conv) {
+      let needsSave = false;
+      if (conv.customerId !== customerId) {
         conv.customerId = customerId;
-        conv.customerName = user?.displayName || customerName;
+        needsSave = true;
+      }
+      if (user?.displayName && conv.customerName !== user.displayName) {
+        conv.customerName = user.displayName;
+        needsSave = true;
+      }
+      if (user?.email && conv.customerEmail !== user.email) {
+        conv.customerEmail = user.email;
+        needsSave = true;
+      }
+      if (needsSave) {
         this.save(STORAGE_KEYS.CONVERSATIONS, list);
       }
     }

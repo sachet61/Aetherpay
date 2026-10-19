@@ -4,6 +4,7 @@ import { RoleSwitcher } from '../common/RoleSwitcher';
 import { dataService } from '../../services/dataService';
 import { Bell, Wallet, CheckCircle2, X, LogOut, Shield, Headphones, Gamepad2, Settings, Users } from 'lucide-react';
 import { SwiftSweepsLogo } from '../common/SwiftSweepsLogo';
+import { RealtimeSyncBadge } from '../common/RealtimeSyncBadge';
 
 interface TopNavbarProps {
   currentUser: UserProfile;
@@ -105,6 +106,9 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
               </button>
             </>
           )}
+
+          {/* Realtime Stream & Egress Health Indicator */}
+          <RealtimeSyncBadge />
         </div>
 
         {/* Zone 2: Navigation Links Strict by Role (No mode flipping) */}
