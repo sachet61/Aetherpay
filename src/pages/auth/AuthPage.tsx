@@ -60,6 +60,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
   // Live support notice modal
   const [showSupportModal, setShowSupportModal] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [activePolicyModal, setActivePolicyModal] = useState<'privacy' | 'terms' | 'deposit' | 'deletion' | null>(null);
 
   // Ref to scroll to the auth card when a user clicks "Play Now" on mobile or large screens
   const authCardRef = useRef<HTMLDivElement>(null);
@@ -698,13 +699,83 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
             <span className="text-slate-600">·</span>
             <span>All Rights Reserved</span>
           </div>
-          <div className="flex items-center gap-4 text-[11px] text-slate-400">
-            <a href="#privacy" className="hover:text-amber-400 transition">Privacy Policy</a>
+          <div className="flex items-center gap-3 text-[11px] text-slate-400 flex-wrap justify-center">
+            <button type="button" onClick={() => setActivePolicyModal('privacy')} className="hover:text-amber-400 transition underline underline-offset-2">Privacy Policy</button>
             <span>·</span>
-            <a href="#datadeletion" className="hover:text-amber-400 transition">Data Deletion</a>
+            <button type="button" onClick={() => setActivePolicyModal('terms')} className="hover:text-amber-400 transition underline underline-offset-2">Terms & Conditions</button>
+            <span>·</span>
+            <button type="button" onClick={() => setActivePolicyModal('deposit')} className="hover:text-amber-400 transition underline underline-offset-2">Deposit & Bonus Policy</button>
+            <span>·</span>
+            <button type="button" onClick={() => setActivePolicyModal('deletion')} className="hover:text-amber-400 transition underline underline-offset-2">Data Deletion</button>
           </div>
         </div>
       </footer>
+
+      {/* Policy Modal Viewer */}
+      {activePolicyModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0E1628] border border-slate-700/80 rounded-3xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-amber-400" />
+                <h3 className="font-bold text-white text-base">
+                  {activePolicyModal === 'privacy' && 'Privacy Policy'}
+                  {activePolicyModal === 'terms' && 'Terms of Service & Fair Gaming'}
+                  {activePolicyModal === 'deposit' && 'Deposit & Bonus Policy'}
+                  {activePolicyModal === 'deletion' && 'User Data Deletion Instructions'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActivePolicyModal(null)}
+                className="p-1.5 rounded-lg bg-slate-900 text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="text-xs sm:text-sm text-slate-300 space-y-3 leading-relaxed">
+              {activePolicyModal === 'privacy' && (
+                <div className="space-y-3">
+                  <p>Welcome to SwiftSweeps Privacy Policy. We respect your privacy and protect your personal data when you visit our gaming platform.</p>
+                  <p><strong>Information Collection:</strong> We collect identity data (username/gamer tag), contact data (email/phone), and financial ledger/transaction records.</p>
+                  <p><strong>Use of Data:</strong> Your data is used exclusively to administer your gaming wallet, process deposits and withdrawals, and provide 24/7 customer support.</p>
+                  <p><strong>Security:</strong> All sensitive data is transmitted securely via SSL encryption and stored in secure databases with strict access controls.</p>
+                </div>
+              )}
+              {activePolicyModal === 'terms' && (
+                <div className="space-y-3">
+                  <p>Participation in games is restricted to eligible players of legal age in their respective jurisdiction.</p>
+                  <p>All transactions, wagers, and bonuses are subject to platform verification and fair play guidelines. Multi-accounting or fraudulent activity will result in account suspension and forfeiture of balances.</p>
+                </div>
+              )}
+              {activePolicyModal === 'deposit' && (
+                <div className="space-y-3">
+                  <p><strong>Verified Deposits:</strong> Deposits must originate from accounts registered in the customer's legal name. Third-party deposits are strictly prohibited.</p>
+                  <p><strong>Payment Method Bonuses:</strong> Bonuses are dynamically linked to the selected payment method (e.g. Verified CashApp 30%, Crypto 30%, Payment via Link 20%, Chime Direct 15%).</p>
+                  <p><strong>Wagering:</strong> Deposit bonuses require 1x wagering in verified gaming matches prior to cashout qualification.</p>
+                </div>
+              )}
+              {activePolicyModal === 'deletion' && (
+                <div className="space-y-3">
+                  <p>In accordance with platform and GDPR data privacy regulations, you have the right to request complete deletion of your account and personal data.</p>
+                  <p>To request data erasure, contact our compliance desk at privacy@swiftsweeps.com or submit a ticket through our active 24/7 support chat.</p>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-2 border-t border-slate-800 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setActivePolicyModal(null)}
+                className="px-5 py-2 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs"
+              >
+                Close Policy
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Fixed Mobile & Tablet Bottom Navigation Bar */}
       <div className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0A0F1D]/95 backdrop-blur-md border-t border-slate-800/80 p-2.5 px-4 flex items-center justify-between gap-2 shadow-2xl">

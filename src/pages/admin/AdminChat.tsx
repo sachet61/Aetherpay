@@ -438,43 +438,25 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     const game = gameCatalog.find((g) => g.id === selectedGameId);
     if (!game) return;
 
-    // Find or create GameAccount
-    const existing = customerGameAccounts.find((a) => a.gameCatalogId === game.id);
-    const accountId = existing ? existing.id : `ga_${Date.now()}`;
-
-    if (!existing) {
-      // First register request
-      dataService.requestGameCredentials({
-        customerId: activeConv.customerId,
-        customerName: activeConv.customerName,
-        gameCatalogId: game.id,
-      });
-    }
-
-    // Now assign/update
-    const res = dataService.assignOrUpdateGameCredentials({
-      accountId,
+    // Use authoritative single-account provisioning
+    const res = dataService.provisionGameAccount({
+      customerId: activeConv.customerId,
+      customerName: activeConv.customerName,
+      gameCatalogId: game.id,
+      gameName: game.title,
+      platformName: game.platform,
       username: assignedUsername.trim(),
       password: assignedPassword.trim(),
       notes: gameIdNote.trim() || 'Provisioned directly via Customer Support Chat',
       reviewerId: currentUser.id,
       reviewerName: currentUser.displayName,
+      status: 'active',
     });
 
     if (res.success) {
-      // Send message to the active chat
-      dataService.sendChatMessage({
-        conversationId: activeConv.id,
-        senderId: currentUser.id,
-        senderName: currentUser.displayName,
-        senderRole: 'agent',
-        text: `🎮 Credentials Provisioned for ${game.title} (${game.platform})!\n• Username: ${assignedUsername.trim()}\n• Password: ${assignedPassword.trim()}\nYour credentials are now active in your Gaming IDs portal.`,
-        isInternalNote: false,
-      });
-
       setShowGameIdModal(false);
       setFeedbackToast({
-        text: `Game credentials for ${game.title} assigned and sent to player!`,
+        text: res.message,
         type: 'success',
       });
       setTimeout(() => setFeedbackToast(null), 4000);
@@ -1276,7 +1258,19 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                 <label className="text-slate-300 font-semibold">Select Catalog Game</label>
                 <select
                   value={selectedGameId}
-                  onChange={(e) => setSelectedGameId(e.target.value)}
+                  onChange={(e) => {
+                    const newId = e.target.value;
+                    setSelectedGameId(newId);
+                    const sel = gameCatalog.find((g) => g.id === newId);
+                    const existingAcc = customerGameAccounts.find(
+                      (a) => a.gameCatalogId === newId || (sel && a.gameName.toLowerCase().trim() === sel.title.toLowerCase().trim())
+                    );
+                    if (existingAcc) {
+                      setAssignedUsername(existingAcc.username);
+                      setAssignedPassword(existingAcc.password || '');
+                      setGameIdNote(existingAcc.notes || '');
+                    }
+                  }}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500"
                   required
                 >
@@ -1286,6 +1280,20 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                     </option>
                   ))}
                 </select>
+                {(() => {
+                  const sel = gameCatalog.find((g) => g.id === selectedGameId);
+                  const existingAcc = customerGameAccounts.find(
+                    (a) => a.gameCatalogId === selectedGameId || (sel && a.gameName.toLowerCase().trim() === sel.title.toLowerCase().trim())
+                  );
+                  if (existingAcc) {
+                    return (
+                      <div className="mt-1.5 p-2 rounded-lg bg-amber-950/40 border border-amber-800/60 text-[11px] text-amber-300">
+                        ⚡ <strong>Existing Account:</strong> Current ID is <span className="font-mono font-bold text-white">{existingAcc.username}</span>. Submitting updates this single account (1 ID per game rule enforced).
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
 
               <div className="space-y-1">

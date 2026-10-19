@@ -6,6 +6,7 @@ import {
   WithdrawalRequest,
   GameCatalogItem,
   GameAccount,
+  GameAccountStatus,
   SupportConversation,
   ChatMessage,
   ChatTransactionData,
@@ -103,6 +104,13 @@ class DataService {
   constructor() {
     this.cleanLegacyStorage();
     this.loadFromLocalStorage();
+    // Enforce invariant: Strictly 1 Game ID per game platform per user
+    const initialAccounts = this.cache[STORAGE_KEYS.GAME_ACCOUNTS] as GameAccount[];
+    if (Array.isArray(initialAccounts) && initialAccounts.length > 0) {
+      const clean = this.deduplicateGameAccounts(initialAccounts);
+      this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = clean;
+      this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, clean);
+    }
     this.attachVisibilityListener();
     this.initPersistence();
   }
@@ -928,7 +936,7 @@ class DataService {
         updatedAt: ga.updated_at || ga.created_at || new Date().toISOString(),
       });
     }
-    const updated = Array.from(accMap.values());
+    const updated = this.deduplicateGameAccounts(Array.from(accMap.values()));
     this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = updated;
     this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, updated);
   }
@@ -1056,15 +1064,19 @@ class DataService {
   }
 
   private save<T>(key: string, value: T): void {
+    let finalValue = value;
+    if (key === STORAGE_KEYS.GAME_ACCOUNTS && Array.isArray(value)) {
+      finalValue = this.deduplicateGameAccounts(value as unknown as GameAccount[]) as unknown as T;
+    }
     // 1. Immediately update reactive in-memory state
-    this.cache[key] = value;
+    this.cache[key] = finalValue;
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key } }));
 
     // 2. Persist to LocalStorage for offline and preview state preservation
-    this.saveToLocalStorage(key, value);
+    this.saveToLocalStorage(key, finalValue);
 
     // 3. Persist to Supabase PostgreSQL asynchronously if configured
-    this.persistToSupabase(key, value);
+    this.persistToSupabase(key, finalValue);
   }
 
   private async persistToSupabase(key: string, value: any): Promise<void> {
@@ -2442,15 +2454,19 @@ class DataService {
     const config = this.getAppConfig();
     const pm = config.paymentMethods.find((m) => m.type === params.method);
 
-    // Calculate eligible bonus accurately using immutable snapshot
-    let bonusAmount = 0;
+    // Calculate eligible bonus accurately based on payment method config
     let bonusPercentage = 0;
-    if (pm && pm.bonusPercentage && (!pm.bonusMinDeposit || params.amount >= pm.bonusMinDeposit)) {
+    if (pm && pm.bonusPercentage) {
       bonusPercentage = pm.bonusPercentage;
-      const rawBonus = (params.amount * bonusPercentage) / 100;
-      bonusAmount = pm.bonusMaxCap ? Math.min(rawBonus, pm.bonusMaxCap) : rawBonus;
+    } else {
+      bonusPercentage =
+        params.method === 'cashapp' ? 30 :
+        params.method === 'crypto' ? 30 :
+        params.method === 'payment_link' ? 20 :
+        params.method === 'chime' ? 15 : 20;
     }
 
+    const bonusAmount = params.amount > 0 ? Number(((params.amount * bonusPercentage) / 100).toFixed(2)) : 0;
     const feeAmount = pm && pm.feePercentage ? (params.amount * pm.feePercentage) / 100 : 0;
     const finalWalletCredit = params.amount + bonusAmount;
 
@@ -2643,12 +2659,19 @@ class DataService {
     if (!req) return { success: false, message: 'Request not found' };
     if (req.status === 'completed') return { success: false, message: 'Request is already completed (Double credit prevented).' };
 
-    if (params.verifiedAmount !== undefined && params.verifiedAmount > 0) {
-      req.amount = params.verifiedAmount;
-      const bonusPct = req.bonusPercentage || 0;
-      req.bonusAmount = Number(((req.amount * bonusPct) / 100).toFixed(2));
-      req.finalWalletCredit = Number((req.amount + req.bonusAmount).toFixed(2));
+    if (!req.bonusPercentage || req.bonusPercentage === 0) {
+      req.bonusPercentage =
+        req.method === 'cashapp' ? 30 :
+        req.method === 'crypto' ? 30 :
+        req.method === 'payment_link' ? 20 :
+        req.method === 'chime' ? 15 : 20;
     }
+
+    const effectiveVerifiedAmt = (params.verifiedAmount !== undefined && params.verifiedAmount > 0) ? params.verifiedAmount : req.amount;
+    req.amount = effectiveVerifiedAmt;
+    const bonusPct = req.bonusPercentage || 20;
+    req.bonusAmount = Number(((req.amount * bonusPct) / 100).toFixed(2));
+    req.finalWalletCredit = Number((req.amount + req.bonusAmount).toFixed(2));
 
     req.status = 'completed';
     req.reviewerId = params.reviewerId;
@@ -3253,11 +3276,99 @@ class DataService {
     });
   }
 
+  /**
+   * Enforces the fundamental invariant: A user CANNOT have multiple IDs for the same game.
+   * Exactly 1 GameAccount per game per customer.
+   * If duplicates exist, merges them:
+   * - Consolidates game credit balances so player never loses funds.
+   * - Prefers the active account with real credentials.
+   * - Replaces duplicate rows with the single canonical account.
+   */
+  public deduplicateGameAccounts(accounts: GameAccount[]): GameAccount[] {
+    if (!Array.isArray(accounts)) return [];
+
+    // Group accounts per customerId
+    const customerMap = new Map<string, GameAccount[]>();
+    for (const a of accounts) {
+      if (!a || !a.customerId) continue;
+      const list = customerMap.get(a.customerId) || [];
+      list.push(a);
+      customerMap.set(a.customerId, list);
+    }
+
+    const cleanedAccounts: GameAccount[] = [];
+
+    for (const [, userAccList] of customerMap.entries()) {
+      // Buckets of distinct games for this customer
+      const gameBuckets: GameAccount[] = [];
+
+      for (const candidate of userAccList) {
+        const candCatalog = candidate.gameCatalogId?.trim().toLowerCase() || '';
+        const candTitle = candidate.gameName?.trim().toLowerCase() || '';
+
+        // Match if catalog ID matches or game name matches
+        const existingIdx = gameBuckets.findIndex((b) => {
+          const bCatalog = b.gameCatalogId?.trim().toLowerCase() || '';
+          const bTitle = b.gameName?.trim().toLowerCase() || '';
+          if (candCatalog && bCatalog && candCatalog === bCatalog) return true;
+          if (candTitle && bTitle && candTitle === bTitle) return true;
+          return false;
+        });
+
+        if (existingIdx === -1) {
+          gameBuckets.push({ ...candidate });
+        } else {
+          // Merge duplicates into the single bucket
+          const existing = gameBuckets[existingIdx];
+          const candIsActive = candidate.status === 'active' && Boolean(candidate.username) && candidate.username !== 'Pending Assignment';
+          const existIsActive = existing.status === 'active' && Boolean(existing.username) && existing.username !== 'Pending Assignment';
+
+          const primary = (candIsActive && !existIsActive) ? candidate : existing;
+          const secondary = (primary === candidate) ? existing : candidate;
+
+          const mergedBalance = Number(((existing.balance || 0) + (candidate.balance || 0)).toFixed(2));
+          const bestUsername = (primary.username && primary.username !== 'Pending Assignment')
+            ? primary.username
+            : (secondary.username && secondary.username !== 'Pending Assignment')
+            ? secondary.username
+            : primary.username;
+
+          const bestPassword = primary.password || secondary.password || '';
+          const bestStatus: GameAccountStatus = (primary.status === 'active' || secondary.status === 'active') ? 'active' : primary.status;
+
+          gameBuckets[existingIdx] = {
+            ...primary,
+            id: existing.id, // Preserve stable ID
+            balance: mergedBalance,
+            username: bestUsername,
+            password: bestPassword,
+            status: bestStatus,
+            gameCatalogId: primary.gameCatalogId || secondary.gameCatalogId,
+            gameName: primary.gameName || secondary.gameName,
+            platformName: primary.platformName || secondary.platformName,
+            notes: primary.notes || secondary.notes,
+            updatedAt: new Date().toISOString(),
+          };
+        }
+      }
+
+      cleanedAccounts.push(...gameBuckets);
+    }
+
+    return cleanedAccounts;
+  }
+
   // Player Game IDs & Credentials (Fixed games, handled by Customer Support)
   public getGameAccounts(customerId?: string): GameAccount[] {
-    const list = this.load<GameAccount[]>(STORAGE_KEYS.GAME_ACCOUNTS, INITIAL_GAME_ACCOUNTS);
-    if (customerId) return list.filter((g) => g.customerId === customerId);
-    return list;
+    const rawList = this.load<GameAccount[]>(STORAGE_KEYS.GAME_ACCOUNTS, INITIAL_GAME_ACCOUNTS);
+    const cleaned = this.deduplicateGameAccounts(rawList);
+    // If raw list had duplicates, self-heal immediately
+    if (cleaned.length !== rawList.length) {
+      this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = cleaned;
+      this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, cleaned);
+    }
+    if (customerId) return cleaned.filter((g) => g.customerId === customerId);
+    return cleaned;
   }
 
   public getPendingGameRequests(): GameAccount[] {
@@ -3275,14 +3386,21 @@ class DataService {
     if (!game) return { success: false, message: 'Game title not found in active catalog.' };
 
     const accounts = this.getGameAccounts();
-    const existing = accounts.find((a) => a.customerId === params.customerId && a.gameCatalogId === params.gameCatalogId);
+    const existing = accounts.find(
+      (a) =>
+        a.customerId === params.customerId &&
+        (a.gameCatalogId === params.gameCatalogId || a.gameName.toLowerCase().trim() === game.title.toLowerCase().trim())
+    );
 
     if (existing && existing.status === 'active') {
-      return { success: false, message: 'You already have active credentials for this game.' };
+      return {
+        success: false,
+        message: `You already have active credentials for ${game.title} (Username: ${existing.username}). Only 1 ID per game is permitted.`,
+      };
     }
 
     if (existing && (existing.status === 'pending_assignment' || existing.status === 'pending_reset')) {
-      return { success: false, message: 'A request for this game is already assigned to Customer Support.' };
+      return { success: false, message: `A request for ${game.title} is already queued for Customer Support.` };
     }
 
     const now = new Date().toISOString();
@@ -3388,6 +3506,116 @@ class DataService {
     return { success: true, message: 'Password reset request dispatched to customer care.' };
   }
 
+  // Authoritative Provisioning / Updating of a Player's Game Credentials
+  // Guarantees: Strictly 1 Game ID per game per user
+  public provisionGameAccount(params: {
+    customerId: string;
+    customerName?: string;
+    gameCatalogId: string;
+    gameName?: string;
+    platformName?: string;
+    gameUrl?: string;
+    username: string;
+    password?: string;
+    notes?: string;
+    reviewerId: string;
+    reviewerName: string;
+    status?: GameAccountStatus;
+  }): { success: boolean; message: string; account: GameAccount } {
+    const catalog = this.getGameCatalog();
+    const game = catalog.find((g) => g.id === params.gameCatalogId);
+    const gameTitle = game?.title || params.gameName || 'Game';
+    const platform = game?.platform || params.platformName || 'Sweepstakes';
+    const gameUrl = game?.gameUrl || params.gameUrl || '';
+
+    const allAccounts = this.getGameAccounts();
+    const existing = allAccounts.find(
+      (a) =>
+        a.customerId === params.customerId &&
+        ((params.gameCatalogId && a.gameCatalogId === params.gameCatalogId) ||
+          a.gameName.toLowerCase().trim() === gameTitle.toLowerCase().trim())
+    );
+
+    const now = new Date().toISOString();
+    let targetAccount: GameAccount;
+
+    if (existing) {
+      // Update existing single account
+      existing.username = params.username.trim();
+      if (params.password) existing.password = params.password.trim();
+      existing.status = params.status || 'active';
+      existing.requestType = undefined;
+      existing.assignedByAgentId = params.reviewerId;
+      existing.assignedByAgentName = params.reviewerName;
+      if (params.notes) existing.notes = params.notes;
+      existing.updatedAt = now;
+      targetAccount = existing;
+    } else {
+      // Create new single account
+      targetAccount = {
+        id: `ga_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        gameCatalogId: params.gameCatalogId,
+        customerId: params.customerId,
+        gameName: gameTitle,
+        platformName: platform,
+        username: params.username.trim(),
+        password: params.password ? params.password.trim() : undefined,
+        gameUrl,
+        status: params.status || 'active',
+        balance: 0,
+        notes: params.notes,
+        assignedByAgentId: params.reviewerId,
+        assignedByAgentName: params.reviewerName,
+        createdAt: now,
+        updatedAt: now,
+      };
+      allAccounts.unshift(targetAccount);
+    }
+
+    const deduplicated = this.deduplicateGameAccounts(allAccounts);
+    this.save(STORAGE_KEYS.GAME_ACCOUNTS, deduplicated);
+
+    // Notify player in chat & notification
+    const conv = this.getOrCreateConversationForCustomer(
+      params.customerId,
+      params.customerName || this.getUserById(params.customerId)?.displayName || 'Player'
+    );
+    this.sendChatMessage({
+      conversationId: conv.id,
+      senderId: params.reviewerId,
+      senderName: params.reviewerName,
+      senderRole: 'agent',
+      text: `🎮 Credentials Configured for "${gameTitle}" (${platform})!\n• Username: "${params.username.trim()}"\n• Password: "${params.password ? params.password.trim() : '•••••'}"\nYour credentials are active in your Gaming IDs portal.`,
+      isInternalNote: false,
+    });
+
+    this.createNotification({
+      userId: params.customerId,
+      title: 'Game Credentials Configured',
+      message: `Login credentials configured for ${gameTitle}. Username: ${params.username.trim()}`,
+      type: 'game_account',
+      linkTab: 'game_accounts',
+    });
+
+    this.logAudit({
+      actorId: params.reviewerId,
+      actorName: params.reviewerName,
+      actorRole: 'agent',
+      action: 'GAME_CREDENTIALS_ASSIGNED',
+      entityType: 'game_account',
+      entityId: targetAccount.id,
+      details: `${existing ? 'Updated' : 'Assigned'} credentials for ${gameTitle} (User: ${params.username.trim()}) for player ${params.customerId}. Enforced 1 ID per game rule.`,
+    });
+
+    return {
+      success: true,
+      message: existing
+        ? `Updated credentials for ${gameTitle}. Player's single ID maintained.`
+        : `Successfully provisioned credentials for ${gameTitle}. Player notified.`,
+      account: targetAccount,
+    };
+  }
+
   // Customer Support handles assigning / updating credentials
   public assignOrUpdateGameCredentials(params: {
     accountId: string;
@@ -3409,7 +3637,9 @@ class DataService {
     acc.assignedByAgentName = params.reviewerName;
     if (params.notes) acc.notes = params.notes;
     acc.updatedAt = new Date().toISOString();
-    this.save(STORAGE_KEYS.GAME_ACCOUNTS, accounts);
+
+    const deduplicated = this.deduplicateGameAccounts(accounts);
+    this.save(STORAGE_KEYS.GAME_ACCOUNTS, deduplicated);
 
     // Notify player and dispatch confirmation in support chat
     const conv = this.getOrCreateConversationForCustomer(acc.customerId, this.getUserById(acc.customerId)?.displayName || 'Player');
@@ -3437,10 +3667,36 @@ class DataService {
       action: 'GAME_CREDENTIALS_ASSIGNED',
       entityType: 'game_account',
       entityId: acc.id,
-      details: `Support specialist ${params.reviewerName} configured credentials for ${acc.gameName} (User: ${acc.username})`,
+      details: `Support specialist ${params.reviewerName} configured credentials for ${acc.gameName} (User: ${acc.username}). Single ID per game enforced.`,
     });
 
     return { success: true, message: `Successfully assigned credentials for ${acc.gameName}. Player notified.` };
+  }
+
+  // Delete a game account
+  public deleteGameAccount(
+    accountId: string,
+    actorId?: string,
+    actorName?: string
+  ): { success: boolean; message: string } {
+    const all = this.getGameAccounts();
+    const target = all.find((a) => a.id === accountId);
+    if (!target) return { success: false, message: 'Game account not found.' };
+
+    const remaining = all.filter((a) => a.id !== accountId);
+    this.save(STORAGE_KEYS.GAME_ACCOUNTS, remaining);
+
+    this.logAudit({
+      actorId: actorId || 'system',
+      actorName: actorName || 'System',
+      actorRole: 'admin',
+      action: 'GAME_ACCOUNT_DELETED',
+      entityType: 'game_account',
+      entityId: accountId,
+      details: `Deleted game account ID "${target.username}" for game "${target.gameName}" (Customer: ${target.customerId}).`,
+    });
+
+    return { success: true, message: `Successfully deleted game account for ${target.gameName}.` };
   }
 
   // Data Migration for user account ID reconciliation (e.g. Supabase recreation / session matching)

@@ -692,15 +692,6 @@ app.post('/api/auth/register', async (req, res) => {
     }
   });
 
-  // Create Vite server in middleware mode
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: 'spa',
-  });
-
-  // Use vite's connect instance as middleware
-  app.use(vite.middlewares);
-
   // USPay / Keyhub API Proxy Route to avoid CORS issues
   app.all('/api/uspay/*', async (req, res) => {
     try {
@@ -753,7 +744,23 @@ app.post('/api/auth/register', async (req, res) => {
     return res.json({ received: true });
   });
 
-  const port = Number(process.env.PORT) || 3000;
+  // Create Vite server in middleware mode
+  const vite = await createViteServer({
+    server: { middlewareMode: true },
+    appType: 'spa',
+  });
+
+  // Use vite's connect instance as middleware for serving frontend
+  app.use(vite.middlewares);
+
+  // Determine port: command line args take precedence, then PORT (if not 8080 collision), defaulting strictly to 3000
+  const args = process.argv.slice(2);
+  const portArgIdx = args.indexOf('--port');
+  const portArg = portArgIdx !== -1 && args[portArgIdx + 1] ? Number(args[portArgIdx + 1]) : NaN;
+  const port = !isNaN(portArg)
+    ? portArg
+    : (process.env.PORT && process.env.PORT !== '8080' ? Number(process.env.PORT) : 3000);
+
   app.listen(port, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${port}`);
     // Start continuous 24/7 background Telegram polling

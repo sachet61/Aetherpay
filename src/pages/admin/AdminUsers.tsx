@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { UserProfile, UserRole } from '../../types';
+import { UserProfile, UserRole, GameAccount } from '../../types';
 import { dataService } from '../../services/dataService';
 import {
   Users,
@@ -21,6 +21,11 @@ import {
   Trash2,
   Check,
   Loader2,
+  Copy,
+  EyeOff,
+  Plus,
+  X,
+  Edit3,
 } from 'lucide-react';
 
 interface AdminUsersProps {
@@ -41,6 +46,16 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
   const [isUpdating, setIsUpdating] = useState<string | null>(null);
   const [userToDelete, setUserToDelete] = useState<UserProfile | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Game account assignment & editing state (strictly 1 ID per game)
+  const [editingGameAcc, setEditingGameAcc] = useState<GameAccount | null>(null);
+  const [showAddGameModal, setShowAddGameModal] = useState(false);
+  const [selectedGameCatalogId, setSelectedGameCatalogId] = useState('');
+  const [assignedUsername, setAssignedUsername] = useState('');
+  const [assignedPassword, setAssignedPassword] = useState('');
+  const [assignedNotes, setAssignedNotes] = useState('');
+  const [revealedPasswords, setRevealedPasswords] = useState<Record<string, boolean>>({});
+  const [copiedField, setCopiedField] = useState<string | null>(null);
 
   const loadUsers = () => {
     setUsers(dataService.getUsers());
@@ -139,6 +154,95 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
       setFeedback({ type: 'error', text: err.message || 'Failed to delete user.' });
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const handleCopy = (text: string, fieldId: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedField(fieldId);
+    setTimeout(() => setCopiedField(null), 2000);
+  };
+
+  const togglePasswordVisibility = (accountId: string) => {
+    setRevealedPasswords((prev) => ({
+      ...prev,
+      [accountId]: !prev[accountId],
+    }));
+  };
+
+  const handleOpenEditGameModal = (acc: GameAccount) => {
+    setEditingGameAcc(acc);
+    setAssignedUsername(acc.username || '');
+    setAssignedPassword(acc.password || '');
+    setAssignedNotes(acc.notes || '');
+  };
+
+  const handleOpenAddGameModal = (user: UserProfile) => {
+    const catalog = dataService.getGameCatalog();
+    if (catalog.length > 0) {
+      setSelectedGameCatalogId(catalog[0].id);
+    }
+    const cleanHandle = user.displayName.replace(/\s+/g, '').toLowerCase();
+    setAssignedUsername(`${cleanHandle}_${Math.floor(100 + Math.random() * 900)}`);
+    setAssignedPassword(`Pass#${Math.floor(1000 + Math.random() * 9000)}!`);
+    setAssignedNotes('');
+    setShowAddGameModal(true);
+  };
+
+  const handleSaveGameAccount = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedUser) return;
+    if (!assignedUsername.trim()) {
+      alert('Username cannot be empty.');
+      return;
+    }
+
+    if (editingGameAcc) {
+      // Update existing single account
+      const res = dataService.assignOrUpdateGameCredentials({
+        accountId: editingGameAcc.id,
+        username: assignedUsername.trim(),
+        password: assignedPassword.trim(),
+        notes: assignedNotes.trim() || undefined,
+        reviewerId: currentUser.id,
+        reviewerName: currentUser.displayName,
+      });
+      if (res.success) {
+        setModalFeedback({ type: 'success', text: `Credentials updated for ${editingGameAcc.gameName}. Single ID enforced.` });
+        setEditingGameAcc(null);
+      } else {
+        setModalFeedback({ type: 'error', text: res.message });
+      }
+    } else {
+      // Provision or update account
+      const res = dataService.provisionGameAccount({
+        customerId: selectedUser.id,
+        customerName: selectedUser.displayName,
+        gameCatalogId: selectedGameCatalogId,
+        username: assignedUsername.trim(),
+        password: assignedPassword.trim(),
+        notes: assignedNotes.trim() || undefined,
+        reviewerId: currentUser.id,
+        reviewerName: currentUser.displayName,
+      });
+      if (res.success) {
+        setModalFeedback({ type: 'success', text: res.message });
+        setShowAddGameModal(false);
+      } else {
+        setModalFeedback({ type: 'error', text: res.message });
+      }
+    }
+  };
+
+  const handleDeleteGameAccount = (acc: GameAccount) => {
+    if (!confirm(`Are you sure you want to remove the game account ID "${acc.username}" for "${acc.gameName}"?`)) {
+      return;
+    }
+    const res = dataService.deleteGameAccount(acc.id, currentUser.id, currentUser.displayName);
+    if (res.success) {
+      setModalFeedback({ type: 'success', text: `Deleted game ID for ${acc.gameName}.` });
+    } else {
+      setModalFeedback({ type: 'error', text: res.message });
     }
   };
 
@@ -378,10 +482,17 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                         )}
                       </td>
 
-                      {/* Active Games */}
+                      {/* Active Games / Platforms */}
                       <td className="py-3.5 px-4">
                         <span className="font-mono text-slate-300">
-                          {gameAccounts.filter((g) => g.status === 'active').length} active
+                          {(() => {
+                            const activePlatforms = new Set(
+                              gameAccounts
+                                .filter((g) => g.status === 'active')
+                                .map((g) => (g.platformName || g.gameName || '').trim().toLowerCase())
+                            ).size;
+                            return `${activePlatforms} active platform${activePlatforms === 1 ? '' : 's'}`;
+                          })()}
                         </span>
                       </td>
 
@@ -772,36 +883,139 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
 
               {/* Provisioned Game IDs */}
               <div className="space-y-2">
-                <h4 className="font-bold text-white flex items-center justify-between">
-                  <span>Assigned Game Accounts</span>
-                  <span className="text-[10px] text-slate-400">
-                    {dataService.getGameAccounts(selectedUser.id).length} platform(s)
-                  </span>
-                </h4>
+                <div className="flex items-center justify-between">
+                  <h4 className="font-bold text-white flex items-center gap-1.5 text-xs">
+                    <Gamepad2 className="w-4 h-4 text-indigo-400" />
+                    <span>Assigned Game Accounts</span>
+                  </h4>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-amber-300 font-mono bg-amber-950/60 border border-amber-800/60 px-2 py-0.5 rounded-full font-bold">
+                      {(() => {
+                        const accs = dataService.getGameAccounts(selectedUser.id);
+                        const count = new Set(accs.map((ga) => (ga.platformName || ga.gameName || '').trim().toLowerCase())).size;
+                        return `${count} platform${count === 1 ? '' : 's'} (1 ID per game)`;
+                      })()}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenAddGameModal(selectedUser)}
+                      className="text-[10px] bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-2 py-0.5 rounded-lg flex items-center gap-1 transition-colors cursor-pointer"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>Assign ID</span>
+                    </button>
+                  </div>
+                </div>
 
-                <div className="max-h-36 overflow-y-auto space-y-1.5">
-                  {dataService.getGameAccounts(selectedUser.id).length === 0 ? (
-                    <div className="p-3 rounded-lg bg-slate-950 text-center text-slate-500 text-[11px]">
-                      No game accounts provisioned yet.
-                    </div>
-                  ) : (
-                    dataService.getGameAccounts(selectedUser.id).map((ga) => (
-                      <div
-                        key={ga.id}
-                        className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between"
-                      >
-                        <div>
-                          <div className="font-bold text-white">{ga.gameName}</div>
-                          <div className="text-[10px] text-slate-400 font-mono">
-                            ID: <span className="text-amber-300">{ga.username}</span> | Pass: {ga.password || '•••••'}
+                <div className="max-h-44 overflow-y-auto space-y-1.5 pr-0.5">
+                  {(() => {
+                    const accs = dataService.getGameAccounts(selectedUser.id);
+                    if (accs.length === 0) {
+                      return (
+                        <div className="p-3 rounded-lg bg-slate-950 text-center text-slate-500 text-[11px] border border-slate-800/60">
+                          No game accounts provisioned yet. Click "Assign ID" to configure credentials.
+                        </div>
+                      );
+                    }
+                    return accs.map((ga) => {
+                      const isRevealed = Boolean(revealedPasswords[ga.id]);
+                      return (
+                        <div
+                          key={ga.id}
+                          className="p-2.5 rounded-lg bg-slate-950 border border-slate-800/80 hover:border-slate-700 transition flex items-center justify-between gap-2"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-bold text-white text-xs truncate">{ga.gameName}</span>
+                              <span className="text-[9px] font-mono text-cyan-400 bg-cyan-950/60 px-1.5 py-0.2 rounded border border-cyan-800/40">
+                                {ga.platformName || 'Platform'}
+                              </span>
+                              <span
+                                className={`text-[9px] font-mono px-1.5 py-0.2 rounded border ${
+                                  ga.status === 'active'
+                                    ? 'text-emerald-400 bg-emerald-950/60 border-emerald-800/40'
+                                    : 'text-amber-300 bg-amber-950/60 border-amber-800/40'
+                                }`}
+                              >
+                                {ga.status}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-300 font-mono mt-1 flex flex-wrap items-center gap-2">
+                              <span>
+                                ID: <span className="text-amber-300 font-semibold">{ga.username}</span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleCopy(ga.username, `modal_u_${ga.id}`)}
+                                className="text-slate-500 hover:text-white"
+                                title="Copy username"
+                              >
+                                {copiedField === `modal_u_${ga.id}` ? (
+                                  <Check className="w-3 h-3 text-emerald-400" />
+                                ) : (
+                                  <Copy className="w-3 h-3" />
+                                )}
+                              </button>
+                              <span className="text-slate-600">|</span>
+                              <span>
+                                Pass:{' '}
+                                <span className="text-emerald-400 font-semibold">
+                                  {isRevealed ? (ga.password || '•••••') : '••••••••'}
+                                </span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => togglePasswordVisibility(ga.id)}
+                                className="text-slate-500 hover:text-white"
+                                title={isRevealed ? 'Hide Password' : 'Show Password'}
+                              >
+                                {isRevealed ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                              </button>
+                              {ga.password && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopy(ga.password || '', `modal_p_${ga.id}`)}
+                                  className="text-slate-500 hover:text-white"
+                                  title="Copy password"
+                                >
+                                  {copiedField === `modal_p_${ga.id}` ? (
+                                    <Check className="w-3 h-3 text-emerald-400" />
+                                  ) : (
+                                    <Copy className="w-3 h-3" />
+                                  )}
+                                </button>
+                              )}
+                              {(ga.balance || 0) > 0 && (
+                                <>
+                                  <span className="text-slate-600">|</span>
+                                  <span className="text-amber-400 font-semibold">${ga.balance.toFixed(2)}</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditGameModal(ga)}
+                              className="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300 transition cursor-pointer"
+                              title="Edit Game ID (1 ID per game)"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteGameAccount(ga)}
+                              className="p-1.5 rounded bg-slate-800 hover:bg-rose-900/60 text-slate-400 hover:text-rose-300 transition cursor-pointer"
+                              title="Delete Game Account"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         </div>
-                        <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/40">
-                          {ga.status}
-                        </span>
-                      </div>
-                    ))
-                  )}
+                      );
+                    });
+                  })()}
                 </div>
               </div>
 
@@ -848,6 +1062,261 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
           </div>
         );
       })()}
+
+      {/* Modal for Editing Single Game Account Credentials */}
+      {editingGameAcc && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/75 backdrop-blur-sm" onClick={() => setEditingGameAcc(null)} />
+          <form
+            onSubmit={handleSaveGameAccount}
+            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <Gamepad2 className="w-5 h-5 text-indigo-400" />
+                <div>
+                  <h3 className="text-base font-bold text-white">Update Game Credentials</h3>
+                  <div className="text-[11px] text-slate-400">
+                    {editingGameAcc.gameName} ({editingGameAcc.platformName})
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingGameAcc(null)}
+                className="text-xs text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-800/40 text-[11px] text-amber-300">
+              ⚡ <strong>1 ID Per Game Rule:</strong> Each customer is limited to exactly one active ID per game platform.
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold">Game Username / ID</label>
+                <input
+                  type="text"
+                  value={assignedUsername}
+                  onChange={(e) => setAssignedUsername(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:border-indigo-500"
+                  required
+                />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-slate-300 font-semibold">Game Password</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const rand = Math.floor(1000 + Math.random() * 9000);
+                      setAssignedPassword(`Pass#${rand}!`);
+                    }}
+                    className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    <span>Auto-Generate</span>
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={assignedPassword}
+                  onChange={(e) => setAssignedPassword(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-emerald-400 font-mono font-bold focus:outline-none focus:border-indigo-500"
+                  required
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold">Staff Notes (Optional)</label>
+                <textarea
+                  rows={2}
+                  value={assignedNotes}
+                  onChange={(e) => setAssignedNotes(e.target.value)}
+                  placeholder="Internal notes or special player tags..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-300 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setEditingGameAcc(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Save Credentials</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Modal for Provisioning / Assigning Game ID (Enforcing 1 ID per Game) */}
+      {showAddGameModal && selectedUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/75 backdrop-blur-sm" onClick={() => setShowAddGameModal(false)} />
+          <form
+            onSubmit={handleSaveGameAccount}
+            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <Gamepad2 className="w-5 h-5 text-indigo-400" />
+                <div>
+                  <h3 className="text-base font-bold text-white">Assign Game Account ID</h3>
+                  <div className="text-[11px] text-slate-400">Player: {selectedUser.displayName}</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAddGameModal(false)}
+                className="text-xs text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Check if user already has an account for the selected game */}
+            {(() => {
+              const catalog = dataService.getGameCatalog();
+              const selGame = catalog.find((g) => g.id === selectedGameCatalogId);
+              const userAccounts = dataService.getGameAccounts(selectedUser.id);
+              const existingForGame = userAccounts.find(
+                (a) =>
+                  a.gameCatalogId === selectedGameCatalogId ||
+                  (selGame && a.gameName.toLowerCase().trim() === selGame.title.toLowerCase().trim())
+              );
+
+              if (existingForGame) {
+                return (
+                  <div className="p-3 rounded-lg bg-amber-950/40 border border-amber-800/60 text-[11px] text-amber-300 space-y-1">
+                    <div className="font-bold flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <span>Existing Account Found ({existingForGame.gameName})</span>
+                    </div>
+                    <p className="text-[10px] text-slate-300 leading-relaxed">
+                      Current ID: <strong className="text-amber-300 font-mono">{existingForGame.username}</strong>.
+                      Saving will update these credentials. In compliance with platform policy, multiple IDs for the same game are prohibited.
+                    </p>
+                  </div>
+                );
+              }
+              return (
+                <div className="p-2.5 rounded-lg bg-indigo-950/30 border border-indigo-800/40 text-[11px] text-indigo-300">
+                  Assigning credentials establishes the user's authoritative single login for this game platform.
+                </div>
+              );
+            })()}
+
+            <div className="space-y-3 text-xs">
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold">Select Game Title</label>
+                <select
+                  value={selectedGameCatalogId}
+                  onChange={(e) => {
+                    const newId = e.target.value;
+                    setSelectedGameCatalogId(newId);
+                    const sel = dataService.getGameCatalog().find((g) => g.id === newId);
+                    const userAccounts = dataService.getGameAccounts(selectedUser.id);
+                    const existingForGame = userAccounts.find(
+                      (a) => a.gameCatalogId === newId || (sel && a.gameName.toLowerCase().trim() === sel.title.toLowerCase().trim())
+                    );
+                    if (existingForGame) {
+                      setAssignedUsername(existingForGame.username);
+                      setAssignedPassword(existingForGame.password || '');
+                      setAssignedNotes(existingForGame.notes || '');
+                    }
+                  }}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500"
+                  required
+                >
+                  {dataService.getGameCatalog().map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.title} ({g.platform})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold">Game Username / ID</label>
+                <input
+                  type="text"
+                  value={assignedUsername}
+                  onChange={(e) => setAssignedUsername(e.target.value)}
+                  placeholder="e.g. viper_07"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:border-indigo-500"
+                  required
+                />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-slate-300 font-semibold">Game Password</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const rand = Math.floor(1000 + Math.random() * 9000);
+                      setAssignedPassword(`Pass#${rand}!`);
+                    }}
+                    className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    <span>Auto-Generate</span>
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={assignedPassword}
+                  onChange={(e) => setAssignedPassword(e.target.value)}
+                  placeholder="e.g. GamePass#2026!"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-emerald-400 font-mono font-bold focus:outline-none focus:border-indigo-500"
+                  required
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold">Staff Notes (Optional)</label>
+                <textarea
+                  rows={2}
+                  value={assignedNotes}
+                  onChange={(e) => setAssignedNotes(e.target.value)}
+                  placeholder="Internal notes or notes for support chat..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-300 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowAddGameModal(false)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Save ID</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* Permanent Delete Confirmation Modal */}
       {userToDelete && (

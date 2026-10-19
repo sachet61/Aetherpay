@@ -585,31 +585,7 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
                 />
               </div>
 
-              {/* Limits */}
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div className="space-y-1">
-                  <label className="text-slate-400 text-[11px]">Min Deposit ($)</label>
-                  <input
-                    type="number"
-                    value={paymentLinkMethod.minAmount || 10}
-                    onChange={(e) =>
-                      handleUpdatePaymentMethodField(paymentLinkMethod.id, 'minAmount', parseFloat(e.target.value) || 0)
-                    }
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 font-mono text-white text-xs"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-slate-400 text-[11px]">Max Deposit ($)</label>
-                  <input
-                    type="number"
-                    value={paymentLinkMethod.maxAmount || 10000}
-                    onChange={(e) =>
-                      handleUpdatePaymentMethodField(paymentLinkMethod.id, 'maxAmount', parseFloat(e.target.value) || 0)
-                    }
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 font-mono text-white text-xs"
-                  />
-                </div>
-              </div>
+
             </div>
           )}
 
@@ -713,31 +689,7 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
                 }}
               />
 
-              {/* Limits */}
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div className="space-y-1">
-                  <label className="text-slate-400 text-[11px]">Min Deposit ($)</label>
-                  <input
-                    type="number"
-                    value={cashAppMethod.minAmount || 10}
-                    onChange={(e) =>
-                      handleUpdatePaymentMethodField(cashAppMethod.id, 'minAmount', parseFloat(e.target.value) || 0)
-                    }
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 font-mono text-white text-xs"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-slate-400 text-[11px]">Max Deposit ($)</label>
-                  <input
-                    type="number"
-                    value={cashAppMethod.maxAmount || 5000}
-                    onChange={(e) =>
-                      handleUpdatePaymentMethodField(cashAppMethod.id, 'maxAmount', parseFloat(e.target.value) || 0)
-                    }
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 font-mono text-white text-xs"
-                  />
-                </div>
-              </div>
+
             </div>
           )}
 
@@ -812,35 +764,16 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
               </div>
 
               {/* Chime Tag & QR Code Settings */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div className="space-y-1">
-                  <label className="text-slate-400 text-[11px]">Chime Handle / Tag</label>
-                  <input
-                    type="text"
-                    value={chimeMethod.chimeHandle || '$SwiftSweepsVault'}
-                    onChange={(e) =>
-                      handleUpdatePaymentMethodField(chimeMethod.id, 'chimeHandle', e.target.value)
-                    }
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-xs text-teal-300 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-slate-400 text-[11px]">Strict Minimum Rule ($)</label>
-                  <input
-                    type="number"
-                    min="20"
-                    value={Math.max(20, chimeMethod.minAmount || 20)}
-                    onChange={(e) =>
-                      handleUpdatePaymentMethodField(
-                        chimeMethod.id,
-                        'minAmount',
-                        Math.max(20, parseFloat(e.target.value) || 20)
-                      )
-                    }
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-xs text-amber-300 font-bold focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
+              <div className="space-y-1 text-xs">
+                <label className="text-slate-400 text-[11px]">Chime Handle / Tag</label>
+                <input
+                  type="text"
+                  value={chimeMethod.chimeHandle || '$SwiftSweepsVault'}
+                  onChange={(e) =>
+                    handleUpdatePaymentMethodField(chimeMethod.id, 'chimeHandle', e.target.value)
+                  }
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-xs text-teal-300 focus:outline-none focus:border-indigo-500"
+                />
               </div>
 
               <QrCodeUploadBox

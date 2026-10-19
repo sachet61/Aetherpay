@@ -805,13 +805,20 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
                 </div>
                 {(() => {
                   const numAmt = parseFloat(verifiedAmount) || (actionTopUp.amount || 0);
-                  const bonusPct = actionTopUp.bonusPercentage || 0;
+                  const reqMethod = (actionTopUp.method || '').toLowerCase();
+                  const reqMethodName = (actionTopUp.methodName || '').toLowerCase();
+                  const bonusPct =
+                    (actionTopUp.bonusPercentage && actionTopUp.bonusPercentage > 0) ? actionTopUp.bonusPercentage :
+                    reqMethodName.includes('cashapp') || reqMethod === 'cashapp' ? 30 :
+                    reqMethodName.includes('crypto') || reqMethod === 'crypto' ? 30 :
+                    reqMethodName.includes('link') || reqMethod === 'payment_link' ? 20 :
+                    reqMethodName.includes('chime') || reqMethod === 'chime' ? 15 : 20;
                   const bonusAmt = (numAmt * bonusPct) / 100;
                   const totalCredit = numAmt + bonusAmt;
                   return (
                     <div className="space-y-1 pt-1 text-xs">
                       <div className="flex justify-between text-slate-400">
-                        <span>Calculated Bonus ({bonusPct}%):</span>
+                        <span>Payment Method Bonus (+{bonusPct}%):</span>
                         <span className="font-mono text-emerald-400">+${bonusAmt.toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between font-bold border-t border-slate-800 pt-1">

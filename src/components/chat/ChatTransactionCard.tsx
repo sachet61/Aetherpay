@@ -57,19 +57,16 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
     ? dataService.getTopUpRequests().find((r) => r.id === transaction.requestId)
     : undefined;
 
-  // Determine bonus percentage
+  // Determine bonus percentage robustly from top-up request or method type
+  const methodLower = (topUpReq?.methodName || transaction.methodName || '').toLowerCase();
+  const methodType = (topUpReq?.method || '').toLowerCase();
   const bonusPct =
-    transaction.bonusPercentage ??
-    topUpReq?.bonusPercentage ??
-    (transaction.methodName?.toLowerCase().includes('cashapp')
-      ? 30
-      : transaction.methodName?.toLowerCase().includes('crypto')
-      ? 30
-      : transaction.methodName?.toLowerCase().includes('link')
-      ? 20
-      : transaction.methodName?.toLowerCase().includes('chime')
-      ? 15
-      : 20);
+    (topUpReq?.bonusPercentage && topUpReq.bonusPercentage > 0) ? topUpReq.bonusPercentage :
+    (transaction.bonusPercentage && transaction.bonusPercentage > 0) ? transaction.bonusPercentage :
+    methodLower.includes('cashapp') || methodType === 'cashapp' ? 30 :
+    methodLower.includes('crypto') || methodType === 'crypto' ? 30 :
+    methodLower.includes('link') || methodType === 'payment_link' ? 20 :
+    methodLower.includes('chime') || methodType === 'chime' ? 15 : 20;
 
   // Check customer game credentials
   const customerId = topUpReq?.customerId || '';
@@ -595,7 +592,7 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
                   </span>
                 </div>
                 <div className="flex justify-between text-slate-400 text-[11px]">
-                  <span>Promotional Method Bonus (+{bonusPct}%):</span>
+                  <span>Payment Method Bonus (+{bonusPct}%):</span>
                   <span className="font-mono text-emerald-400 font-semibold">
                     +${liveBonusAmt.toFixed(2)}
                   </span>

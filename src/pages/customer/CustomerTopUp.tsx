@@ -439,13 +439,10 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                           +15% BONUS
                         </span>
-                        <span className="text-[9px] text-amber-400 font-mono font-bold">
-                          Min $20
-                        </span>
                       </div>
                     </div>
                     <div className="text-xs font-bold text-white">Chime Direct</div>
-                    <div className="text-[10px] text-slate-400 mt-0.5">Chime QR code scan ($20 min)</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">Chime QR code scan & transfer</div>
                   </button>
 
                   {/* 4. Crypto Payment (30% bonus) */}

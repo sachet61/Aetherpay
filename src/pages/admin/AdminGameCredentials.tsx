@@ -19,6 +19,7 @@ import {
   Filter,
   Send,
   Lock,
+  Trash2,
 } from 'lucide-react';
 
 interface AdminGameCredentialsProps {
@@ -122,6 +123,22 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
       setAssignedPassword('');
       setSupportNote('');
       setTimeout(() => setFeedbackMsg(null), 4000);
+    } else {
+      setFeedbackMsg({ text: res.message, type: 'error' });
+    }
+  };
+
+  const handleDeleteAccount = (account: GameAccount) => {
+    if (!confirm(`Are you sure you want to delete the game credentials for "${account.gameName}" (User: ${account.username})?`)) {
+      return;
+    }
+    const res = dataService.deleteGameAccount(account.id, currentUser.id, currentUser.displayName);
+    if (res.success) {
+      setFeedbackMsg({
+        text: `Deleted game credentials for ${account.gameName}.`,
+        type: 'success',
+      });
+      setTimeout(() => setFeedbackMsg(null), 3000);
     } else {
       setFeedbackMsg({ text: res.message, type: 'error' });
     }
@@ -401,17 +418,26 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
 
                       {/* Action column */}
                       <td className="py-3.5 px-4 text-right">
-                        <button
-                          onClick={() => handleOpenEditModal(acc)}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ml-auto ${
-                            isPending
-                              ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                              : 'bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700'
-                          }`}
-                        >
-                          <KeyRound className="w-3.5 h-3.5" />
-                          <span>{isPending ? 'Assign & Notify Player' : 'Update Credentials'}</span>
-                        </button>
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => handleOpenEditModal(acc)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${
+                              isPending
+                                ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold shadow-md shadow-amber-500/20'
+                                : 'bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700'
+                            }`}
+                          >
+                            <KeyRound className="w-3.5 h-3.5" />
+                            <span>{isPending ? 'Assign & Notify' : 'Update Credentials'}</span>
+                          </button>
+                          <button
+                            onClick={() => handleDeleteAccount(acc)}
+                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/60 text-slate-400 hover:text-rose-300 border border-slate-700 transition cursor-pointer"
+                            title="Delete game account"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

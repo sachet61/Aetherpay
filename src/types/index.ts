@@ -350,7 +350,6 @@ export interface GatewaySimulatorConfig {
   simulateWebhookLatencyMs: number;
   failureRatePercentage: number;
   activeProviders: {
-    visaMastercard: boolean;
     zelleFedNow: boolean;
     cryptoTrc20: boolean;
   };

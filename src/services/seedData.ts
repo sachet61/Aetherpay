@@ -21,12 +21,9 @@ export const INITIAL_CONFIG: AppConfig = {
       name: 'Payment via Link',
       type: 'payment_link',
       enabled: true,
-      minAmount: 10,
-      maxAmount: 10000,
       feePercentage: 0,
       instructions: 'Click the secure payment link below to complete your checkout. Attach your screenshot or transaction reference for instant admin verification.',
       bonusPercentage: 20, // Via Link 20%
-      bonusMinDeposit: 20,
       forwardUrl: 'http://www.keyhubsolutions.com/c/Jhaukhel',
     },
     {
@@ -34,12 +31,9 @@ export const INITIAL_CONFIG: AppConfig = {
       name: 'Verified CashApp',
       type: 'cashapp',
       enabled: true,
-      minAmount: 10,
-      maxAmount: 5000,
       feePercentage: 0,
       instructions: 'Pay instantly via Verified CashApp. Send payment, attach your payment screenshot, and provide your $Cashtag for 30% instant bonus.',
       bonusPercentage: 30, // Verified CashApp 30%
-      bonusMinDeposit: 20,
       forwardUrl: 'http://www.keyhubsolutions.com/l/Jhaukhel',
     },
     {
@@ -47,12 +41,9 @@ export const INITIAL_CONFIG: AppConfig = {
       name: 'Chime Direct',
       type: 'chime',
       enabled: true,
-      minAmount: 20, // $20 Chime rule strictly enforced
-      maxAmount: 5000,
       feePercentage: 0,
-      instructions: 'Scan platform Chime QR code or send to our official Chime handle. Note: Strict minimum deposit is $20.00 for Chime transactions.',
+      instructions: 'Scan platform Chime QR code or send to our official Chime handle.',
       bonusPercentage: 15, // Chime Direct 15%
-      bonusMinDeposit: 20,
       chimeHandle: '$SwiftSweepsVault',
       chimeQrCodeUrl: 'https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=chime://send/$SwiftSweepsVault',
     },
@@ -114,7 +105,6 @@ export const INITIAL_CONFIG: AppConfig = {
     simulateWebhookLatencyMs: 1200,
     failureRatePercentage: 0,
     activeProviders: {
-      visaMastercard: true,
       zelleFedNow: true,
       cryptoTrc20: true,
     },
