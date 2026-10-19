@@ -1,75 +1,106 @@
-# Implementation Plan: Eliminate High REST API Egress & Transition to Pure Scoped Realtime
+# Implementation Plan: Replace Promotional Bonus with Payment Method Linked Bonus
 
-Address the root cause of continuous Supabase REST request spikes (~16,000+ daily GET requests across `messages`, `conversations`, `wallets`, `users`, `topups`, `withdrawals`, etc.) by removing redundant REST `syncDelta` bursts, scoping queries strictly to the active authenticated user, and relying on pure event-driven WebSocket payloads for real-time updates.
-
----
-
-## Root Cause Analysis
-
-1. **Redundant REST Catch-Up Loop (`syncDelta`)**:
-   - Every time a browser tab regained focus or the Realtime WebSocket connection re-established, `syncDelta()` dispatched 7 parallel REST requests across `topups`, `withdrawals`, `wallets`, `users`, `game_accounts`, `conversations`, and `messages`.
-   - With multiple users or tab-switching, this generated 1,700–2,480 REST calls per table within 24 hours.
-
-2. **Unscoped Global Table Reads**:
-   - Customers opening the app triggered queries for all users and all wallets in the database rather than scoping solely to their own record (`customer_id = currentUser.id`).
-   - Every client-side wallet or user state save triggered a bulk upsert of the entire cache, broadcasting change events to all connected clients and creating broadcast amplification.
-
-3. **Duplication Between Realtime & REST**:
-   - Supabase Realtime already delivers the updated row directly inside `payload.new`. Fetching the entire table again via REST upon receiving a change or reconnecting was completely redundant.
+Replace generic "+0% Promotional Bonus" with dynamic, payment-method-linked bonuses that automatically inherit the bonus percentage configured for each payment method in platform settings.
 
 ---
 
-## Proposed Changes
+## User Review & Critical Decisions
 
-### 1. Data Access & Synchronization Layer (`src/services/dataService.ts`)
-
-#### A. Remove Automatic REST Catch-Up (`syncDelta`) on Focus & Reconnect
-- Remove the automatic multi-table `syncDelta()` trigger inside `document.addEventListener('visibilitychange')`.
-- Remove `this.syncDelta()` call on WebSocket channel `SUBSCRIBED` status.
-- Ensure the app stays connected to Realtime without firing 7 parallel REST queries every time a tab is clicked.
-
-#### B. Direct Event-Driven Ingestion from Realtime Payloads
-- Update `queueRealtimeMutation` and `flushRealtimeMutations`:
-  - Directly apply `payload.new` into local in-memory cache and dispatch `aetherpay_state_changed`.
-  - Never trigger a background REST query when processing Realtime stream events.
-
-#### C. Role & User-Scoped Queries
-- Update `initialCompactLoad()` and customer hydration methods:
-  - **For Customers**:
-    - `wallets`: `.eq('customer_id', currentUserId).maybeSingle()`
-    - `game_accounts`: `.eq('customer_id', currentUserId)`
-    - `topups`: `.eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20)`
-    - `withdrawals`: `.eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20)`
-    - `conversations`: `.eq('customer_id', currentUserId).maybeSingle()`
-    - Do NOT query the global `users` table or other customers' wallets.
-  - **For Admins**:
-    - Load administrative queues on-demand when the admin navigates to the respective dashboard view, using query limits (`limit(30)`) and pagination.
-
-#### D. Single-Record Upserts
-- Replace bulk table upserts in `saveToSupabase` with targeted single-record upserts:
-  - When a user's wallet changes, upsert only that user's wallet record.
-  - When an individual request or message is created, upsert/insert only that single row.
+> [!IMPORTANT]
+> Based on your confirmed preferences:
+> - **Bonus Source**: The bonus percentage will be directly linked to the specific payment method chosen by the player (from Admin Settings `config.paymentMethods`).
+> - **Card Display Label**: The card will display `+{bonusPct}% [Payment Method Name] Bonus` (e.g., `+20% Instant Gateway Bonus` instead of `+0% Promotional Bonus`).
+> - **Crediting Automation**: When staff enters the verified deposit amount from the receipt, the bonus dollar amount is automatically calculated and added to the total game credits.
 
 ---
 
-### 2. Chat & Communication Layer (`src/pages/customer/CustomerChat.tsx` & `src/pages/admin/AdminChat.tsx`)
+## 1. Overview & Core Concept
 
-#### A. Pure WebSocket Realtime for Live Messages
-- Listen to Supabase Realtime `INSERT` on `messages` table filtered by `conversation_id=eq.{id}`.
-- Append new incoming messages directly from `payload.new` without re-querying the REST API.
+Currently, when a player forwards a payment proof via chat or the top-up modal, the top-up card displays `+0% Promotional Bonus` because the request amount is initially `$0` ("Awaiting Staff Amount"), causing the bonus calculator to resolve to 0%.
 
-#### B. Scoped Initial Chat Load with Pagination
-- Load only the most recent 40 messages for the active conversation on open.
-- Load older messages only when the user explicitly clicks "Load Older Messages" via `fetchOlderMessages(conversationId, beforeTimestamp, 40)`.
+This update ensures:
+1. Every payment method's configured bonus percentage (e.g., Instant Gateway +20%, Cash App +30%, Crypto +30%, Chime +15%) is captured and linked to the top-up request upon creation, regardless of initial deposit amount.
+2. The chat transaction card, customer top-up review, and admin approval drawers display the exact payment method name with its bonus percentage (e.g., `+20% Instant Gateway Bonus`).
+3. When staff enters the verified payment amount upon reviewing the proof screenshot, the system automatically computes `bonusAmount = (deposit * methodBonusPct) / 100` and displays the exact credit total (`$deposit + $bonus`).
 
 ---
 
-### 3. Verification & Metrics
+## 2. User Experience & Visual Design
 
-- **Build & Syntax Verification**:
-  - Run `compile_applet` and `lint_applet` to confirm zero TypeScript compilation errors and clean builds.
-- **REST Request Validation**:
-  - Verify that tab switching or WebSocket reconnects do not trigger any REST requests in the network panel.
-  - Verify that customer session loads only fire targeted queries for their own records.
-- **Realtime Responsiveness**:
-  - Test chat sending and live status updates to confirm instant delivery over WebSocket.
+### A. Chat Transaction Card (`src/components/chat/ChatTransactionCard.tsx`)
+- **Pending State ("Awaiting Staff Amount")**:
+  - **Deposit & Bonus box**:
+    - Top line: `Deposit & Bonus`
+    - Middle line: `Awaiting Staff Amount` (amber monospace)
+    - Bottom line: `+{methodBonusPct}% {paymentMethodName} Bonus` (amber-400 font-medium, e.g. `+20% Instant Gateway Bonus`)
+  - **Total Game Credits box**:
+    - Displays `Verify from Proof` with tooltip explaining that credits will include the `+{methodBonusPct}%` method bonus once verified.
+
+- **Staff Review & Approval Modal**:
+  - When staff inputs the verified deposit (e.g., `$100.00`), the modal dynamically previews:
+    - Verified Deposit: `$100.00`
+    - Method Bonus (`+{methodBonusPct}% {paymentMethodName}`): `+$20.00`
+    - Total Credited to Game: `$120.00`
+  - Clicking "Approve & Credit Game" applies the calculated bonus immediately.
+
+- **Completed State**:
+  - Displays: `$100.00 + $20.00 (+20% Instant Gateway Bonus)` -> Total: `$120.00`.
+
+### B. Customer Top-Up Flow (`src/pages/customer/CustomerTopUp.tsx`)
+- In the payment method selection list and proof submission step, replace all generic "Promotional Bonus" text with the specific method bonus label (e.g. `Instant Gateway Bonus: +20%`).
+
+### C. Admin Top-Up Queue (`src/pages/admin/AdminTopUps.tsx`)
+- In the administrative requests queue, show the method-linked bonus percentage and auto-calculate bonus credits when reviewing receipts.
+
+---
+
+## 3. Technical Architecture & Data Strategy
+
+```
+┌────────────────────────────────────────────────────────┐
+│ AppConfig / PaymentMethodConfig                        │
+│ - instant_gateway: 20% bonus                           │
+│ - cashapp: 30% bonus                                   │
+│ - crypto: 30% bonus                                    │
+│ - chime: 15% bonus                                     │
+└───────────────────────────┬────────────────────────────┘
+                            │
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│ dataService.submitTopUp()                              │
+│ - Resolves pm = config.paymentMethods.find(...)        │
+│ - Stores immutable snapshot:                           │
+│     bonusPercentage = pm.bonusPercentage               │
+│     methodName = pm.name                               │
+└───────────────────────────┬────────────────────────────┘
+                            │
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│ ChatTransactionCard & Admin Top-Up Review              │
+│ - Displays: `+{bonusPct}% {methodName} Bonus`          │
+│ - On staff verification of deposit ($X):               │
+│     calculatedBonus = (X * bonusPct) / 100             │
+│     totalCredit = X + calculatedBonus                  │
+│ - Dispatches approved transaction with bonus           │
+└────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 4. Implementation Steps
+
+1. **`src/services/dataService.ts`**:
+   - Update `submitTopUp()`: Always capture `pm.bonusPercentage` into `bonusPercentage` on the top-up request even when `amount === 0` (for proof-first workflows).
+   - Update `approveTopUp()`: When staff inputs `verifiedAmount`, auto-calculate `bonusAmount = (verifiedAmount * req.bonusPercentage) / 100` and `finalCredit = verifiedAmount + bonusAmount`.
+
+2. **`src/components/chat/ChatTransactionCard.tsx`**:
+   - Resolve `bonusPct` by looking up the actual payment method configuration from `appConfig` as well as request metadata.
+   - Replace `+{bonusPct}% Promotional Bonus` with `+{bonusPct}% {methodName} Bonus`.
+   - Update the Staff Review modal to show live payment-method-linked bonus calculations as staff types the deposit amount.
+
+3. **`src/pages/customer/CustomerTopUp.tsx`**:
+   - Replace any remaining "Promotional Bonus" references with method-linked bonus names.
+
+4. **Verification**:
+   - Run `lint_applet` and `compile_applet`.
+   - Verify top-up card renders `+20% Instant Gateway Bonus` (or the configured percentage for the selected method) instead of `+0% Promotional Bonus`.

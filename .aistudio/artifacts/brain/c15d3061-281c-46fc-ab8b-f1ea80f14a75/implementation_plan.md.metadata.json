@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan to eliminate high REST API request volumes and continuous egress by removing redundant syncDelta queries, scoping data fetching strictly to the authenticated user, and utilizing pure Supabase Realtime WebSocket payloads.",
-  "updatedAt": "2026-10-19T07:40:51.255467178Z",
+  "summary": "Implementation plan to replace generic promotional bonuses with payment-method-linked bonuses across top-up submission, chat transaction cards, staff review modals, and balance crediting.",
+  "updatedAt": "2026-10-19T08:54:37.154862141Z",
   "requestFeedback": true,
   "userFacing": true
 }
