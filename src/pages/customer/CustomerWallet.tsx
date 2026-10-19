@@ -30,6 +30,7 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
   const [filterType, setFilterType] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedTx, setSelectedTx] = useState<WalletTransaction | null>(null);
+  const [visibleCount, setVisibleCount] = useState(25);
 
   const allTransactions = dataService.getTransactions(currentUser.id);
 
@@ -225,7 +226,7 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
-                {filteredTransactions.map((tx) => {
+                {filteredTransactions.slice(0, visibleCount).map((tx) => {
                   const isCredit =
                     tx.type === 'deposit' ||
                     tx.type === 'bonus' ||
@@ -300,6 +301,17 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {filteredTransactions.length > visibleCount && (
+          <div className="p-3 border-t border-slate-800 bg-slate-950/60 flex justify-center">
+            <button
+              onClick={() => setVisibleCount((prev) => prev + 25)}
+              className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition-all flex items-center gap-2 shadow-sm"
+            >
+              <span>Load More Transactions (+25)</span>
+            </button>
           </div>
         )}
       </div>

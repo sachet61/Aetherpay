@@ -11,6 +11,11 @@ export const SessionTimeoutWarningModal: React.FC<SessionTimeoutWarningModalProp
   const [secondsRemaining, setSecondsRemaining] = useState(120);
 
   useEffect(() => {
+    // If indefinite session is active, no timer is needed
+    if (authSessionService.getInactivityRemainingMs() > 24 * 60 * 60 * 1000) {
+      return;
+    }
+
     // Record user activity
     const handleActivity = () => {
       authSessionService.recordActivity();

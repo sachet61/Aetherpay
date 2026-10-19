@@ -471,8 +471,11 @@ class DataService {
     return this.syncDelta();
   }
 
-  // Conversation-specific direct fetch for 100% reliable message hydration
-  public async fetchMessagesForConversation(conversationId: string): Promise<ChatMessage[]> {
+  // Conversation-specific direct fetch for 100% reliable message hydration with query capping
+  public async fetchMessagesForConversation(
+    conversationId: string,
+    options?: { beforeCreatedAt?: string; limit?: number }
+  ): Promise<ChatMessage[]> {
     if (!conversationId) return [];
     const localMsgs = this.getMessages(conversationId);
 
@@ -481,12 +484,20 @@ class DataService {
     }
 
     try {
-      const { data, error } = await supabase
+      const limit = options?.limit || 50;
+      let query = supabase
         .from('messages')
         .select('*')
-        .eq('conversation_id', conversationId)
-        .order('created_at', { ascending: true })
-        .limit(100);
+        .eq('conversation_id', conversationId);
+
+      if (options?.beforeCreatedAt) {
+        query = query.lt('created_at', options.beforeCreatedAt);
+      }
+
+      // Order descending to fetch the newest records up to limit, capped strictly to prevent high egress
+      query = query.order('created_at', { ascending: false }).limit(limit);
+
+      const { data, error } = await query;
 
       if (error) {
         console.warn('fetchMessagesForConversation notice:', error);
@@ -529,7 +540,7 @@ class DataService {
         this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
         window.dispatchEvent(
           new CustomEvent('aetherpay_state_changed', {
-            detail: { key: 'conversation_messages_fetched', conversationId },
+            detail: { key: 'conversation_messages_fetched', conversationId, count: data.length },
           })
         );
         return merged;
@@ -539,6 +550,168 @@ class DataService {
     }
 
     return localMsgs;
+  }
+
+  // On-demand pagination for older messages
+  public async fetchOlderMessages(
+    conversationId: string,
+    beforeCreatedAt: string,
+    limit: number = 50
+  ): Promise<{ newCount: number; hasMore: boolean }> {
+    if (!supabase || !isSupabaseConfigured() || !conversationId || !beforeCreatedAt) {
+      return { newCount: 0, hasMore: false };
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', conversationId)
+        .lt('created_at', beforeCreatedAt)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (error || !data) {
+        console.warn('fetchOlderMessages notice:', error);
+        return { newCount: 0, hasMore: false };
+      }
+
+      if (data.length > 0) {
+        const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+        const currentList = all[conversationId] || [];
+        const msgMap = new Map<string, ChatMessage>();
+
+        for (const m of currentList) {
+          msgMap.set(m.id, m);
+        }
+
+        for (const row of data) {
+          const item: ChatMessage = {
+            id: row.id,
+            conversationId: row.conversation_id,
+            senderId: row.sender_id,
+            senderName: row.sender_name,
+            senderRole: row.sender_role || 'customer',
+            text: row.content || '',
+            attachmentUrl: row.attachment_url,
+            attachmentName: row.attachment_name,
+            isInternalNote: false,
+            transactionData: row.transaction_data || undefined,
+            createdAt: row.created_at || new Date().toISOString(),
+            isRead: true,
+          };
+          msgMap.set(item.id, item);
+        }
+
+        const merged = Array.from(msgMap.values()).sort(
+          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+
+        all[conversationId] = merged;
+        this.cache[STORAGE_KEYS.MESSAGES] = all;
+        this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'conversation_messages_fetched', conversationId, count: data.length },
+          })
+        );
+      }
+
+      return { newCount: data.length, hasMore: data.length === limit };
+    } catch (e) {
+      console.warn('fetchOlderMessages exception:', e);
+      return { newCount: 0, hasMore: false };
+    }
+  }
+
+  // On-demand pagination for older topups
+  public async fetchOlderTopups(options?: {
+    beforeCreatedAt?: string;
+    customerId?: string;
+    limit?: number;
+  }): Promise<{ newCount: number; hasMore: boolean }> {
+    if (!supabase || !isSupabaseConfigured()) {
+      return { newCount: 0, hasMore: false };
+    }
+    const limit = options?.limit || 25;
+    try {
+      let query = supabase
+        .from('topups')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (options?.beforeCreatedAt) {
+        query = query.lt('created_at', options.beforeCreatedAt);
+      }
+      if (options?.customerId) {
+        query = query.eq('customer_id', options.customerId);
+      }
+
+      const { data, error } = await query;
+      if (error || !data) {
+        console.warn('fetchOlderTopups notice:', error);
+        return { newCount: 0, hasMore: false };
+      }
+
+      if (data.length > 0) {
+        this.applyTopupRows(data, false);
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'topups_fetched', count: data.length },
+          })
+        );
+      }
+      return { newCount: data.length, hasMore: data.length === limit };
+    } catch (e) {
+      console.warn('fetchOlderTopups exception:', e);
+      return { newCount: 0, hasMore: false };
+    }
+  }
+
+  // On-demand pagination for older withdrawals
+  public async fetchOlderWithdrawals(options?: {
+    beforeCreatedAt?: string;
+    customerId?: string;
+    limit?: number;
+  }): Promise<{ newCount: number; hasMore: boolean }> {
+    if (!supabase || !isSupabaseConfigured()) {
+      return { newCount: 0, hasMore: false };
+    }
+    const limit = options?.limit || 25;
+    try {
+      let query = supabase
+        .from('withdrawals')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (options?.beforeCreatedAt) {
+        query = query.lt('created_at', options.beforeCreatedAt);
+      }
+      if (options?.customerId) {
+        query = query.eq('customer_id', options.customerId);
+      }
+
+      const { data, error } = await query;
+      if (error || !data) {
+        console.warn('fetchOlderWithdrawals notice:', error);
+        return { newCount: 0, hasMore: false };
+      }
+
+      if (data.length > 0) {
+        this.applyWithdrawalRows(data, false);
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'withdrawals_fetched', count: data.length },
+          })
+        );
+      }
+      return { newCount: data.length, hasMore: data.length === limit };
+    } catch (e) {
+      console.warn('fetchOlderWithdrawals exception:', e);
+      return { newCount: 0, hasMore: false };
+    }
   }
 
   // Row application helpers supporting soft-delete tracking

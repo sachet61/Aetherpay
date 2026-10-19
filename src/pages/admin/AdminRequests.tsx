@@ -60,9 +60,42 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
 
   const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMoreTopups, setHasMoreTopups] = useState(true);
+  const [hasMoreWithdrawals, setHasMoreWithdrawals] = useState(true);
+
   const allTopUps = dataService.getTopUpRequests();
   const allWithdrawals = dataService.getWithdrawalRequests();
   const allGameAccounts = dataService.getGameAccounts();
+
+  const handleLoadMoreRequests = async () => {
+    if (loadingMore) return;
+    setLoadingMore(true);
+
+    try {
+      const oldestTopup = allTopUps[allTopUps.length - 1];
+      const oldestWithdrawal = allWithdrawals[allWithdrawals.length - 1];
+
+      const promises: Promise<any>[] = [];
+      if (hasMoreTopups && (requestTypeFilter === 'all' || requestTypeFilter === 'topup')) {
+        promises.push(
+          dataService.fetchOlderTopups({ beforeCreatedAt: oldestTopup?.createdAt, limit: 25 }).then((res) => {
+            if (!res.hasMore) setHasMoreTopups(false);
+          })
+        );
+      }
+      if (hasMoreWithdrawals && (requestTypeFilter === 'all' || requestTypeFilter === 'withdrawal')) {
+        promises.push(
+          dataService.fetchOlderWithdrawals({ beforeCreatedAt: oldestWithdrawal?.createdAt, limit: 25 }).then((res) => {
+            if (!res.hasMore) setHasMoreWithdrawals(false);
+          })
+        );
+      }
+      await Promise.all(promises);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   // Combine requests into a normalized queue
   interface UnifiedRequestItem {
@@ -550,6 +583,28 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {(hasMoreTopups || hasMoreWithdrawals) && (
+          <div className="p-3 border-t border-slate-800 bg-slate-950/60 flex justify-center">
+            <button
+              onClick={handleLoadMoreRequests}
+              disabled={loadingMore}
+              className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-semibold transition-all flex items-center gap-2 shadow-sm disabled:opacity-50"
+            >
+              {loadingMore ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                  <span>Loading older records...</span>
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Load More History (Past 25)</span>
+                </>
+              )}
+            </button>
           </div>
         )}
       </div>

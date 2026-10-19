@@ -34,9 +34,9 @@ export interface StoredCredential {
 const COOKIE_NAME = 'aetherpay_session';
 const SESSION_STORAGE_KEY = 'aetherpay_active_session';
 const CREDENTIALS_STORAGE_KEY = 'aetherpay_user_credentials';
-const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours absolute max
-export const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes inactivity limit
-export const INACTIVITY_WARNING_MS = 60 * 1000; // 60 seconds warning before timeout
+const SESSION_MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000; // Indefinite session lifetime (1 year)
+export const INACTIVITY_TIMEOUT_MS = 365 * 24 * 60 * 60 * 1000; // No automatic inactivity timeout
+export const INACTIVITY_WARNING_MS = 0; // Disabled warning popups
 
 // Fast synchronous SHA-256 for deterministic browser + node hashing
 function sha256Hex(str: string): string {
@@ -198,15 +198,8 @@ class AuthSessionService {
         const now = Date.now();
 
         // Check if session has expired or token mismatch
-        if (now > parsed.expiresAt) {
+        if (parsed.expiresAt && now > parsed.expiresAt) {
           console.warn('[Auth] Stored session has expired.');
-          this.destroySession();
-          return;
-        }
-
-        // Check inactivity timeout on boot
-        if (now - parsed.lastActiveAt > INACTIVITY_TIMEOUT_MS) {
-          console.warn('[Auth] Session expired due to inactivity.');
           this.destroySession();
           return;
         }
@@ -246,13 +239,7 @@ class AuthSessionService {
 
     const now = Date.now();
     // Validate expiration
-    if (now > this.activeSession.expiresAt) {
-      this.destroySession();
-      return null;
-    }
-
-    // Validate inactivity limit
-    if (now - this.activeSession.lastActiveAt > INACTIVITY_TIMEOUT_MS) {
+    if (this.activeSession.expiresAt && now > this.activeSession.expiresAt) {
       this.destroySession();
       return null;
     }

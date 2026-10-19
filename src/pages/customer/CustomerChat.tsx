@@ -16,6 +16,8 @@ import {
   Clock,
   Image,
   ChevronLeft,
+  ChevronUp,
+  RefreshCw,
   LogOut,
   Gamepad2,
   ArrowDownToLine,
@@ -44,7 +46,20 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
   const [attachmentUrl, setAttachmentUrl] = useState<string | null>(null);
   const [showGameRequestModal, setShowGameRequestModal] = useState(false);
   const [selectedGameId, setSelectedGameId] = useState('');
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMoreOlder, setHasMoreOlder] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const handleLoadOlderMessages = async () => {
+    if (!conversation?.id || loadingOlder || messages.length === 0) return;
+    setLoadingOlder(true);
+    const oldestTimestamp = messages[0].createdAt;
+    const res = await dataService.fetchOlderMessages(conversation.id, oldestTimestamp, 50);
+    setLoadingOlder(false);
+    if (!res.hasMore) {
+      setHasMoreOlder(false);
+    }
+  };
 
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
 
@@ -375,6 +390,28 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
       {/* Messages Scroll Area */}
       <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y touch-scroll p-4 border-x border-slate-800 bg-slate-950/70 space-y-4">
+        {messages.length >= 25 && hasMoreOlder && (
+          <div className="flex justify-center pb-2">
+            <button
+              onClick={handleLoadOlderMessages}
+              disabled={loadingOlder}
+              className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-amber-400 text-xs font-medium transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+            >
+              {loadingOlder ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                  <span>Loading older messages...</span>
+                </>
+              ) : (
+                <>
+                  <ChevronUp className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Load Older Messages</span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
+
         {messages.length === 0 ? (
           <div className="p-12 text-center text-xs text-slate-500">
             Start a message to connect with customer care.

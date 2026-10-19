@@ -24,6 +24,8 @@ import {
   AlertTriangle,
   Lock,
   ChevronLeft,
+  ChevronUp,
+  RefreshCw,
   X,
   Gamepad2,
   KeyRound,
@@ -125,7 +127,22 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     }
   };
 
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMoreOlder, setHasMoreOlder] = useState(true);
+
+  const handleLoadOlderMessages = async () => {
+    if (!selectedConvId || loadingOlder || messages.length === 0) return;
+    setLoadingOlder(true);
+    const oldestTimestamp = messages[0].createdAt;
+    const res = await dataService.fetchOlderMessages(selectedConvId, oldestTimestamp, 50);
+    setLoadingOlder(false);
+    if (!res.hasMore) {
+      setHasMoreOlder(false);
+    }
+  };
+
   useEffect(() => {
+    setHasMoreOlder(true);
     loadData();
     const handleSync = () => loadData();
     window.addEventListener('aetherpay_state_changed', handleSync);
@@ -926,6 +943,28 @@ export const AdminChat: React.FC<AdminChatProps> = ({
 
               {/* MESSAGES FEED AREA */}
               <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y touch-scroll p-4 space-y-3 bg-slate-950/70">
+                {messages.length >= 25 && hasMoreOlder && (
+                  <div className="flex justify-center pb-2">
+                    <button
+                      onClick={handleLoadOlderMessages}
+                      disabled={loadingOlder}
+                      className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-amber-400 text-xs font-medium transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                    >
+                      {loadingOlder ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                          <span>Loading older messages...</span>
+                        </>
+                      ) : (
+                        <>
+                          <ChevronUp className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Load Older Messages</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+
                 {messages.length === 0 ? (
                   <div className="p-12 text-center text-xs text-slate-500">
                     No messages in this channel yet. Say hello or use the action buttons above.
