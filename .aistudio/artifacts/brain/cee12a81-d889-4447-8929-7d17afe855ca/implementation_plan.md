@@ -1,69 +1,80 @@
-# Real-Time Chat Architecture & Tri-Mode Notification Engine
+# Supabase PostgREST API Egress Reduction & Realtime Synchronization Plan
 
-Overhaul the live messaging system between players and support staff by replacing ephemeral, lossy room broadcasts with high-speed Supabase Database Changes (`postgres_changes`), lightweight delta polling, and a comprehensive tri-mode notification engine (audio chimes, floating in-app toast alerts, and native desktop notifications).
+Eliminate catastrophic PostgREST API egress consumption (13.20 GB overage against a 5 GB quota) by replacing relentless 3-second and 4-second full-table client polling loops with event-driven Supabase Realtime (`postgres_changes`) push notifications, visibility-aware connection pausing for hidden tabs, soft-delete tracking, 300ms mutation batching, and timestamped delta queries.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following user preferences were confirmed in Phase 1 clarification:
-> - **Real-Time Architecture**: Supabase Database Changes (`postgres_changes` streaming) combined with Instant Broadcast for immediate local UI optimism and smart lightweight delta polling (fetching only new messages since the last timestamp rather than dumping the full table).
-> - **Notification Modes**: Tri-mode notification system delivering an elegant synthesized Web Audio chime, floating in-app toast preview banners across all portals, and native browser desktop notifications.
-> - **Permission Flow**: An explicit **"Enable Notifications"** bell toggle situated prominently in the chat header, respecting user privacy without intrusive page-load permission popups.
+> The following decisions govern this implementation:
+> - **Synchronization Strategy**: Transition from aggressive REST polling to event-driven **Supabase Realtime (`postgres_changes`) streaming** with visibility-aware smart synchronization.
+> - **Tab Visibility & Inactivity Handling**: Suspend all synchronization immediately when the browser tab is hidden (`document.visibilityState === 'hidden'`) or user is idle, running a single lightweight delta catch-up upon returning to the active tab.
+> - **Query Optimization**: Replace unrestricted `select('*')` table dumps with strict timestamp delta queries (`gt('updated_at', lastSyncTimestamp)`), explicit column projections, and pagination limits (`.limit(25)`).
+> - **Soft Deletions**: Enforce soft deletes (`deleted_at` timestamps) across all synchronized tables to ensure delta queries accurately capture removed records.
+> - **Render Optimization**: Batch incoming Realtime payloads with a 300ms debounce buffer to prevent UI render thrashing during bulk database updates.
+> - **Reconnection & Stale Tab Guard**: Bind delta catch-up queries to the Supabase Realtime `SUBSCRIBED` status event, and reset to an initial compact load if the tab has been dormant for >12 hours.
 
 ---
 
 ### 1. Overview & Core Concept
 
-#### Why Chat Was Previously Slow & Required Reloads
-1. **Ephemeral Broadcast Silos**: The previous implementation relied primarily on transient room broadcast channels (`room_${conv.id}`). If an agent or player was on another view (such as the Vault, Games, or Ops Dashboard), their client never joined the specific conversation room, silently dropping incoming messages.
-2. **Channel Subscription Churn**: Every message dispatch attempted to create and subscribe to new Supabase Realtime channels inline before sending, adding 500ms–2000ms of latency per message.
-3. **Full-Table Polling Inefficiencies**: The 3-second backup poll queried all historical messages across the entire database without limits or timestamp filtering, creating bottlenecks as message history grew.
-4. **Zero Global Listeners**: No top-level listener existed in `App.tsx`, leaving users with no visual or audio cues when messages arrived outside the active chat screen.
+#### The Root Cause of the Egress Spike
+Inspection of the PostgREST egress metrics and codebase revealed that `dataService.ts` was executing two concurrent, unconditioned `setInterval` routines in the client browser:
+1. **Chat Poller (`pollSupabaseChat`)**: Fired every 3,000ms fetching `messages` and `conversations`.
+2. **General Poller (`pollSupabaseGeneral`)**: Fired every 4,000ms querying **8 entire database tables simultaneously** via `select('*')` without limits:
+   - `topups` (all records, no limit)
+   - `withdrawals` (all records, no limit)
+   - `wallets` (all customer wallets)
+   - `game_catalog` (all games)
+   - `faked_cashouts` (up to 40 records)
+   - `users` (all registered users)
+   - `game_accounts` (all provisioned accounts)
+   - `app_config` (main JSON payload)
 
-#### What This Upgrade Delivers
-- **Sub-Second Delivery Everywhere**: Global `postgres_changes` subscription on the `messages` table streams every incoming message to active players and agents in real time, regardless of what tab or screen they are on.
-- **Tri-Mode Notifications**:
-  - **Audio Chime**: Crisp, high-fidelity pleasant tone generated via Web Audio API (zero external asset loading lag, zero broken mp3 URLs).
-  - **Floating In-App Toast**: Rich, interactive banner with sender avatar, message snippet, and quick 1-click **"Reply Now"** navigation.
-  - **Browser Desktop Notifications**: Native OS/browser desktop alerts for players and agents who have the tab backgrounded or minimized.
-- **Chat Header Notification Toggle**: Clean bell icon in the chat header allowing users to enable/disable sound and desktop alerts on demand.
+Each open browser tab was making **120+ full-table REST requests per minute**, 24 hours a day, even when backgrounded. This generated 4–5 GB of egress per day for a single open tab, rapidly exhausting the 5 GB quota.
+
+#### The Target Solution
+- **Event-Driven Supabase Realtime (`postgres_changes`)**: Subscribe to PostgreSQL change events via WebSocket. Realtime pushes only mutated rows (a few bytes per mutation).
+- **Tab Visibility Awareness**: Automatically pause sync subscriptions and disconnect listeners when `document.hidden === true`.
+- **Optimized Delta Fetching**: Initial load retrieves only recent active records (`.limit(25)`). Incremental syncs request only records modified after `lastSyncTimestamp`.
 
 ---
 
-### 2. User Experience & Visual Design
+### 2. Database Configuration & Security
 
-#### Player & Agent Notification Workflows
-1. **When Active in Chat**:
-   - Messages appear instantly (sub-200ms) with typing/sent ticks.
-   - Incoming messages from the other party play a subtle, soft incoming tone without jarring alert modals.
-2. **When Browsing Other Pages (e.g. Games, Wallet, Admin Overview)**:
-   - Floating glassmorphic toast slides in smoothly from the top-right:
-     - Shows sender name, badge (`Player` or `Customer Care Specialist`), and text snippet.
-     - Includes a glowing **"Reply"** action that immediately navigates to the chat view.
-   - Navbar chat icon updates with an animated pulsing notification badge count.
-   - If enabled, native browser notification pops up in the OS notification center.
-3. **Chat Header Controls**:
-   - Next to the Support status indicator, a new **Notification Settings** bell toggle button:
-     - Green glowing icon with checkmark when notifications are active.
-     - Amber indicator with one-click permission request if browser notifications are pending.
-     - Volume mute toggle for silent browsing environments.
+Supabase Realtime requires explicit backend publication configuration to broadcast mutations:
+
+1. **Enable Realtime Publication**:
+   Expose the necessary tables to the Realtime replication stream:
+   ```sql
+   ALTER PUBLICATION supabase_realtime ADD TABLE messages, topups, withdrawals, wallets, game_accounts;
+   ```
+
+2. **Row Level Security (RLS)**:
+   Ensure `SELECT` policies are correctly configured for authenticated users on all published tables. Supabase Realtime respects RLS and will silently drop payloads if read access is not explicitly granted.
+
+3. **Soft Delete Schema Update**:
+   - Add a `deleted_at (TIMESTAMPTZ)` column to tables undergoing Realtime sync.
+   - Update application logic to set this column instead of executing hard `DELETE` commands, ensuring `updated_at` is modified and broadcasted to clients.
 
 ---
 
 ### 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1: Supabase `postgres_changes` vs Pure WebSockets**
-  - *Chosen Approach*: Stream directly from Supabase PostgreSQL replication via `postgres_changes`.
-  - *Why*: Connects directly to the single source of truth; even if a broadcast packet is dropped or network blips, the database record is guaranteed to stream down to all subscribers.
-  - *Alternatives Considered*: Pure ephemeral WebSocket broadcast (drops messages when switching tabs).
+- **Decision 1: Supabase Realtime vs Throttled Polling**
+  - *Chosen Approach*: Supabase Realtime push streaming with fallback delta sync.
+  - *Why*: Instant sub-second delivery for chat and transactions while reducing network traffic by over 98%.
 
-- **Decision 2: Delta Polling vs Full-Table Query**
-  - *Chosen Approach*: Query only records where `created_at > lastSyncTimestamp`.
-  - *Why*: Cuts network payload by 99% and eliminates CPU parsing lag during multi-tab conversations.
+- **Decision 2: Complete Suspension on Hidden Tabs**
+  - *Chosen Approach*: Completely halt queries when `document.visibilityState === 'hidden'`.
+  - *Why*: Completely stops egress bleeding when users leave tabs open in the background or close laptop lids.
 
-- **Decision 3: Synthesized Web Audio API vs External Audio Files**
-  - *Chosen Approach*: Pure browser `AudioContext` synthesizer (frequency ramps from 587Hz to 880Hz with soft exponential decay).
-  - *Why*: 100% reliable, zero network latency, zero CORS or missing file errors.
+- **Decision 3: Stale Tab Fallback (Max Delta Age)**
+  - *Chosen Approach*: If `Date.now() - lastSyncTime > 12 hours`, bypass the delta query and perform a clean "Initial Compact Load".
+  - *Why*: Prevents massive memory spikes and slow queries if a user returns to a tab that has been offline or sleeping for days.
+
+- **Decision 4: Payload Debouncing (300ms Queue)**
+  - *Chosen Approach*: Collect incoming WebSocket row updates into an in-memory queue and flush to state every 300ms.
+  - *Why*: Avoids cascading React re-renders when multiple events arrive in rapid succession (e.g., bulk transaction status approvals).
 
 ---
 
@@ -71,47 +82,57 @@ Overhaul the live messaging system between players and support staff by replacin
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                     REAL-TIME CHAT SYNCHRONIZATION                     │
+│             REALTIME SYNC & EGRESS OPTIMIZATION ARCHITECTURE           │
 └────────────────────────────────────────────────────────────────────────┘
-          Sender inputs message (CustomerChat / AdminChat)
-                                 │
-                                 ▼
-                     dataService.sendChatMessage()
-                                 │
-         ┌───────────────────────┴───────────────────────┐
-         ▼                                               ▼
-  Optimistic Local UI                            Supabase DB Insert
-  (Immediate display)                          (messages table)
-                                                         │
-                                                         ▼
-                                             PostgreSQL Replication
-                                                         │
-                                                         ▼
-                                           supabase.channel('global:messages')
-                                           .on('postgres_changes', INSERT)
-                                                         │
-                         ┌───────────────────────────────┴───────────────────────────────┐
-                         ▼                                                               ▼
-             Receiver on Chat View                                          Receiver on Another Tab/Page
-         ┌───────────────────────────┐                                  ┌───────────────────────────┐
-         │ • Append to message list  │                                  │ • Global Toast Banner     │
-         │ • Auto-scroll to bottom   │                                  │ • Unread Badge +1 in Nav  │
-         │ • Soft Audio Pop          │                                  │ • Web Audio Chime         │
-         │ • Mark as Read            │                                  │ • Desktop Push Alert      │
-         └───────────────────────────┘                                  └───────────────────────────┘
+
+              Active Browser Tab (document.visibilityState === 'visible')
+                                      │
+                 ┌────────────────────┴────────────────────┐
+                 ▼                                         ▼
+     Initial Compact Load (Limit 25)            Supabase Realtime Channel
+     SELECT * FROM table WHERE ...              postgres_changes (INSERT, UPDATE)
+                 │                                         │
+                 │                                         ▼
+                 │                               Payload Debounce Array
+                 │                                (Flush every 300ms)
+                 │                                         │
+                 ▼                                         ▼
+     Update Local Cache & State                Update Local Cache & State
+                 │                                         │
+                 └────────────────────┬────────────────────┘
+                                      │
+                   User minimizes tab OR Network Drops
+                                      ▼
+           [ ALL SYNC & POLLING PAUSED — ZERO EGRESS TRANSMITTED ]
+                                      ▼
+             User returns to tab (visible) OR WebSocket Reconnects
+                                      ▼
+        Is Date.now() - lastSyncTime > 12 Hours? 
+           ├── YES: Run Initial Compact Load (Limit 25)
+           └── NO: Run Targeted Delta Query (updated_at > lastSyncTime)
 ```
 
-#### Detailed Implementation Plan:
-1. **`src/services/notificationSoundService.ts` (New)**:
-   - High-fidelity Web Audio API sound synthesizer with graceful fallback.
-   - Browser `Notification` API wrapper handling permissions, OS desktop popups, and user focus checks.
-2. **`src/services/dataService.ts`**:
-   - Refactor `pollSupabaseChat()` to use delta queries (`created_at > lastTimestamp`).
-   - Eliminate channel subscription churn inside `sendChatMessage`.
-3. **`src/App.tsx`**:
-   - Mount a top-level `GlobalChatNotificationListener` that listens to `postgres_changes` across all conversations.
-   - Render floating interactive in-app toast banners with instant jump-to-chat navigation.
-4. **`src/pages/customer/CustomerChat.tsx` & `src/pages/admin/AdminChat.tsx`**:
-   - Connect to persistent `postgres_changes` streaming channel.
-   - Add the **Notification Bell Toggle** button in the chat header with permission status indicators.
-   - Implement idempotent message appending to eliminate duplication during reconnections.
+#### Step-by-Step Implementation Sequence:
+
+1. **Eradicate Aggressive Polling (`src/services/dataService.ts`)**:
+   - Remove `chatTimer` (3000ms) and `generalTimer` (4000ms) unconditioned intervals.
+   - Refactor polling functions into on-demand delta sync methods.
+
+2. **Implement Visibility & Network Resilience Listeners**:
+   - Listen to `document.addEventListener('visibilitychange')`.
+   - Bind the delta catch-up query to the Supabase Realtime `SUBSCRIBED` status event to handle automatic network reconnects (e.g., switching from Wi-Fi to cellular).
+
+3. **Global Supabase Realtime Channel & Debouncing**:
+   - Establish a centralized Supabase Realtime channel in `dataService.ts`.
+   - Implement a 300ms batching/debouncing queue. Push incoming Realtime row mutations into an array and flush them to the state manager together to prevent UI render thrashing.
+
+4. **Query Parameter Hardening & Soft Deletes**:
+   - Add `.limit(25)` to initial table loads.
+   - Apply `.gt('updated_at', lastPolledTime)` and `.is('deleted_at', null)` filters to incremental fetches.
+   - Implement soft delete mutations (`update({ deleted_at: new Date().toISOString() })`) across data mutations.
+
+5. **Admin Connection & Sync Health Bar**:
+   - Display a clean status indicator in the admin console:
+     - **Green**: `Realtime Live` (WebSocket streaming active).
+     - **Amber**: `Catching Up...` (Delta sync in progress).
+     - **Gray**: `Sleeping` (Tab backgrounded, egress paused).

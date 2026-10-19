@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan to eliminate chat latency and reloads by upgrading to Supabase postgres_changes database streaming with instant broadcast, smart differential polling, and an integrated tri-mode notification engine (audio chimes, floating in-app toasts, and native browser desktop notifications).",
-  "updatedAt": "2026-10-19T00:07:40.490023253Z",
+  "summary": "Revised implementation plan incorporating soft deletions, 300ms payload batching/debouncing queue, database publication migration details, reconnect binding via the SUBSCRIBED event, and a 12-hour stale tab fallback threshold to eradicate PostgREST egress overages.",
+  "updatedAt": "2026-10-19T01:33:33.134383915Z",
   "requestFeedback": true,
   "userFacing": true
 }
