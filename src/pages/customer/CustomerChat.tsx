@@ -21,7 +21,12 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   X,
+  Bell,
+  BellOff,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
+import { notificationSoundService } from '../../services/notificationSoundService';
 
 interface CustomerChatProps {
   currentUser: UserProfile;
@@ -44,6 +49,39 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
 
   const channelRef = useRef<any>(null);
+  const [soundEnabled, setSoundEnabled] = useState(() => notificationSoundService.isSoundEnabled());
+  const [desktopEnabled, setDesktopEnabled] = useState(() => notificationSoundService.isDesktopEnabled());
+  const [notifPermission, setNotifPermission] = useState(() => notificationSoundService.getPermissionStatus());
+  const [showNotifFeedback, setShowNotifFeedback] = useState(false);
+
+  const handleToggleSound = () => {
+    const next = !soundEnabled;
+    notificationSoundService.setSoundEnabled(next);
+    setSoundEnabled(next);
+    if (next) {
+      notificationSoundService.playIncomingMessageSound();
+    }
+  };
+
+  const handleToggleDesktopNotifs = async () => {
+    if (notifPermission !== 'granted') {
+      const granted = await notificationSoundService.requestDesktopPermission();
+      setNotifPermission(notificationSoundService.getPermissionStatus());
+      setDesktopEnabled(granted);
+      if (granted) {
+        notificationSoundService.playIncomingMessageSound();
+        notificationSoundService.showDesktopNotification('Swift Sweeps Support Notifications Active', {
+          body: 'You will receive live desktop alerts when specialists send messages.',
+        });
+      }
+    } else {
+      const next = !desktopEnabled;
+      notificationSoundService.setDesktopEnabled(next);
+      setDesktopEnabled(next);
+    }
+    setShowNotifFeedback(true);
+    setTimeout(() => setShowNotifFeedback(false), 3000);
+  };
 
   // Initialize or load conversation
   useEffect(() => {
@@ -62,8 +100,8 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     window.addEventListener('aetherpay_state_changed', handleSync);
     window.addEventListener('storage', handleSync);
 
-    // Supabase Realtime channel subscription for instant cross-tab/device messaging
-    const channel = supabase.channel(`room_${conv.id}`)
+    // 1. Supabase Realtime channel subscription for instant cross-tab/device messaging
+    const broadcastChannel = supabase.channel(`room_${conv.id}`)
       .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
         if (payload && payload.id) {
           dataService.appendIncomingMessage(payload);
@@ -71,20 +109,72 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
             if (prev.some((m) => m.id === payload.id)) return prev;
             return [...prev, payload];
           });
+          if (payload.senderRole === 'agent' || payload.senderRole === 'admin') {
+            notificationSoundService.playIncomingMessageSound();
+          }
         }
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
-          channelRef.current = channel;
+          channelRef.current = broadcastChannel;
         }
       });
 
-    channelRef.current = channel;
+    channelRef.current = broadcastChannel;
+
+    // 2. Persistent Supabase Database Changes stream directly on the messages table
+    const dbChannel = supabase.channel(`db_chat_${conv.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `conversation_id=eq.${conv.id}`,
+        },
+        (payload) => {
+          const row: any = payload.new;
+          if (row && row.id) {
+            const incoming: ChatMessage = {
+              id: row.id,
+              conversationId: row.conversation_id,
+              senderId: row.sender_id,
+              senderName: row.sender_name,
+              senderRole: row.sender_role,
+              text: row.content || '',
+              attachmentUrl: row.attachment_url,
+              attachmentName: row.attachment_name,
+              isInternalNote: false,
+              transactionData: row.transaction_data,
+              createdAt: row.created_at,
+              isRead: true,
+            };
+
+            dataService.appendIncomingMessage(incoming);
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === incoming.id)) return prev;
+              return [...prev, incoming];
+            });
+
+            if (incoming.senderRole === 'agent' || incoming.senderRole === 'admin') {
+              notificationSoundService.playIncomingMessageSound();
+              if (document.hidden) {
+                notificationSoundService.showDesktopNotification(
+                  `Support: ${incoming.senderName}`,
+                  { body: incoming.text }
+                );
+              }
+            }
+          }
+        }
+      )
+      .subscribe();
 
     return () => {
       window.removeEventListener('aetherpay_state_changed', handleSync);
       window.removeEventListener('storage', handleSync);
-      supabase.removeChannel(channel);
+      supabase.removeChannel(broadcastChannel);
+      supabase.removeChannel(dbChannel);
     };
   }, [currentUser.id]);
 
@@ -180,7 +270,49 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="text-right text-[11px] text-slate-400 font-mono hidden sm:block">
+          {/* Notification Sound Toggle */}
+          <button
+            type="button"
+            onClick={handleToggleSound}
+            className={`p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg border text-xs font-semibold transition-all flex items-center gap-1.5 ${
+              soundEnabled
+                ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/60 shadow-sm shadow-emerald-500/20'
+                : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+            }`}
+            title={soundEnabled ? 'Chime sound active: click to mute' : 'Chime muted: click to enable incoming message tone'}
+          >
+            {soundEnabled ? (
+              <Volume2 className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+            ) : (
+              <VolumeX className="w-3.5 h-3.5 text-slate-500" />
+            )}
+            <span className="hidden sm:inline">{soundEnabled ? 'Sound ON' : 'Muted'}</span>
+          </button>
+
+          {/* Desktop Push Alert Toggle */}
+          <button
+            type="button"
+            onClick={handleToggleDesktopNotifs}
+            className={`p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg border text-xs font-semibold transition-all flex items-center gap-1.5 ${
+              desktopEnabled
+                ? 'bg-amber-950/70 border-amber-500/50 text-amber-300 hover:bg-amber-900/60 shadow-sm shadow-amber-500/20'
+                : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+            }`}
+            title={
+              desktopEnabled
+                ? 'Desktop alerts active: you receive OS popups when tab is backgrounded'
+                : 'Click to enable browser desktop notifications for incoming messages'
+            }
+          >
+            {desktopEnabled ? (
+              <Bell className="w-3.5 h-3.5 text-amber-400" />
+            ) : (
+              <BellOff className="w-3.5 h-3.5 text-slate-500" />
+            )}
+            <span className="hidden sm:inline">{desktopEnabled ? 'Desktop ON' : 'Desktop OFF'}</span>
+          </button>
+
+          <div className="text-right text-[11px] text-slate-400 font-mono hidden md:block">
             Ticket #{conversation?.id.substring(conversation.id.length - 6) || 'CONV'}
           </div>
 

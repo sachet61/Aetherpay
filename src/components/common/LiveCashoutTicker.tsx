@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { CashoutFeedItem } from '../../types';
 import { dataService } from '../../services/dataService';
 import { Flame, CheckCircle2, ArrowUpRight, Zap } from 'lucide-react';
 
-export const LiveCashoutTicker: React.FC = () => {
+const LiveCashoutTickerComponent: React.FC = () => {
   const [items, setItems] = useState<CashoutFeedItem[]>(() => {
     return dataService.getMixedCashoutFeed(20);
   });
@@ -20,7 +20,7 @@ export const LiveCashoutTicker: React.FC = () => {
 
   useEffect(() => {
     // Listen for state changes (e.g. withdrawal approved, cashout injected)
-    const handleStateChange = () => {
+    const handleStateChange = (e: Event) => {
       // Buffer latest cashout list without triggering mid-animation React re-renders
       queueFreshCashouts();
     };
@@ -30,7 +30,7 @@ export const LiveCashoutTicker: React.FC = () => {
 
     // Gently simulate new live payout activity in the background
     const config = dataService.getAppConfig();
-    const intervalSec = Math.max(10, Math.min(30, config.cashoutFeed?.intervalSeconds || 15));
+    const intervalSec = Math.max(12, Math.min(30, config.cashoutFeed?.intervalSeconds || 15));
 
     const backgroundTimer = setInterval(() => {
       dataService.injectNewFakeCashout();
@@ -43,7 +43,7 @@ export const LiveCashoutTicker: React.FC = () => {
     };
   }, [queueFreshCashouts]);
 
-  // Seamless update hook: only swap item data when the marquee animation completes a cycle
+  // Seamless update hook: swap item data when the marquee animation completes a 360-degree loop
   const handleAnimationIteration = () => {
     if (hasPendingUpdateRef.current && latestListRef.current.length > 0) {
       setItems(latestListRef.current);
@@ -54,13 +54,13 @@ export const LiveCashoutTicker: React.FC = () => {
   const config = dataService.getAppConfig();
   if (config.cashoutFeed?.enabled === false) return null;
 
-  const renderTrackItems = (isClone: boolean = false) => {
+  const renderTrackItems = (prefix: string) => {
     return items.map((item, index) => {
       const displayName = item.playerHandle || item.customerName || 'Player';
       return (
         <div
-          key={`${isClone ? 'clone' : 'main'}-${item.id}-${index}`}
-          className="inline-flex items-center gap-2 text-xs bg-slate-950/60 hover:bg-slate-900/90 px-3.5 py-1.5 rounded-full border border-slate-800/80 hover:border-emerald-500/50 transition-colors shrink-0 shadow-sm"
+          key={`${prefix}-${item.id}-${index}`}
+          className="inline-flex items-center gap-2 text-xs bg-slate-950/70 hover:bg-slate-900/95 px-3.5 py-1.5 rounded-full border border-slate-800/80 hover:border-emerald-500/50 transition-colors shrink-0 shadow-sm"
         >
           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
           <span className="font-bold text-white tracking-wide">{displayName}</span>
@@ -80,7 +80,7 @@ export const LiveCashoutTicker: React.FC = () => {
   };
 
   return (
-    <div className="relative bg-gradient-to-r from-emerald-950/80 via-[#0A0F1D] to-emerald-950/80 border-y border-emerald-500/20 py-2 px-3 overflow-hidden select-none shadow-md backdrop-blur-md z-20 pause-marquee">
+    <div className="relative bg-gradient-to-r from-emerald-950/80 via-[#0A0F1D] to-emerald-950/80 border-y border-emerald-500/20 py-2 px-3 overflow-hidden select-none shadow-md backdrop-blur-md z-20 pause-marquee ticker-container">
       <div className="max-w-7xl mx-auto flex items-center gap-3">
         {/* Live Badge */}
         <div className="flex items-center gap-1.5 shrink-0 px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[11px] font-bold uppercase tracking-wider shadow-sm">
@@ -93,7 +93,7 @@ export const LiveCashoutTicker: React.FC = () => {
           <span className="font-mono sm:hidden">Live</span>
         </div>
 
-        {/* Dual-Track Marquee Wrapper */}
+        {/* Continuous Seamless Marquee Viewport */}
         <div className="relative flex-1 overflow-hidden mask-marquee-edges">
           {items.length === 0 ? (
             <div className="text-xs text-slate-400 flex items-center gap-2 py-1">
@@ -101,21 +101,18 @@ export const LiveCashoutTicker: React.FC = () => {
               <span>Connecting live payout stream...</span>
             </div>
           ) : (
-            <div className="flex w-max items-center">
-              {/* Primary Track */}
-              <div
-                className="animate-marquee-track items-center gap-6 pr-6"
-                onAnimationIteration={handleAnimationIteration}
-              >
-                {renderTrackItems(false)}
+            <div
+              className="animate-marquee-seamless flex items-center"
+              onAnimationIteration={handleAnimationIteration}
+            >
+              {/* Primary Track Half (0% to 50%) */}
+              <div className="flex items-center gap-4 shrink-0 pr-4">
+                {renderTrackItems('track1')}
               </div>
 
-              {/* Seamless Clone Track */}
-              <div
-                className="animate-marquee-track items-center gap-6 pr-6"
-                aria-hidden="true"
-              >
-                {renderTrackItems(true)}
+              {/* Exact Identical Clone Half (50% to 100%) */}
+              <div className="flex items-center gap-4 shrink-0 pr-4" aria-hidden="true">
+                {renderTrackItems('track2')}
               </div>
             </div>
           )}
@@ -124,3 +121,5 @@ export const LiveCashoutTicker: React.FC = () => {
     </div>
   );
 };
+
+export const LiveCashoutTicker = memo(LiveCashoutTickerComponent);

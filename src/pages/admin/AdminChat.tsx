@@ -36,7 +36,12 @@ import {
   Info,
   Check,
   Copy,
+  Bell,
+  BellOff,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
+import { notificationSoundService } from '../../services/notificationSoundService';
 
 interface AdminChatProps {
   currentUser: UserProfile;
@@ -127,6 +132,36 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   }, [selectedConvId]);
 
   const channelRef = useRef<any>(null);
+  const [soundEnabled, setSoundEnabled] = useState(() => notificationSoundService.isSoundEnabled());
+  const [desktopEnabled, setDesktopEnabled] = useState(() => notificationSoundService.isDesktopEnabled());
+  const [notifPermission, setNotifPermission] = useState(() => notificationSoundService.getPermissionStatus());
+
+  const handleToggleSound = () => {
+    const next = !soundEnabled;
+    notificationSoundService.setSoundEnabled(next);
+    setSoundEnabled(next);
+    if (next) {
+      notificationSoundService.playIncomingMessageSound();
+    }
+  };
+
+  const handleToggleDesktopNotifs = async () => {
+    if (notifPermission !== 'granted') {
+      const granted = await notificationSoundService.requestDesktopPermission();
+      setNotifPermission(notificationSoundService.getPermissionStatus());
+      setDesktopEnabled(granted);
+      if (granted) {
+        notificationSoundService.playIncomingMessageSound();
+        notificationSoundService.showDesktopNotification('Staff Care Notifications Active', {
+          body: 'You will receive desktop alerts when players send messages.',
+        });
+      }
+    } else {
+      const next = !desktopEnabled;
+      notificationSoundService.setDesktopEnabled(next);
+      setDesktopEnabled(next);
+    }
+  };
 
   // Realtime subscription via Supabase Channel
   useEffect(() => {
@@ -139,6 +174,9 @@ export const AdminChat: React.FC<AdminChatProps> = ({
             if (prev.some((m) => m.id === payload.id)) return prev;
             return [...prev, payload];
           });
+          if (payload.senderRole === 'customer') {
+            notificationSoundService.playIncomingMessageSound();
+          }
         }
       })
       .subscribe((status) => {
@@ -154,7 +192,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     };
   }, [selectedConvId]);
 
-  // Global staff channel to hear incoming messages across all conversations in real time
+  // Global staff broadcast channel to hear incoming messages across all conversations in real time
   useEffect(() => {
     const staffChannel = supabase.channel('room_admin_support')
       .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
@@ -167,12 +205,67 @@ export const AdminChat: React.FC<AdminChatProps> = ({
               return [...prev, payload];
             });
           }
+          if (payload.senderRole === 'customer') {
+            notificationSoundService.playIncomingMessageSound();
+          }
         }
       })
       .subscribe();
 
+    // Persistent Supabase Database Changes stream across all player messages
+    const dbAllMessagesChannel = supabase.channel('db_admin_live_messages')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+        },
+        (payload) => {
+          const row: any = payload.new;
+          if (row && row.id) {
+            const incoming: ChatMessage = {
+              id: row.id,
+              conversationId: row.conversation_id,
+              senderId: row.sender_id,
+              senderName: row.sender_name,
+              senderRole: row.sender_role,
+              text: row.content || '',
+              attachmentUrl: row.attachment_url,
+              attachmentName: row.attachment_name,
+              isInternalNote: false,
+              transactionData: row.transaction_data,
+              createdAt: row.created_at,
+              isRead: true,
+            };
+
+            dataService.appendIncomingMessage(incoming);
+            loadData();
+
+            if (incoming.conversationId === selectedConvId) {
+              setMessages((prev) => {
+                if (prev.some((m) => m.id === incoming.id)) return prev;
+                return [...prev, incoming];
+              });
+            }
+
+            if (incoming.senderRole === 'customer') {
+              notificationSoundService.playIncomingMessageSound();
+              if (document.hidden) {
+                notificationSoundService.showDesktopNotification(
+                  `New message from ${incoming.senderName}`,
+                  { body: incoming.text }
+                );
+              }
+            }
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
       supabase.removeChannel(staffChannel);
+      supabase.removeChannel(dbAllMessagesChannel);
     };
   }, [selectedConvId]);
 
@@ -700,8 +793,48 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                   </div>
                 </div>
 
-                {/* Right: Quick Action Buttons & Details Drawer Toggle */}
+                {/* Right: Quick Action Buttons & Notification Toggles */}
                 <div className="flex items-center gap-1.5 shrink-0">
+                  {/* Sound Toggle */}
+                  <button
+                    type="button"
+                    onClick={handleToggleSound}
+                    className={`p-1.5 rounded-lg border text-xs font-semibold transition-colors flex items-center gap-1 ${
+                      soundEnabled
+                        ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/60'
+                        : 'bg-slate-900 border-slate-800 text-slate-500 hover:text-slate-300'
+                    }`}
+                    title={soundEnabled ? 'Chime sound active: click to mute' : 'Chime muted: click to enable incoming message tone'}
+                  >
+                    {soundEnabled ? (
+                      <Volume2 className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                    ) : (
+                      <VolumeX className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                  </button>
+
+                  {/* Desktop Push Alert Toggle */}
+                  <button
+                    type="button"
+                    onClick={handleToggleDesktopNotifs}
+                    className={`p-1.5 rounded-lg border text-xs font-semibold transition-colors flex items-center gap-1 ${
+                      desktopEnabled
+                        ? 'bg-amber-950/70 border-amber-500/50 text-amber-300 hover:bg-amber-900/60'
+                        : 'bg-slate-900 border-slate-800 text-slate-500 hover:text-slate-300'
+                    }`}
+                    title={
+                      desktopEnabled
+                        ? 'Desktop alerts active: you receive OS popups when tab is backgrounded'
+                        : 'Click to enable browser desktop notifications for incoming messages'
+                    }
+                  >
+                    {desktopEnabled ? (
+                      <Bell className="w-3.5 h-3.5 text-amber-400" />
+                    ) : (
+                      <BellOff className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                  </button>
+
                   {/* Quick Action: Provision Game ID */}
                   <button
                     onClick={handleOpenGameIdModal}

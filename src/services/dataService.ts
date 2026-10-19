@@ -82,6 +82,7 @@ class DataService {
   private isQuotaExceeded = false;
   private pollingIntervals: number[] = [];
   private isSeeding = false;
+  private lastPolledMessageTime: string | null = null;
 
   constructor() {
     this.cleanLegacyStorage();
@@ -179,9 +180,16 @@ class DataService {
   public async pollSupabaseChat(): Promise<void> {
     if (!supabase || !isSupabaseConfigured()) return;
     try {
+      let msgsQuery = supabase.from('messages').select('*');
+      if (this.lastPolledMessageTime) {
+        msgsQuery = msgsQuery.gt('created_at', this.lastPolledMessageTime).order('created_at', { ascending: true });
+      } else {
+        msgsQuery = msgsQuery.order('created_at', { ascending: false }).limit(60);
+      }
+
       const [convsRes, msgsRes] = await Promise.all([
-        supabase.from('conversations').select('*').order('last_message_at', { ascending: false }),
-        supabase.from('messages').select('*').order('created_at', { ascending: true }),
+        supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(40),
+        msgsQuery,
       ]);
 
       let changed = false;
@@ -228,6 +236,7 @@ class DataService {
       if (msgsRes.data && msgsRes.data.length > 0) {
         const currentMsgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
         const msgMap: Record<string, ChatMessage[]> = { ...currentMsgs };
+        let newestTimestamp = this.lastPolledMessageTime;
 
         for (const m of msgsRes.data) {
           const item: ChatMessage = {
@@ -251,7 +260,16 @@ class DataService {
           } else {
             msgMap[m.conversation_id].push(item);
           }
+
+          if (!newestTimestamp || new Date(item.createdAt).getTime() > new Date(newestTimestamp).getTime()) {
+            newestTimestamp = item.createdAt;
+          }
         }
+
+        if (newestTimestamp) {
+          this.lastPolledMessageTime = newestTimestamp;
+        }
+
         this.cache[STORAGE_KEYS.MESSAGES] = msgMap;
         this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, msgMap);
         changed = true;
@@ -3229,7 +3247,24 @@ class DataService {
       all[msg.conversationId].push(msg);
       this.cache[STORAGE_KEYS.MESSAGES] = all;
       this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
-      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'chat_incoming' } }));
+
+      // Also ensure conversation summary has latest message
+      const conversations = this.getConversations();
+      const conv = conversations.find((c) => c.id === msg.conversationId);
+      if (conv) {
+        if (!msg.isInternalNote) {
+          conv.lastMessageText = msg.text;
+        }
+        conv.lastMessageTimestamp = msg.createdAt;
+        conv.updatedAt = msg.createdAt;
+        this.save(STORAGE_KEYS.CONVERSATIONS, conversations);
+      }
+
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'chat_incoming', message: msg, conversationId: msg.conversationId },
+        })
+      );
     }
   }
 

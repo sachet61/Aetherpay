@@ -204,36 +204,39 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
       <div id="recaptcha-container"></div>
 
       {/* Top Header */}
-      <header className="border-b border-amber-500/15 bg-[#0A0F1D]/90 backdrop-blur-md sticky top-0 z-20 px-4 sm:px-6 py-3.5 flex items-center justify-between max-w-7xl mx-auto w-full">
-        <SwiftSweepsLogo size="md" />
+      {/* Sticky Header Container */}
+      <div className="sticky top-0 z-40">
+        <header className="border-b border-amber-500/15 bg-[#0A0F1D]/90 backdrop-blur-md z-30 px-4 sm:px-6 py-3.5 flex items-center justify-between max-w-7xl mx-auto w-full">
+          <SwiftSweepsLogo size="md" />
 
-        <div className="flex items-center gap-3">
-          {/* Live Platform Highlights */}
-          <div className="hidden md:flex items-center gap-3 text-xs">
-            <span className="text-emerald-400 font-mono flex items-center gap-1">
-              <Zap className="w-3.5 h-3.5" /> Instant Reloads
-            </span>
-            <span className="text-slate-700">·</span>
-            <span className="text-amber-400 font-mono flex items-center gap-1">
-              <TrendingUp className="w-3.5 h-3.5" /> Fast Cashouts
-            </span>
+          <div className="flex items-center gap-3">
+            {/* Live Platform Highlights */}
+            <div className="hidden md:flex items-center gap-3 text-xs">
+              <span className="text-emerald-400 font-mono flex items-center gap-1">
+                <Zap className="w-3.5 h-3.5" /> Instant Reloads
+              </span>
+              <span className="text-slate-700">·</span>
+              <span className="text-amber-400 font-mono flex items-center gap-1">
+                <TrendingUp className="w-3.5 h-3.5" /> Fast Cashouts
+              </span>
+            </div>
+
+            {/* 24/7 Live Care Button */}
+            <button
+              type="button"
+              onClick={() => setShowSupportModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-amber-500/30 bg-[#131C2E] hover:bg-[#1A263D] text-amber-200 text-xs font-semibold transition shadow-sm"
+            >
+              <Headphones className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline">24/7 Support</span>
+              <span className="sm:hidden">Support</span>
+            </button>
           </div>
+        </header>
 
-          {/* 24/7 Live Care Button */}
-          <button
-            type="button"
-            onClick={() => setShowSupportModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-amber-500/30 bg-[#131C2E] hover:bg-[#1A263D] text-amber-200 text-xs font-semibold transition shadow-sm"
-          >
-            <Headphones className="w-3.5 h-3.5 text-amber-400" />
-            <span className="hidden sm:inline">24/7 Support</span>
-            <span className="sm:hidden">Support</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Horizontal News-Style Live Cashouts Marquee Ticker */}
-      <LiveCashoutTicker />
+        {/* Horizontal News-Style Live Cashouts Marquee Ticker */}
+        <LiveCashoutTicker />
+      </div>
 
       {/* Main Content Viewport */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10 w-full flex-1 space-y-6">

@@ -44,7 +44,36 @@
   overscroll-behavior-y: contain;
 }
 
-/* GPU-accelerated continuous horizontal marquee for live payouts */
+/* GPU-accelerated continuous seamless horizontal marquee for live payouts */
+@keyframes marquee-seamless {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.animate-marquee-seamless {
+  display: flex;
+  width: max-content;
+  flex-shrink: 0;
+  animation: marquee-seamless 75s linear infinite;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  perspective: 1000px;
+  -webkit-perspective: 1000px;
+  transform-style: preserve-3d;
+}
+
+.pause-marquee:hover .animate-marquee-seamless,
+.ticker-container:hover .animate-marquee-seamless {
+  animation-play-state: paused;
+}
+
+/* Backward-compatible marquee-track definition */
 @keyframes marquee-track {
   0% {
     transform: translate3d(0, 0, 0);
@@ -88,7 +117,7 @@
 
 /* Smooth gradient edge mask for tickers */
 .mask-marquee-edges {
-  mask-image: linear-gradient(to right, transparent 0%, black 2.5%, black 97.5%, transparent 100%);
-  -webkit-mask-image: linear-gradient(to right, transparent 0%, black 2.5%, black 97.5%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0%, black 35px, black calc(100% - 35px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, black 35px, black calc(100% - 35px), transparent 100%);
 }
 

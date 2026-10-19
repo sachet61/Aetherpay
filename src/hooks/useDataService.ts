@@ -15,7 +15,11 @@ export function useDataService() {
   }, []);
 
   useEffect(() => {
-    const handleUpdate = () => {
+    const handleUpdate = (e: Event) => {
+      // Do not trigger full app re-renders for background ticker updates
+      const detailKey = (e as CustomEvent)?.detail?.key;
+      if (detailKey === 'cashout_feed_updated') return;
+
       const u = dataService.getCurrentUser();
       setCurrentUser(u);
       setWallet(u ? dataService.getWallet(u.id) : null);

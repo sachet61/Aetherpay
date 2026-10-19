@@ -173,17 +173,18 @@ export default function App() {
         <SessionTimeoutWarningModal onLogout={handleLogout} />
 
         {/* Top Navbar with strict role-based views (No staff/customer mode toggle) */}
-        <TopNavbar
-          currentUser={currentUser}
-          wallet={activeWallet}
-          onSwitchUser={handleSwitchUser}
-          onLogout={() => handleLogout('manual')}
-          activeTab={activeTab}
-          onNavigateTab={handleNavigateTab}
-        />
-
-        {/* Continuous News-Style Horizontal Live Cashouts Marquee Ticker */}
-        <LiveCashoutTicker />
+        <div className="sticky top-0 z-40">
+          <TopNavbar
+            currentUser={currentUser}
+            wallet={activeWallet}
+            onSwitchUser={handleSwitchUser}
+            onLogout={() => handleLogout('manual')}
+            activeTab={activeTab}
+            onNavigateTab={handleNavigateTab}
+          />
+          {/* Continuous News-Style Horizontal Live Cashouts Marquee Ticker */}
+          <LiveCashoutTicker />
+        </div>
 
         {/* Main Content Viewport */}
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 w-full max-w-7xl mx-auto">
