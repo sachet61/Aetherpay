@@ -482,16 +482,12 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                         )}
                       </td>
 
-                      {/* Active Games / Platforms */}
+                      {/* Active Games */}
                       <td className="py-3.5 px-4">
                         <span className="font-mono text-slate-300">
                           {(() => {
-                            const activePlatforms = new Set(
-                              gameAccounts
-                                .filter((g) => g.status === 'active')
-                                .map((g) => (g.platformName || g.gameName || '').trim().toLowerCase())
-                            ).size;
-                            return `${activePlatforms} active platform${activePlatforms === 1 ? '' : 's'}`;
+                            const activeCount = gameAccounts.filter((g) => g.status === 'active').length;
+                            return `${activeCount} active game${activeCount === 1 ? '' : 's'}`;
                           })()}
                         </span>
                       </td>
@@ -892,8 +888,8 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                     <span className="text-[10px] text-amber-300 font-mono bg-amber-950/60 border border-amber-800/60 px-2 py-0.5 rounded-full font-bold">
                       {(() => {
                         const accs = dataService.getGameAccounts(selectedUser.id);
-                        const count = new Set(accs.map((ga) => (ga.platformName || ga.gameName || '').trim().toLowerCase())).size;
-                        return `${count} platform${count === 1 ? '' : 's'} (1 ID per game)`;
+                        const count = accs.length;
+                        return `${count} game${count === 1 ? '' : 's'} (1 ID per game)`;
                       })()}
                     </span>
                     <button
