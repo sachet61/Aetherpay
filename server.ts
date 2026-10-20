@@ -230,6 +230,48 @@ app.post('/api/auth/register', async (req, res) => {
 
       const cleanEmail = email.trim().toLowerCase();
 
+      // 1. Authoritative check in Supabase PostgreSQL 'users' table
+      const { data: dbUser } = await supabaseAdmin
+        .from('users')
+        .select('id, email, display_name, status')
+        .ilike('email', cleanEmail)
+        .limit(1)
+        .maybeSingle();
+
+      // 2. Check Supabase Auth user directory
+      let authUser: any = null;
+      try {
+        const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
+        authUser = (userList?.users as any[])?.find(
+          (u: any) => u.email?.toLowerCase() === cleanEmail
+        );
+      } catch (authErr) {
+        console.warn('[Admin ListUsers Notice]:', authErr);
+      }
+
+      // If user does not exist in database and does not exist in Auth, return 404
+      if (!dbUser && !authUser) {
+        return res.status(404).json({
+          error: 'No account found with this email address. Please check your spelling or sign up.',
+        });
+      }
+
+      // If user exists in DB but not yet in Supabase Auth, provision Supabase Auth entry
+      if (dbUser && !authUser) {
+        try {
+          const tempPass = `Temp_${Math.random().toString(36).substring(2, 10)}!9A`;
+          const { data: newAuth } = await supabaseAdmin.auth.admin.createUser({
+            email: cleanEmail,
+            password: tempPass,
+            email_confirm: true,
+            user_metadata: { displayName: dbUser.display_name },
+          });
+          authUser = newAuth?.user;
+        } catch (createErr) {
+          console.warn('[Admin CreateUser Notice]:', createErr);
+        }
+      }
+
       // Determine active application origin
       const host = req.get('host');
       const proto = req.get('x-forwarded-proto') || 'https';
@@ -382,8 +424,16 @@ app.post('/api/auth/register', async (req, res) => {
         if (targetUser) {
           await supabaseAdmin.auth.admin.updateUserById(targetUser.id, {
             password: newPassword,
+            email_confirm: true,
           });
           console.log(`[Supabase Admin] Updated password for user ${targetUser.id} (${record.email})`);
+        } else {
+          await supabaseAdmin.auth.admin.createUser({
+            email: record.email.toLowerCase(),
+            password: newPassword,
+            email_confirm: true,
+          });
+          console.log(`[Supabase Admin] Provisioned new Supabase Auth user for (${record.email})`);
         }
       } catch (supaErr) {
         console.warn('[Supabase Admin Password Update Notice]:', supaErr);

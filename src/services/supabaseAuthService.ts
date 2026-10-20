@@ -381,21 +381,12 @@ class SupabaseAuthService {
       return { success: false, message: 'Please enter a valid email address.' };
     }
 
-    // 1. Check if user exists in database
-    const allUsers = dataService.getUsers();
-    const existingUser = allUsers.find((u) => u.email.toLowerCase() === cleanEmail);
-    if (!existingUser) {
-      return {
-        success: false,
-        message: 'No account found with this email address. Please check your spelling or sign up.',
-      };
-    }
-
     let actionLink: string | undefined;
     let pin: string | undefined;
     let token: string | undefined;
+    let accountFound = false;
 
-    // Optional server backup token generation
+    // 1. Authoritative check via backend API (queries Supabase database 'users' table and Supabase Auth)
     try {
       const resp = await fetch('/api/auth/request-reset', {
         method: 'POST',
@@ -407,24 +398,74 @@ class SupabaseAuthService {
         actionLink = json.actionLink;
         pin = json.pin;
         token = json.token;
+        accountFound = true;
+      } else if (resp.status === 404) {
+        const errJson = await resp.json().catch(() => null);
+        return {
+          success: false,
+          message: errJson?.error || 'No account found with this email address. Please check your spelling or sign up.',
+        };
       }
     } catch (err) {
       console.warn('Server request-reset backup notice:', err);
     }
 
-    // 2. Dispatch Supabase reset password email with 6-digit OTP code {{ .Token }}
+    // 2. Client-side database check if server endpoint was unreachable
+    if (!accountFound) {
+      try {
+        const { data: dbUser } = await supabase
+          .from('users')
+          .select('id, email')
+          .ilike('email', cleanEmail)
+          .limit(1)
+          .maybeSingle();
+        if (dbUser) {
+          accountFound = true;
+        }
+      } catch (dbErr) {
+        console.warn('Direct users table check notice:', dbErr);
+      }
+
+      if (!accountFound) {
+        const allUsers = dataService.getUsers();
+        const existingUser = allUsers.find((u) => u.email.toLowerCase() === cleanEmail);
+        if (existingUser) {
+          accountFound = true;
+        }
+      }
+    }
+
+    // 3. Dispatch Supabase reset password email with 6-digit OTP code {{ .Token }}
     try {
       const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail);
       if (error) {
-        return { success: false, message: error.message };
+        // If Supabase confirms user doesn't exist and neither did our DB
+        if (error.message?.toLowerCase().includes('user not found') && !accountFound) {
+          return {
+            success: false,
+            message: 'No account found with this email address. Please check your spelling or sign up.',
+          };
+        }
+        if (!accountFound && !pin && !token) {
+          return { success: false, message: error.message };
+        }
+      } else {
+        accountFound = true;
       }
     } catch (sbErr: any) {
       console.warn('Supabase resetPasswordForEmail notice:', sbErr);
     }
 
+    if (!accountFound && !pin && !token) {
+      return {
+        success: false,
+        message: 'No account found with this email address. Please check your spelling or sign up.',
+      };
+    }
+
     return {
       success: true,
-      message: `Password reset code sent to ${cleanEmail}. Please enter the 6-digit code below to set your new password.`,
+      message: `Password reset instructions sent for ${cleanEmail}. Please enter the 6-digit verification code below.`,
       actionLink,
       pin,
       token,
