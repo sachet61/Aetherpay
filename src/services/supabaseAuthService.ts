@@ -386,7 +386,7 @@ class SupabaseAuthService {
     let token: string | undefined;
     let accountFound = false;
 
-    // 1. Authoritative check via backend API (queries Supabase database 'users' table and Supabase Auth)
+    // 1. Authoritative check via backend API (queries Supabase database 'users' table, server-db, and Supabase Auth)
     try {
       const resp = await fetch('/api/auth/request-reset', {
         method: 'POST',
@@ -399,24 +399,19 @@ class SupabaseAuthService {
         pin = json.pin;
         token = json.token;
         accountFound = true;
-      } else if (resp.status === 404) {
-        const errJson = await resp.json().catch(() => null);
-        return {
-          success: false,
-          message: errJson?.error || 'No account found with this email address. Please check your spelling or sign up.',
-        };
       }
     } catch (err) {
       console.warn('Server request-reset backup notice:', err);
     }
 
-    // 2. Client-side database check if server endpoint was unreachable
+    // 2. Client-side database checks across Supabase, dataService, and authSessionService
     if (!accountFound) {
+      // 2a. Supabase PostgreSQL users table with explicit field projection and limit
       try {
         const { data: dbUser } = await supabase
           .from('users')
-          .select('id, email')
-          .ilike('email', cleanEmail)
+          .select('id, email, display_name')
+          .or(`email.ilike.${cleanEmail},email.ilike.%${cleanEmail}%`)
           .limit(1)
           .maybeSingle();
         if (dbUser) {
@@ -426,10 +421,20 @@ class SupabaseAuthService {
         console.warn('Direct users table check notice:', dbErr);
       }
 
+      // 2b. In-memory and local database users
       if (!accountFound) {
         const allUsers = dataService.getUsers();
-        const existingUser = allUsers.find((u) => u.email.toLowerCase() === cleanEmail);
+        const existingUser = allUsers.find(
+          (u) => u.email && u.email.trim().toLowerCase() === cleanEmail
+        );
         if (existingUser) {
+          accountFound = true;
+        }
+      }
+
+      // 2c. Authentication credential store & seed platform accounts
+      if (!accountFound) {
+        if (authSessionService.hasAccount(cleanEmail)) {
           accountFound = true;
         }
       }
@@ -438,25 +443,42 @@ class SupabaseAuthService {
     // 3. Dispatch Supabase reset password email with 6-digit OTP code {{ .Token }}
     try {
       const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail);
-      if (error) {
-        // If Supabase confirms user doesn't exist and neither did our DB
-        if (error.message?.toLowerCase().includes('user not found') && !accountFound) {
-          return {
-            success: false,
-            message: 'No account found with this email address. Please check your spelling or sign up.',
-          };
-        }
-        if (!accountFound && !pin && !token) {
-          return { success: false, message: error.message };
-        }
-      } else {
+      if (!error) {
         accountFound = true;
       }
     } catch (sbErr: any) {
       console.warn('Supabase resetPasswordForEmail notice:', sbErr);
     }
 
-    if (!accountFound && !pin && !token) {
+    // 4. If account exists in database but server endpoint didn't supply a PIN/token, generate in-app credentials
+    if (accountFound && (!pin || !token)) {
+      const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
+      const codePart = String(Math.floor(100000 + Math.random() * 900000));
+      const generatedToken = `RST-${Date.now().toString(36).toUpperCase()}-${randomSuffix}`;
+      const expiresAt = Date.now() + 15 * 60 * 1000;
+
+      pin = codePart;
+      token = generatedToken;
+
+      dataService.savePasswordResetToken({
+        id: generatedToken,
+        token: generatedToken,
+        email: cleanEmail,
+        createdAt: Date.now(),
+        expiresAt,
+        used: false,
+      });
+      dataService.savePasswordResetToken({
+        id: codePart,
+        token: codePart,
+        email: cleanEmail,
+        createdAt: Date.now(),
+        expiresAt,
+        used: false,
+      });
+    }
+
+    if (!accountFound) {
       return {
         success: false,
         message: 'No account found with this email address. Please check your spelling or sign up.',

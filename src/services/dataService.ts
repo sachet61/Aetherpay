@@ -1802,6 +1802,13 @@ class DataService {
     return this.load<PasswordResetToken[]>(STORAGE_KEYS.PASSWORD_RESET_TOKENS, []);
   }
 
+  public savePasswordResetToken(tokenRecord: PasswordResetToken): void {
+    const tokens = this.getPasswordResetTokens();
+    const filtered = tokens.filter((t) => t.token !== tokenRecord.token && t.id !== tokenRecord.id);
+    filtered.unshift(tokenRecord);
+    this.save(STORAGE_KEYS.PASSWORD_RESET_TOKENS, filtered);
+  }
+
   public async requestPasswordReset(
     emailInput: string
   ): Promise<{ success: boolean; token?: string; pin?: string; expiresAt?: number; message?: string }> {
