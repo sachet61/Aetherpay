@@ -12,8 +12,6 @@ import {
   KeyRound,
   CheckCircle2,
   Lock,
-  LogOut,
-  RefreshCw,
   Zap,
   Send,
 } from 'lucide-react';
@@ -258,37 +256,6 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
         )}
       </div>
 
-      {/* Account Operations & Reset */}
-      <div className="p-6 rounded-2xl border border-slate-800 bg-slate-900 shadow-xl space-y-4">
-        <h3 className="text-sm font-bold text-white">Session &amp; Testing Controls</h3>
-        <p className="text-xs text-slate-400">
-          Sign out of your player session or reset all demo balances and requests back to initial factory state.
-        </p>
-
-        <div className="flex flex-col sm:flex-row items-center gap-3">
-          {onLogout && (
-            <button
-              onClick={onLogout}
-              className="w-full sm:w-auto px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs flex items-center justify-center gap-1.5 border border-slate-700 transition-colors"
-            >
-              <LogOut className="w-3.5 h-3.5 text-rose-400" />
-              <span>Sign Out of Player Session</span>
-            </button>
-          )}
-
-          <button
-            onClick={() => {
-              if (window.confirm('Reset all demo state to original seeded data?')) {
-                dataService.resetToSeedData();
-              }
-            }}
-            className="w-full sm:w-auto px-4 py-2 rounded-xl bg-rose-950/60 hover:bg-rose-900 border border-rose-800/60 text-rose-300 font-medium text-xs flex items-center justify-center gap-1.5 transition-colors"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span>Reset Demo Data to Initial Seed</span>
-          </button>
-        </div>
-      </div>
     </div>
   );
 };

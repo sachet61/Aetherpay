@@ -2433,6 +2433,12 @@ class DataService {
     return reqs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
+  public getPendingRequests(): Array<TopUpRequest | WithdrawalRequest> {
+    const topups = this.getTopUpRequests().filter((t) => t.status === 'pending' || t.status === 'submitted' || t.status === 'verifying');
+    const withdrawals = this.getWithdrawalRequests().filter((w) => w.status === 'pending' || w.status === 'submitted' || w.status === 'processing');
+    return [...topups, ...withdrawals];
+  }
+
   public submitTopUp(params: {
     customerId: string;
     customerName: string;

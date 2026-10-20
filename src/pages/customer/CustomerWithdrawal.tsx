@@ -280,31 +280,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
               </div>
             </div>
 
-            {/* Payout Handle / Destination */}
-            <div className="space-y-2 p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs">
-              <label className="font-semibold text-white flex items-center justify-between">
-                <span>Payout Destination Details ({lastPaymentMethodName})</span>
-                <span className="text-[10px] text-emerald-400 font-mono">Matched to Last Deposit</span>
-              </label>
-              <input
-                type="text"
-                value={payoutAccountHandle}
-                onChange={(e) => setPayoutAccountHandle(e.target.value)}
-                placeholder={
-                  lastPaymentMethod === 'cashapp'
-                    ? 'Enter your Cash App $cashtag'
-                    : lastPaymentMethod === 'chime'
-                    ? 'Enter your Chime sign / phone'
-                    : lastPaymentMethod === 'crypto'
-                    ? 'Enter your Crypto destination wallet'
-                    : 'Enter payout account / reference details'
-                }
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-400"
-              />
-              <p className="text-[11px] text-slate-400">
-                You can also confirm or update this directly in Live Chat with the operator.
-              </p>
-            </div>
+
 
             {/* Optional Player Notes */}
             <div className="space-y-1.5">

@@ -470,18 +470,8 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
               </div>
             )}
 
-            {/* Direct Top-Up Workflow (No amount input needed - verified by Agent/Admin from receipt proof) */}
-            {fundingMode === 'gateway_payment' ? (
-              <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-2.5">
-                <Sparkles className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <div className="font-semibold text-white">Deposit Amount Verified Directly from Payment Proof</div>
-                  <p className="text-[11px] text-amber-200/80 leading-relaxed">
-                    You don't need to specify an amount or tags. Simply pay using the method link/QR below, upload your payment receipt screenshot, and submit to agent/admin. Our desk reviews your screenshot, credits the verified amount with +{dynamicBonusPercent}% bonus, and checks your game credentials.
-                  </p>
-                </div>
-              </div>
-            ) : (
+            {/* Direct Top-Up Workflow */}
+            {fundingMode !== 'gateway_payment' && (
               <div className="space-y-2">
                 <label className="text-xs font-semibold text-slate-300">
                   Referral Credits to Load to Game

@@ -59,7 +59,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
     <>
 
 
-      <header className="z-30 flex items-center justify-between gap-6 px-4 sm:px-6 py-3.5 bg-[#0A0F1D]/95 backdrop-blur-md border-b border-amber-500/15">
+      <header className="relative z-50 flex items-center justify-between gap-6 px-4 sm:px-6 py-3.5 bg-[#0A0F1D]/95 backdrop-blur-md border-b border-amber-500/15">
         {/* Zone 1: Wordmark & Role-Enforced Portal Title */}
         <div className="flex items-center gap-3 shrink-0">
           <button
@@ -356,8 +356,14 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             </button>
           </div>
 
-          {/* User Account / Demo Profile Switcher */}
-          <RoleSwitcher currentUser={currentUser} onSwitchUser={onSwitchUser} onLogout={onLogout} />
+          {/* User Account Details & Navigation */}
+          <RoleSwitcher
+            currentUser={currentUser}
+            wallet={wallet}
+            onSwitchUser={onSwitchUser}
+            onLogout={onLogout}
+            onNavigateTab={onNavigateTab}
+          />
 
           {/* Explicit Sign Out Action Button */}
           {onLogout && (
