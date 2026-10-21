@@ -381,12 +381,7 @@ class SupabaseAuthService {
       return { success: false, message: 'Please enter a valid email address.' };
     }
 
-    let actionLink: string | undefined;
-    let pin: string | undefined;
-    let token: string | undefined;
-    let accountFound = false;
-
-    // 1. Authoritative check via backend API (queries Supabase database 'users' table, server-db, and Supabase Auth)
+    // 1. Authoritative check and dispatch via backend API (queries PostgreSQL 'users' table, Supabase Auth, and dispatches email)
     try {
       const resp = await fetch('/api/auth/request-reset', {
         method: 'POST',
@@ -394,104 +389,62 @@ class SupabaseAuthService {
         body: JSON.stringify({ email: cleanEmail }),
       });
       if (resp.ok) {
-        const json = await resp.json();
-        actionLink = json.actionLink;
-        pin = json.pin;
-        token = json.token;
-        accountFound = true;
+        return {
+          success: true,
+          message: `Password reset instructions have been dispatched to ${cleanEmail}. Please check your email inbox.`,
+        };
+      }
+      if (resp.status === 404) {
+        const errorJson = await resp.json().catch(() => ({}));
+        return {
+          success: false,
+          message: errorJson.error || 'No account found with this email address. Please check your spelling or sign up.',
+        };
       }
     } catch (err) {
-      console.warn('Server request-reset backup notice:', err);
+      console.warn('Server request-reset endpoint unavailable, falling back to direct database query:', err);
     }
 
-    // 2. Client-side database checks across Supabase, dataService, and authSessionService
-    if (!accountFound) {
-      // 2a. Supabase PostgreSQL users table with explicit field projection and limit
-      try {
-        const { data: dbUser } = await supabase
-          .from('users')
-          .select('id, email, display_name')
-          .or(`email.ilike.${cleanEmail},email.ilike.%${cleanEmail}%`)
-          .limit(1)
-          .maybeSingle();
-        if (dbUser) {
-          accountFound = true;
-        }
-      } catch (dbErr) {
-        console.warn('Direct users table check notice:', dbErr);
-      }
-
-      // 2b. In-memory and local database users
-      if (!accountFound) {
-        const allUsers = dataService.getUsers();
-        const existingUser = allUsers.find(
-          (u) => u.email && u.email.trim().toLowerCase() === cleanEmail
-        );
-        if (existingUser) {
-          accountFound = true;
-        }
-      }
-
-      // 2c. Authentication credential store & seed platform accounts
-      if (!accountFound) {
-        if (authSessionService.hasAccount(cleanEmail)) {
-          accountFound = true;
-        }
-      }
-    }
-
-    // 3. Dispatch Supabase reset password email with 6-digit OTP code {{ .Token }}
+    // 2. Direct fallback check in Supabase PostgreSQL 'users' table
     try {
-      const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail);
-      if (!error) {
-        accountFound = true;
+      const { data: dbUser, error: dbErr } = await supabase
+        .from('users')
+        .select('id, email, display_name')
+        .or(`email.ilike.${cleanEmail},email.ilike.%${cleanEmail}%`)
+        .limit(1)
+        .maybeSingle();
+
+      if (dbErr || !dbUser) {
+        return {
+          success: false,
+          message: 'No account found with this email address. Please check your spelling or sign up.',
+        };
       }
-    } catch (sbErr: any) {
-      console.warn('Supabase resetPasswordForEmail notice:', sbErr);
-    }
 
-    // 4. If account exists in database but server endpoint didn't supply a PIN/token, generate in-app credentials
-    if (accountFound && (!pin || !token)) {
-      const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
-      const codePart = String(Math.floor(100000 + Math.random() * 900000));
-      const generatedToken = `RST-${Date.now().toString(36).toUpperCase()}-${randomSuffix}`;
-      const expiresAt = Date.now() + 15 * 60 * 1000;
-
-      pin = codePart;
-      token = generatedToken;
-
-      dataService.savePasswordResetToken({
-        id: generatedToken,
-        token: generatedToken,
-        email: cleanEmail,
-        createdAt: Date.now(),
-        expiresAt,
-        used: false,
+      // User exists in database - dispatch recovery email via Supabase Auth
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+      const redirectTo = origin ? `${origin}/#type=recovery` : undefined;
+      const { error: resetErr } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+        redirectTo,
       });
-      dataService.savePasswordResetToken({
-        id: codePart,
-        token: codePart,
-        email: cleanEmail,
-        createdAt: Date.now(),
-        expiresAt,
-        used: false,
-      });
-    }
 
-    if (!accountFound) {
+      if (resetErr) {
+        return {
+          success: false,
+          message: resetErr.message || 'Failed to dispatch password reset email.',
+        };
+      }
+
+      return {
+        success: true,
+        message: `Password reset instructions have been dispatched to ${cleanEmail}. Please check your email inbox.`,
+      };
+    } catch (fallbackErr: any) {
       return {
         success: false,
-        message: 'No account found with this email address. Please check your spelling or sign up.',
+        message: fallbackErr.message || 'Unable to verify account existence. Please try again later.',
       };
     }
-
-    return {
-      success: true,
-      message: `Password reset instructions sent for ${cleanEmail}. Please enter the 6-digit verification code below.`,
-      actionLink,
-      pin,
-      token,
-    };
   }
 
   /**

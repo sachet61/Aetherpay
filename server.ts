@@ -5,7 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import { createClient } from '@supabase/supabase-js';
-import { telegramEngine } from './src/server/telegramEngine';
+import { telegramEngine } from './src/server/telegramEngine.ts';
 
 dotenv.config();
 
@@ -352,67 +352,24 @@ app.post('/api/auth/register', async (req, res) => {
       const origin = req.headers.origin || (host ? `${proto}://${host}` : 'https://ais-dev-z7ycubaw6ioqcdgqzu2qkl-342377552686.asia-southeast1.run.app');
       const redirectTo = `${origin}/#type=recovery`;
 
-      let directActionLink: string | null = null;
-      let recoveryHashedToken: string | null = null;
-
       try {
-        const { data, error } = await supabaseAdmin.auth.admin.generateLink({
-          type: 'recovery',
-          email: cleanEmail,
-          options: {
-            redirectTo,
-          },
+        await supabaseAdmin.auth.resetPasswordForEmail(cleanEmail, {
+          redirectTo,
         });
-
-        if (!error && data?.properties?.action_link) {
-          let link = data.properties.action_link;
-          // Replace any hardcoded localhost:3000 redirect_to with active domain
-          if (link.includes('redirect_to=http://localhost:3000') || link.includes('redirect_to=http%3A%2F%2Flocalhost%3A3000')) {
-            link = link
-              .replace('redirect_to=http://localhost:3000', `redirect_to=${encodeURIComponent(redirectTo)}`)
-              .replace('redirect_to=http%3A%2F%2Flocalhost%3A3000', `redirect_to=${encodeURIComponent(redirectTo)}`);
-          }
-          directActionLink = link;
-          recoveryHashedToken = data.properties.hashed_token || null;
-        }
       } catch (adminErr) {
-        console.warn('[Admin GenerateLink Notice]:', adminErr);
+        console.warn('[Admin resetPasswordForEmail Notice]:', adminErr);
       }
 
-      // Generate in-app 6-digit pin and security token
-      const randomSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
-      const codePart = Math.floor(100000 + Math.random() * 900000); // 6-digit code
-      const token = `RST-${Date.now().toString(36).toUpperCase()}-${randomSuffix}`;
-      const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes validity
-
-      const record: PasswordResetRecord = {
-        token,
-        email: cleanEmail,
-        createdAt: Date.now(),
-        expiresAt,
-        used: false,
-      };
-
-      passwordResetTokens.set(token, record);
-      passwordResetTokens.set(String(codePart), record);
-      if (recoveryHashedToken) {
-        passwordResetTokens.set(recoveryHashedToken, record);
-      }
-
-      console.log(`[Self-Service Reset] Generated token for ${cleanEmail}: ${token} / PIN: ${codePart}`);
+      console.log(`[Production Auth] Password reset email dispatched for ${cleanEmail}`);
 
       return res.json({
         success: true,
-        token,
-        pin: String(codePart),
-        actionLink: directActionLink,
         email: cleanEmail,
-        expiresAt,
-        message: `Self-service password reset link and 6-digit PIN generated for ${cleanEmail}. Valid for 15 minutes.`,
+        message: `Password reset instructions have been dispatched to ${cleanEmail}. Please check your inbox.`,
       });
     } catch (err: any) {
       console.error('[Request Reset Error]:', err);
-      return res.status(500).json({ error: err.message || 'Failed to generate reset token' });
+      return res.status(500).json({ error: err.message || 'Failed to dispatch reset email' });
     }
   });
 

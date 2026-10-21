@@ -1,6 +1,6 @@
 {
-  "summary": "Revised implementation plan incorporating soft deletions, 300ms payload batching/debouncing queue, database publication migration details, reconnect binding via the SUBSCRIBED event, and a 12-hour stale tab fallback threshold to eradicate PostgREST egress overages.",
-  "updatedAt": "2026-10-19T01:33:33.134383915Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Comprehensive architectural plan and production-grade system prompt specification tailored for high-trust iGaming, payment gateway, and user support web applications. Enforces strict zero-mock persistence, Supabase Realtime egress prevention, tab visibility pausing, and surgical diff workflows.",
+  "updatedAt":  "2026-10-21T03:30:56.768842385Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }
