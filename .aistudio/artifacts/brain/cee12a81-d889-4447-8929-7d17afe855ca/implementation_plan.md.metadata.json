@@ -1,6 +1,6 @@
 {
-  "summary":  "Comprehensive architectural plan and production-grade system prompt specification tailored for high-trust iGaming, payment gateway, and user support web applications. Enforces strict zero-mock persistence, Supabase Realtime egress prevention, tab visibility pausing, and surgical diff workflows.",
-  "updatedAt":  "2026-10-21T03:30:56.768842385Z",
+  "summary":  "Comprehensive architectural plan and bulk game image ingestion prompt specification for standardizing, sizing, and seamlessly mapping full-sized bulk game artwork into Swift Sweeps.",
+  "updatedAt":  "2026-10-21T04:58:25.539369046Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

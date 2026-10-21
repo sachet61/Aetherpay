@@ -68,10 +68,13 @@ export function resolveGameImageUrl(url?: string | null): string {
     return `/${clean}`;
   }
 
-  // Check if it matches any known local filename case-insensitively
+  // Check if it matches any known local filename case-insensitively or normalized (ignoring hyphens/underscores)
+  const normClean = clean.toLowerCase().replace(/[-_\s]/g, '').replace(/\.[^/.]+$/, '');
   const matched = LOCAL_GAME_IMAGES.find(
     (item) => item.filename.toLowerCase() === clean.toLowerCase() ||
-              item.filename.toLowerCase().replace(/\.[^/.]+$/, '') === clean.toLowerCase().replace(/\.[^/.]+$/, '')
+              item.filename.toLowerCase().replace(/\.[^/.]+$/, '') === clean.toLowerCase().replace(/\.[^/.]+$/, '') ||
+              item.filename.toLowerCase().replace(/[-_\s]/g, '').replace(/\.[^/.]+$/, '') === normClean ||
+              item.name.toLowerCase().replace(/[-_\s()]/g, '') === normClean
   );
   if (matched) {
     return matched.path;

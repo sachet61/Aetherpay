@@ -129,7 +129,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
             {isLoading ? (
               <>
                 <RefreshCw className="w-4 h-4 animate-spin" />
-                <span>Dispatching via Supabase...</span>
+                <span>Processing...</span>
               </>
             ) : (
               <>
