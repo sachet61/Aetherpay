@@ -1,20 +1,20 @@
-# Implementation Plan - Complete Removal of Demo/Seed Data for Production
+# Strict Supabase Auth Existence Check for Password Recovery
 
-## User Request & Context
-- **User Request**: Remove all demo and seeded data (including fake seed accounts like `marcus.vance@example.com`, `elena.rostova@example.com`, etc.) that cause email availability/authentication conflicts with Supabase Auth. Rely 100% on Supabase Auth for production.
-- **Goal**: Cleanly strip out all mock seed users, mock wallets, mock transactions, mock support tickets, and fallback seed credentials from `seedData.ts` and `authSessionService.ts`.
+## Overview & Goal
+Ensure password reset requests (`/api/auth/request-reset` and `supabaseAuthService.sendPasswordReset`) strictly validate that the requested email exists in Supabase Auth (`auth.users`) or PostgreSQL `users` table via exact matching, and remove hardcoded demo email fallbacks that allowed non-existent accounts (such as `koofrkolagi@gmail.com`) to trigger password reset dispatches.
 
-## Proposed Changes
+## User & Clarification Alignment
+- **Explicit Error on Missing Account**: Show an explicit error message stating the email is not registered when not found in Supabase Auth / PostgreSQL.
+- **Strict Existence Check**: Enforce strict user existence checks directly against Supabase Auth / PostgreSQL before dispatching recovery tokens or links.
 
-### 1. `src/services/seedData.ts`
-- Empty out `INITIAL_USERS`, `INITIAL_WALLETS`, `INITIAL_TRANSACTIONS`, `INITIAL_TOPUPS`, `INITIAL_WITHDRAWALS`, `INITIAL_GAME_ACCOUNTS`, `INITIAL_CONVERSATIONS`, `INITIAL_MESSAGES`, `INITIAL_NOTIFICATIONS`, and `INITIAL_AUDIT_LOGS`.
-- Keep `INITIAL_CONFIG` and `INITIAL_GAME_CATALOG` (master game catalog is needed for players to view available games).
+---
 
-### 2. `src/services/authSessionService.ts`
-- Empty out `SEED_CREDENTIALS` (`{}`).
-- Remove auto-population of seed credentials in `initCredentials()`.
-- Update `hasAccount()` to check only actual registered credentials or Supabase Auth.
+## Technical Changes
 
-## Verification Plan
-- **Build Check**: Run `compile_applet` to verify compilation and TypeScript types.
-- **Auth Verification**: Verify that sign up and password reset/recovery interact directly with Supabase Auth without interference from stale seed accounts.
+### 1. Backend Server (`server.ts`)
+- **Remove Hardcoded Demo Emails**: Clean up `KNOWN_PLATFORM_EMAILS` map in `/api/auth/request-reset` to eliminate hardcoded fallbacks for test/demo email addresses.
+- **Strict Exact Email Matching**: Replace loose wildcard matching (`.ilike.%${cleanEmail}%`) with strict exact case-insensitive matching (`.ilike('email', cleanEmail)` or `.eq('email', cleanEmail)`).
+- **Strict Supabase Auth Validation**: Verify existence in `supabaseAdmin.auth.admin.listUsers()` or PostgreSQL `users` table. If neither contains the exact email, immediately return HTTP 404 with error: `"No account found with this email address. Please check your spelling or sign up."`.
+
+### 2. Frontend Auth Service (`src/services/supabaseAuthService.ts`)
+- **Strict Error Handling**: Ensure frontend properly displays the 404 error message returned by the server when an email is not registered.

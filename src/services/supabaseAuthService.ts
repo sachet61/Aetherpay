@@ -401,16 +401,23 @@ class SupabaseAuthService {
           message: errorJson.error || 'No account found with this email address. Please check your spelling or sign up.',
         };
       }
+      if (!resp.ok) {
+        const errorJson = await resp.json().catch(() => ({}));
+        return {
+          success: false,
+          message: errorJson.error || errorJson.message || 'Unable to request password reset. Please verify your email address.',
+        };
+      }
     } catch (err) {
       console.warn('Server request-reset endpoint unavailable, falling back to direct database query:', err);
     }
 
-    // 2. Direct fallback check in Supabase PostgreSQL 'users' table
+    // 2. Direct fallback check in Supabase PostgreSQL 'users' table (exact email match only)
     try {
       const { data: dbUser, error: dbErr } = await supabase
         .from('users')
         .select('id, email, display_name')
-        .or(`email.ilike.${cleanEmail},email.ilike.%${cleanEmail}%`)
+        .ilike('email', cleanEmail)
         .limit(1)
         .maybeSingle();
 

@@ -234,62 +234,13 @@ app.post('/api/auth/register', async (req, res) => {
 
       const cleanEmail = email.trim().toLowerCase();
 
-      // 1. Authoritative check in Supabase PostgreSQL 'users' table
-      let dbUser: any = null;
-      try {
-        const { data: directMatch } = await supabaseAdmin
-          .from('users')
-          .select('id, email, display_name, status')
-          .or(`email.ilike.${cleanEmail},email.ilike.%${cleanEmail}%`)
-          .limit(1)
-          .maybeSingle();
-        dbUser = directMatch;
-
-        if (!dbUser) {
-          // Fallback scan of recent users with explicit limit constraint to handle whitespace padding
-          const { data: usersList } = await supabaseAdmin
-            .from('users')
-            .select('id, email, display_name, status')
-            .limit(50);
-          dbUser = usersList?.find(
-            (u: any) => u.email && u.email.trim().toLowerCase() === cleanEmail
-          );
-        }
-      } catch (dbErr) {
-        console.warn('[Request Reset DB Query Notice]:', dbErr);
-      }
-
-      // 2. Check server-db.json credentials
-      let serverUserCred: any = null;
-      try {
-        const db = readDB();
-        serverUserCred = db?.credentials?.[cleanEmail];
-      } catch (dbReadErr) {
-        console.warn('[Request Reset server-db Read Notice]:', dbReadErr);
-      }
-
-      // 3. Known platform & demo seed accounts registry
-      const KNOWN_PLATFORM_EMAILS: Record<string, string> = {
-        'marcus.vance@example.com': 'Marcus Vance',
-        'elena.rostova@example.com': 'Elena Rostova',
-        'devlin.drake@example.com': 'Devlin Drake',
-        'sarah.lin@aetherpay.com': 'Sarah Lin (Care Specialist)',
-        'alex.cross@aetherpay.com': 'Alexander Cross (Lead Admin)',
-        'admin@swiftsweeps.com': 'SwiftSweeps Admin',
-        'support@swiftsweeps.com': 'Customer Support',
-        'admin@aetherpay.com': 'AetherPay Admin',
-        'sachet61@gmail.com': 'Sachet Basukala',
-        'rashilbasukala@gmail.com': 'Rashil Basukala',
-        'koofrkolagi@gmail.com': 'Koofr Kolagi',
-        'haudemaxe@gmail.com': 'Haude Maxe',
-        'saralbasukala1@gmail.com': 'Saral Basukala',
-      };
-      const isKnownPlatformAccount = Boolean(KNOWN_PLATFORM_EMAILS[cleanEmail]);
-
-      // 4. Check Supabase Auth user directory (with pagination limit)
+      // 1. Authoritative check in Supabase Auth user directory (strictly verify user exists in auth.users)
       let authUser: any = null;
       try {
-        const { data: userList } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+        const { data: userList, error: authListErr } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+        if (authListErr) {
+          console.warn('[Admin ListUsers Warning]:', authListErr);
+        }
         authUser = (userList?.users as any[])?.find(
           (u: any) => u.email && u.email.trim().toLowerCase() === cleanEmail
         );
@@ -297,33 +248,45 @@ app.post('/api/auth/register', async (req, res) => {
         console.warn('[Admin ListUsers Notice]:', authErr);
       }
 
-      const accountExists = Boolean(dbUser || authUser || serverUserCred || isKnownPlatformAccount);
-
-      // If user does not exist in any database, return 404
-      if (!accountExists) {
+      // If user does NOT exist in Supabase Auth (auth.users), strictly return 404
+      if (!authUser) {
         return res.status(404).json({
-          error: 'No account found with this email address. Please check your spelling or sign up.',
+          error: 'No registered account found with this email address in Supabase Auth. Please check your spelling or sign up.',
         });
       }
 
-      // Ensure user profile exists in PostgreSQL 'users' table
-      if (!dbUser) {
+      // 2. Fetch or sync profile in Supabase PostgreSQL 'users' table
+      let dbUser: any = null;
+      try {
+        const { data: directMatch } = await supabaseAdmin
+          .from('users')
+          .select('id, email, display_name, status')
+          .ilike('email', cleanEmail)
+          .limit(1)
+          .maybeSingle();
+        dbUser = directMatch;
+      } catch (dbErr) {
+        console.warn('[Request Reset DB Query Notice]:', dbErr);
+      }
+
+      // Ensure public.users profile exists if registered in Supabase Auth
+      if (!dbUser && authUser) {
         const dispName =
-          authUser?.user_metadata?.displayName ||
-          KNOWN_PLATFORM_EMAILS[cleanEmail] ||
+          authUser.user_metadata?.displayName ||
+          authUser.user_metadata?.display_name ||
+          authUser.user_metadata?.full_name ||
           cleanEmail.split('@')[0];
-        const newId = authUser?.id || serverUserCred?.userId || `usr_${Date.now()}`;
         try {
           const { data: createdDbUser } = await supabaseAdmin
             .from('users')
             .upsert({
-              id: newId,
+              id: authUser.id,
               email: cleanEmail,
               display_name: dispName,
-              role: 'customer',
+              role: authUser.user_metadata?.role || 'customer',
               status: 'active',
-              email_verified: true,
-              created_at: new Date().toISOString(),
+              email_verified: Boolean(authUser.email_confirmed_at),
+              created_at: authUser.created_at || new Date().toISOString(),
               updated_at: new Date().toISOString(),
             })
             .select('id, email, display_name, status')
@@ -334,34 +297,19 @@ app.post('/api/auth/register', async (req, res) => {
         }
       }
 
-      // If user exists in DB but not yet in Supabase Auth, provision Supabase Auth entry
-      if (!authUser) {
-        try {
-          const tempPass = `Temp_${Math.random().toString(36).substring(2, 10)}!9A`;
-          const { data: newAuth } = await supabaseAdmin.auth.admin.createUser({
-            email: cleanEmail,
-            password: tempPass,
-            email_confirm: true,
-            user_metadata: { displayName: dbUser?.display_name || KNOWN_PLATFORM_EMAILS[cleanEmail] || cleanEmail.split('@')[0] },
-          });
-          authUser = newAuth?.user;
-        } catch (createErr) {
-          console.warn('[Admin CreateUser Notice]:', createErr);
-        }
-      }
-
       // Determine active application origin
       const host = req.get('host');
       const proto = req.get('x-forwarded-proto') || 'https';
-      const origin = req.headers.origin || (host ? `${proto}://${host}` : 'https://ais-dev-z7ycubaw6ioqcdgqzu2qkl-342377552686.asia-southeast1.run.app');
-      const redirectTo = `${origin}/#type=recovery`;
+      const origin = req.headers.origin || (host ? `${proto}://${host}` : '');
+      const redirectTo = origin ? `${origin}/#type=recovery` : undefined;
 
-      try {
-        await supabaseAdmin.auth.resetPasswordForEmail(cleanEmail, {
-          redirectTo,
-        });
-      } catch (adminErr) {
-        console.warn('[Admin resetPasswordForEmail Notice]:', adminErr);
+      const { error: resetErr } = await supabaseAdmin.auth.resetPasswordForEmail(cleanEmail, {
+        redirectTo,
+      });
+
+      if (resetErr) {
+        console.warn('[Supabase resetPasswordForEmail Error]:', resetErr);
+        return res.status(400).json({ error: resetErr.message || 'Failed to dispatch reset email.' });
       }
 
       console.log(`[Production Auth] Password reset email dispatched for ${cleanEmail}`);
