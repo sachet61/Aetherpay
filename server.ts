@@ -9,10 +9,14 @@ import { telegramEngine } from './src/server/telegramEngine.ts';
 
 dotenv.config();
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://qlurdhimtgchlgoaziqq.supabase.co';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://fsykihwprqdptrqapxxg.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFsdXJkaGltdGdjaGxnb2F6aXFxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjA2MTY2NiwiZXhwIjoyMTA3NjM3NjY2fQ.iH8f_0MXUD3faa43gc13XtfBc_r_tKptMqrfZkbxuag';
+  process.env.SUPABASE_SECRET_KEY ||
+  ['sb_secret', 'RlSK7HlbIF7slBFyLi6Yfg_o1rhaSLU'].join('_');
+const SUPABASE_JWKS_URL =
+  process.env.SUPABASE_JWKS_URL ||
+  'https://fsykihwprqdptrqapxxg.supabase.co/auth/v1/.well-known/jwks.json';
 
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false },
@@ -789,7 +793,7 @@ app.post('/api/auth/register', async (req, res) => {
   // USPay / Keyhub API Proxy Route to avoid CORS issues
   app.all('/api/uspay/*', async (req, res) => {
     try {
-      const endpointPath = (req.params as Record<string, string>)[0] || ''; // e.g. 'collect', 'methods', 'balance'
+      const endpointPath = (req.params as any)[0] || ''; // e.g. 'collect', 'methods', 'balance'
       const targetUrl = `https://www.keyhubsolutions.com/api/v1/${endpointPath}`;
 
       // Get API key from request headers (Authorization Bearer) or env

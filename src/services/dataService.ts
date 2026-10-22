@@ -4392,17 +4392,19 @@ class DataService {
     return cfg;
   }
 
-  public updateAppConfig(newConfig: AppConfig, actorId: string, actorName: string): void {
+  public updateAppConfig(newConfig: AppConfig, actorId?: string, actorName?: string): void {
     this.save(STORAGE_KEYS.CONFIG, newConfig);
-    this.logAudit({
-      actorId,
-      actorName,
-      actorRole: 'admin',
-      action: 'APP_CONFIG_UPDATED',
-      entityType: 'settings',
-      entityId: 'global_config',
-      details: 'Updated payment methods, bonus rules, or terms.',
-    });
+    if (actorId && actorName) {
+      this.logAudit({
+        actorId,
+        actorName,
+        actorRole: 'admin',
+        action: 'APP_CONFIG_UPDATED',
+        entityType: 'settings',
+        entityId: 'global_config',
+        details: 'Updated payment methods, bonus rules, or terms.',
+      });
+    }
   }
 
   // Audit Logs

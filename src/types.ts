@@ -1,4 +1,5 @@
 export type UserRole = 'admin' | 'agent' | 'customer';
+export type GameAccountStatus = 'active' | 'pending_assignment' | 'pending_reset' | 'suspended' | string;
 
 export interface UserProfile {
   id: string;
