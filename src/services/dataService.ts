@@ -118,7 +118,7 @@ class DataService {
   private cleanLegacyStorage(): void {
     if (typeof localStorage === 'undefined') return;
     try {
-      const CLEAN_FLAG = 'swift_sweeps_prod_clean_v4';
+      const CLEAN_FLAG = 'swift_sweeps_prod_clean_v5';
       if (!localStorage.getItem(CLEAN_FLAG)) {
         console.log('[SwiftSweeps] Performing clean-slate migration: clearing legacy mock storage...');
         const keysToClean = [
@@ -135,6 +135,7 @@ class DataService {
           'aetherpay_faked_cashouts',
           'aetherpay_webhook_logs',
           'aetherpay_mock_users',
+          'aetherpay_user_credentials',
         ];
         for (const k of keysToClean) {
           localStorage.removeItem(k);
@@ -2048,11 +2049,9 @@ class DataService {
     return (
       clean === 'admin@swiftsweeps.com' ||
       clean === 'admin@aetherpay.com' ||
-      clean === 'alex.cross@aetherpay.com' ||
       clean === 'nduphasetwo@gmail.com' ||
       clean === 'blithesweeps@gmail.com' ||
-      clean === 'usr_admin_master' ||
-      clean === 'usr_admin_1'
+      clean === 'usr_admin_master'
     );
   }
 

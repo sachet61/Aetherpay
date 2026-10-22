@@ -2,7 +2,6 @@
 // Handles password hashing, credentials storage, session cookies, expiration, and inactivity timeouts
 
 import { UserProfile, UserRole } from '../types';
-import { INITIAL_USERS } from './seedData';
 
 export const PREDEFINED_ADMINS = [
   'blithesweeps@gmail.com',
@@ -61,50 +60,7 @@ function sha256Hex(str: string): string {
 const DEFAULT_SALT = 'aetherpay_prod_salt_2026';
 
 // Seed credentials with production-compliant passwords
-export const SEED_CREDENTIALS: Record<string, { email: string; pass: string; role: UserRole; name: string }> = {
-  admin: {
-    email: 'admin@aetherpay.com',
-    pass: 'Admin@123456',
-    role: 'admin',
-    name: 'Dev Admin',
-  },
-  sachet: {
-    email: 'sachet61@gmail.com',
-    pass: 'Player@123456',
-    role: 'customer',
-    name: 'Sachet Basukala',
-  },
-  alex: {
-    email: 'alex.cross@aetherpay.com',
-    pass: 'Admin@123456',
-    role: 'admin',
-    name: 'Alexander Cross (Lead Admin)',
-  },
-  agent: {
-    email: 'sarah.lin@aetherpay.com',
-    pass: 'Agent@123456',
-    role: 'agent',
-    name: 'Sarah Lin (Care Specialist)',
-  },
-  marcus: {
-    email: 'marcus.vance@example.com',
-    pass: 'Player@123456',
-    role: 'customer',
-    name: 'Marcus Vance (Customer)',
-  },
-  elena: {
-    email: 'elena.rostova@example.com',
-    pass: 'Player@123456',
-    role: 'customer',
-    name: 'Elena Rostova (VIP Customer)',
-  },
-  devlin: {
-    email: 'devlin.drake@example.com',
-    pass: 'Player@123456',
-    role: 'customer',
-    name: 'Devlin Drake (Customer)',
-  },
-};
+export const SEED_CREDENTIALS: Record<string, { email: string; pass: string; role: UserRole; name: string }> = {};
 
 class AuthSessionService {
   private credentials: Record<string, StoredCredential> = {};
@@ -123,28 +79,6 @@ class AuthSessionService {
       }
     } catch {
       this.credentials = {};
-    }
-
-    // Populate default seed accounts if not already present
-    let dirty = false;
-    for (const [_, cred] of Object.entries(SEED_CREDENTIALS)) {
-      const emailLower = cred.email.toLowerCase();
-      if (!this.credentials[emailLower]) {
-        const matchingUser = INITIAL_USERS.find((u) => u.email.toLowerCase() === emailLower);
-        this.credentials[emailLower] = {
-          email: emailLower,
-          passwordHash: this.hashPassword(cred.pass, DEFAULT_SALT),
-          salt: DEFAULT_SALT,
-          userId: matchingUser ? matchingUser.id : `usr_${cred.role}_${Date.now()}`,
-          failedAttempts: 0,
-          lockedUntil: null,
-        };
-        dirty = true;
-      }
-    }
-
-    if (dirty) {
-      this.saveCredentials();
     }
   }
 
@@ -532,7 +466,7 @@ class AuthSessionService {
   // Check if an email is registered
   public hasAccount(emailInput: string): boolean {
     const email = emailInput.trim().toLowerCase();
-    return !!this.credentials[email] || Object.values(SEED_CREDENTIALS).some(s => s.email.toLowerCase() === email);
+    return !!this.credentials[email];
   }
 
   // Return time until inactivity timeout in milliseconds

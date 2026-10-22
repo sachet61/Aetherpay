@@ -92,15 +92,6 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     return () => window.removeEventListener('supabase_password_recovery', handleRecovery);
   }, []);
 
-  // Live cashouts feed entries
-  const recentCashouts = [
-    { name: 'Marcus V.', amount: 850, game: 'Fire Kirin', method: 'CashApp', time: '2m ago' },
-    { name: 'Elena R.', amount: 1420, game: 'Milky Way', method: 'Crypto', time: '5m ago' },
-    { name: 'Devlin D.', amount: 500, game: 'Orion Stars', method: 'Chime', time: '9m ago' },
-    { name: 'Chloe B.', amount: 2150, game: 'GameVault', method: 'CashApp', time: '14m ago' },
-    { name: 'Jason K.', amount: 960, game: 'Juwa', method: 'Crypto', time: '21m ago' },
-    { name: 'Sophia M.', amount: 620, game: 'Ultra Panda', method: 'Payment Link', time: '28m ago' },
-  ];
 
   // When visitor clicks "Play Now" on any game card
   const handleSelectGameToPlay = (game: GameCatalogItem) => {

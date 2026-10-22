@@ -1,17 +1,20 @@
-# Revised Implementation Plan - Adaptive Navbar Horizontal Overflow Handling
+# Implementation Plan - Complete Removal of Demo/Seed Data for Production
 
 ## User Request & Context
-- **User Request**: Avoid rigid fixed screen-size breakpoints if possible. Instead, handle horizontal overflow adaptively so that nav items flow, scroll, or collapse cleanly when space is tight regardless of device size.
-- **Goal**: Make `TopNavbar.tsx` resilient against horizontal crowding by implementing adaptive spacing (`shrink-0`, `min-w-0`, truncation), smooth horizontal scroll for nav links when space is constrained, and keeping controls accessible.
+- **User Request**: Remove all demo and seeded data (including fake seed accounts like `marcus.vance@example.com`, `elena.rostova@example.com`, etc.) that cause email availability/authentication conflicts with Supabase Auth. Rely 100% on Supabase Auth for production.
+- **Goal**: Cleanly strip out all mock seed users, mock wallets, mock transactions, mock support tickets, and fallback seed credentials from `seedData.ts` and `authSessionService.ts`.
 
 ## Proposed Changes
 
-### 1. `src/components/layout/TopNavbar.tsx`
-- Refactor the navigation and header elements to prevent rigid clipping:
-  - Add `overflow-x-auto scrollbar-none` or flex-wrap optimization to the nav links container so that on intermediate screens (tablets/smaller desktops), items can be scrolled or condensed smoothly.
-  - Ensure badge counters and text labels (`truncate`) never push layouts out of bounds.
-  - Provide a compact "More" / drawer trigger if horizontal width is heavily constrained.
+### 1. `src/services/seedData.ts`
+- Empty out `INITIAL_USERS`, `INITIAL_WALLETS`, `INITIAL_TRANSACTIONS`, `INITIAL_TOPUPS`, `INITIAL_WITHDRAWALS`, `INITIAL_GAME_ACCOUNTS`, `INITIAL_CONVERSATIONS`, `INITIAL_MESSAGES`, `INITIAL_NOTIFICATIONS`, and `INITIAL_AUDIT_LOGS`.
+- Keep `INITIAL_CONFIG` and `INITIAL_GAME_CATALOG` (master game catalog is needed for players to view available games).
+
+### 2. `src/services/authSessionService.ts`
+- Empty out `SEED_CREDENTIALS` (`{}`).
+- Remove auto-population of seed credentials in `initCredentials()`.
+- Update `hasAccount()` to check only actual registered credentials or Supabase Auth.
 
 ## Verification Plan
 - **Build Check**: Run `compile_applet` to verify compilation and TypeScript types.
-- **Overflow Testing**: Verify responsive resizing across desktop, tablet, and mobile.
+- **Auth Verification**: Verify that sign up and password reset/recovery interact directly with Supabase Auth without interference from stale seed accounts.
