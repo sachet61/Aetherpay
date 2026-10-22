@@ -103,7 +103,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
       {!isSuccess ? (
         <form onSubmit={handleSubmit} className="space-y-4">
           <p className="text-xs text-slate-300 leading-relaxed">
-            Enter your account email. Supabase Auth will dispatch a 6-digit recovery security code via Brevo directly to your inbox.
+            Enter your account email for security code. Please check your spam folder if not found in your inbox.
           </p>
 
           <div className="space-y-1.5">
@@ -174,7 +174,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
 
           <div className="flex items-center gap-2 p-3 rounded-xl bg-[#0A0F1D] border border-slate-800/80 text-[11px] text-slate-400">
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span>The link and recovery code are securely authenticated via Supabase and expire automatically.</span>
+            <span>The recovery code are securely authenticated and  will expire automatically.</span>
           </div>
 
           <div className="flex flex-col sm:flex-row gap-2 pt-1">

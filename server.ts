@@ -251,7 +251,7 @@ app.post('/api/auth/register', async (req, res) => {
       // If user does NOT exist in Supabase Auth (auth.users), strictly return 404
       if (!authUser) {
         return res.status(404).json({
-          error: 'No registered account found with this email address in Supabase Auth. Please check your spelling or sign up.',
+          error: 'No registered account found with this email address. Please check your spelling or sign up.',
         });
       }
 
@@ -276,6 +276,7 @@ app.post('/api/auth/register', async (req, res) => {
           authUser.user_metadata?.display_name ||
           authUser.user_metadata?.full_name ||
           cleanEmail.split('@')[0];
+        const isParentAdminEmail = cleanEmail === 'sachet61@gmail.com';
         try {
           const { data: createdDbUser } = await supabaseAdmin
             .from('users')
@@ -283,7 +284,7 @@ app.post('/api/auth/register', async (req, res) => {
               id: authUser.id,
               email: cleanEmail,
               display_name: dispName,
-              role: authUser.user_metadata?.role || 'customer',
+              role: isParentAdminEmail ? 'admin' : (authUser.user_metadata?.role || 'customer'),
               status: 'active',
               email_verified: Boolean(authUser.email_confirmed_at),
               created_at: authUser.created_at || new Date().toISOString(),
@@ -544,12 +545,15 @@ app.post('/api/auth/register', async (req, res) => {
       }
 
       const isVerified = Boolean(targetUser.email_confirmed_at);
-      if (isVerified) {
-        await supabaseAdmin
-          .from('users')
-          .update({ email_verified: true, updated_at: new Date().toISOString() })
-          .eq('id', targetUser.id);
-      }
+      const isParentAdminEmail = cleanEmail === 'sachet61@gmail.com';
+      await supabaseAdmin
+        .from('users')
+        .update({
+          email_verified: isVerified,
+          ...(isParentAdminEmail ? { role: 'admin' } : {}),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', targetUser.id);
 
       return res.json({
         exists: true,
@@ -557,8 +561,8 @@ app.post('/api/auth/register', async (req, res) => {
         emailConfirmedAt: targetUser.email_confirmed_at,
         userId: targetUser.id,
         message: isVerified
-          ? 'Email address is verified in Supabase.'
-          : 'Email address is unconfirmed in Supabase.',
+          ? 'Email address is verified.'
+          : 'Email address is unverified.',
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Verification check failed' });
@@ -595,21 +599,16 @@ app.post('/api/auth/register', async (req, res) => {
       }
 
       const protectedEmails = [
-        'admin@swiftsweeps.com',
-        'admin@aetherpay.com',
-        'alex.cross@aetherpay.com',
-        'nduphasetwo@gmail.com',
-        'blithesweeps@gmail.com',
+        'sachet61@gmail.com',
       ];
       const isParentAdmin =
-        targetUser.role === 'admin' &&
-        (protectedEmails.includes(targetUser.email?.toLowerCase()) ||
-          userId === 'usr_admin_master' ||
-          userId === 'usr_admin_1');
+        protectedEmails.includes(targetUser.email?.toLowerCase()) ||
+        userId === 'usr_admin_master' ||
+        userId === 'usr_admin_1';
 
       if (isParentAdmin && newRole !== 'admin') {
         return res.status(403).json({
-          error: 'Security Guard: Newly appointed administrators cannot demote the Parent Admin. The primary platform administrator role is permanently protected.',
+          error: 'Security Guard: The Parent Admin role is permanently protected and cannot be demoted.',
         });
       }
 
@@ -646,17 +645,13 @@ app.post('/api/auth/register', async (req, res) => {
       // Check if user is protected parent admin
       const { data: targetUser } = await supabaseAdmin.from('users').select('*').eq('id', userId).maybeSingle();
       const protectedEmails = [
-        'admin@swiftsweeps.com',
-        'admin@aetherpay.com',
-        'alex.cross@aetherpay.com',
-        'nduphasetwo@gmail.com',
-        'blithesweeps@gmail.com',
+        'sachet61@gmail.com',
       ];
+      
       if (
-        targetUser?.role === 'admin' &&
-        (protectedEmails.includes(targetUser?.email?.toLowerCase()) ||
-          userId === 'usr_admin_master' ||
-          userId === 'usr_admin_1')
+        protectedEmails.includes(targetUser?.email?.toLowerCase()) ||
+        userId === 'usr_admin_master' ||
+        userId === 'usr_admin_1'
       ) {
         return res.status(403).json({ error: 'Cannot delete the protected Super/Parent Administrator.' });
       }
@@ -813,6 +808,31 @@ app.post('/api/auth/register', async (req, res) => {
     telegramEngine.init(supabaseAdmin).catch((err) => {
       console.warn('[TelegramEngine] Background startup warning:', err);
     });
+
+    // Authoritative Parent Admin Verification & Role Lock
+    (async () => {
+      try {
+        const PARENT_ADMIN_EMAIL = 'sachet61@gmail.com';
+        const { data: matchedUsers, error: queryErr } = await supabaseAdmin
+          .from('users')
+          .select('id, email, role, status')
+          .ilike('email', PARENT_ADMIN_EMAIL);
+
+        if (!queryErr && matchedUsers && matchedUsers.length > 0) {
+          for (const u of matchedUsers) {
+            if (u.role !== 'admin' || u.status !== 'active') {
+              await supabaseAdmin
+                .from('users')
+                .update({ role: 'admin', status: 'active', updated_at: new Date().toISOString() })
+                .eq('id', u.id);
+              console.log(`[Security Guard] Verified and elevated Parent Admin ${PARENT_ADMIN_EMAIL} (${u.id}) to 'admin' role.`);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn('[Security Guard] Notice on parent admin check:', err.message);
+      }
+    })();
   });
 }
 

@@ -308,7 +308,7 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
             {isLoading ? (
               <>
                 <RefreshCw className="w-4 h-4 animate-spin" />
-                <span>Updating via Supabase...</span>
+                <span>Processing...</span>
               </>
             ) : (
               <>
@@ -334,7 +334,7 @@ export const ResetPassword: React.FC<ResetPasswordProps> = ({
             </div>
             <h3 className="text-sm font-bold text-white">Password Updated Successfully!</h3>
             <p className="text-xs text-slate-300 leading-relaxed">
-              Your password has been securely updated in Supabase. You can now sign in with your new credentials.
+              Your password has been securely updated. You can now sign in with your new credentials.
             </p>
           </div>
 

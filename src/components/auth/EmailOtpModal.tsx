@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { supabaseAuthService } from '../../services/supabaseAuthService';
 import { UserProfile } from '../../types';
 import {
@@ -300,12 +301,22 @@ export const EmailOtpModal: React.FC<EmailOtpModalProps> = ({
     );
   }
 
-  // Modal Backdrop
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="w-full max-w-md">
+  // Modal Backdrop rendered at document root via React Portal to prevent clipping
+  const modalNode = (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-[99999] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200 overflow-y-auto"
+    >
+      <div className="w-full max-w-md my-auto">
         {content}
       </div>
     </div>
   );
+
+  if (typeof document !== 'undefined') {
+    return createPortal(modalNode, document.body);
+  }
+
+  return modalNode;
 };

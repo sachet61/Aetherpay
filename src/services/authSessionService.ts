@@ -4,9 +4,7 @@
 import { UserProfile, UserRole } from '../types';
 
 export const PREDEFINED_ADMINS = [
-  'blithesweeps@gmail.com',
-  'admin@aetherpay.com',
-  'support@aetherpay.com',
+  'sachet61@gmail.com',
 ];
 
 export interface UserSession {

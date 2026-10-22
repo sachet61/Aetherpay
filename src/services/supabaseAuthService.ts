@@ -66,6 +66,7 @@ class SupabaseAuthService {
           if (!cleanEmail) return;
 
           const isConfirmed = Boolean(user.email_confirmed_at);
+          const isParentAdminEmail = cleanEmail === 'sachet61@gmail.com';
           let userProfile =
             dataService.getUserById(user.id) ||
             dataService.getUsers().find((u) => u.email.toLowerCase() === cleanEmail);
@@ -79,12 +80,13 @@ class SupabaseAuthService {
                 user.user_metadata?.display_name ||
                 user.user_metadata?.full_name ||
                 cleanEmail.split('@')[0],
-              role: (user.user_metadata?.role as UserRole) || 'customer',
+              role: isParentAdminEmail ? 'admin' : ((user.user_metadata?.role as UserRole) || 'customer'),
               status: 'active',
               emailVerified: isConfirmed,
               referralCode: `REF_${user.id.slice(-5).toUpperCase()}`,
               createdAt: user.created_at || nowIso,
               lastLoginAt: nowIso,
+              isParentAdmin: isParentAdminEmail ? true : undefined,
             };
             await this.syncProfileAndWallet(userProfile);
           } else {
@@ -96,6 +98,10 @@ class SupabaseAuthService {
             }
             // Update emailVerified dynamically from active Supabase session
             userProfile.emailVerified = isConfirmed;
+            if (isParentAdminEmail && userProfile.role !== 'admin') {
+              userProfile.role = 'admin';
+              userProfile.isParentAdmin = true;
+            }
             dataService.registerUser(userProfile);
           }
 
@@ -116,6 +122,7 @@ class SupabaseAuthService {
             const cleanEmail = (session.user.email || '').trim().toLowerCase();
             const isConfirmed = Boolean(session.user.email_confirmed_at);
             if (cleanEmail) {
+              const isParentAdminEmail = cleanEmail === 'sachet61@gmail.com';
               let userProfile =
                 dataService.getUserById(session.user.id) ||
                 dataService.getUsers().find((u) => u.email.toLowerCase() === cleanEmail);
@@ -126,6 +133,10 @@ class SupabaseAuthService {
                   dataService.migrateUserEntityIds(oldId, session.user.id);
                 }
                 userProfile.emailVerified = isConfirmed;
+                if (isParentAdminEmail && userProfile.role !== 'admin') {
+                  userProfile.role = 'admin';
+                  userProfile.isParentAdmin = true;
+                }
                 dataService.registerUser(userProfile);
                 authSessionService.createSessionForUser(
                   userProfile.id,
@@ -161,7 +172,8 @@ class SupabaseAuthService {
     referralCode?: string;
   }): Promise<SupabaseAuthResult> {
     const cleanEmail = params.email.trim().toLowerCase();
-    const role: UserRole = params.role || 'customer';
+    const isParentAdminEmail = cleanEmail === 'sachet61@gmail.com';
+    const role: UserRole = isParentAdminEmail ? 'admin' : (params.role || 'customer');
     const nowIso = new Date().toISOString();
     const origin = typeof window !== 'undefined' ? window.location.origin : '';
 
@@ -286,6 +298,7 @@ class SupabaseAuthService {
       }
 
       const isConfirmed = Boolean(data.user.email_confirmed_at);
+      const isParentAdminEmail = cleanEmail === 'sachet61@gmail.com';
       let userProfile =
         dataService.getUserById(data.user.id) ||
         dataService.getUsers().find((u) => u.email.toLowerCase() === cleanEmail);
@@ -296,12 +309,13 @@ class SupabaseAuthService {
           id: data.user.id,
           email: cleanEmail,
           displayName: data.user.user_metadata?.display_name || cleanEmail.split('@')[0],
-          role: (data.user.user_metadata?.role as UserRole) || 'customer',
+          role: isParentAdminEmail ? 'admin' : ((data.user.user_metadata?.role as UserRole) || 'customer'),
           status: 'active',
           emailVerified: isConfirmed,
           referralCode: `REF_${data.user.id.slice(-5).toUpperCase()}`,
           createdAt: data.user.created_at || nowIso,
           lastLoginAt: nowIso,
+          isParentAdmin: isParentAdminEmail ? true : undefined,
         };
         await this.syncProfileAndWallet(userProfile);
       } else {
@@ -311,12 +325,20 @@ class SupabaseAuthService {
           dataService.migrateUserEntityIds(oldId, data.user.id);
         }
         userProfile.emailVerified = isConfirmed;
+        if (isParentAdminEmail && userProfile.role !== 'admin') {
+          userProfile.role = 'admin';
+          userProfile.isParentAdmin = true;
+        }
         dataService.registerUser(userProfile);
         if (isConfirmed && supabase && isSupabaseConfigured()) {
           Promise.resolve(
             supabase
               .from('users')
-              .update({ email_verified: true, updated_at: new Date().toISOString() })
+              .update({
+                email_verified: true,
+                ...(isParentAdminEmail ? { role: 'admin' } : {}),
+                updated_at: new Date().toISOString(),
+              })
               .eq('id', userProfile.id)
           ).catch(() => {});
         }
