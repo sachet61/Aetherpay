@@ -381,16 +381,16 @@ class DataService {
 
       if (isAdmin) {
         // Staff/Admin session: bounded administrative queue queries
-        const [appConfigRes, cashoutsRes, catRes, topupsRes, withdrawalsRes, walletsRes, convsRes, usersRes] =
+        const [appConfigRes, cashoutsRes, catRes, topupsRes, withdrawalsRes, walletsRes, convsRes, usersResp] =
           await Promise.all([
             appConfigPromise,
             cashoutsPromise,
             catPromise,
             supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(25),
             supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(25),
-            supabase.from('wallets').select('*').limit(25),
+            supabase.from('wallets').select('*').limit(50),
             supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
-            supabase.from('users').select('*').limit(25),
+            fetch('/api/admin/users').then((r) => r.json()).catch(() => ({ success: false, users: [] })),
           ]);
 
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
@@ -400,7 +400,9 @@ class DataService {
         if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
         if (walletsRes.data) this.applyWalletRows(walletsRes.data);
         if (convsRes.data) this.applyConversationRows(convsRes.data, true);
-        if (usersRes.data) this.applyUserRows(usersRes.data);
+        if (usersResp?.success && Array.isArray(usersResp.users)) {
+          this.applyUserRows(usersResp.users);
+        }
       } else if (currentUserId) {
         // Customer session: strictly scoped to CURRENT user only (no global table downloads)
         const [appConfigRes, cashoutsRes, catRes, walletRes, topupsRes, withdrawalsRes, gameAccsRes, convRes] =
@@ -491,10 +493,11 @@ class DataService {
           changed = true;
         }
       } else if (isAdmin) {
-        // Admin: only refresh recent topups and withdrawals queue
-        const [topupsRes, withdrawalsRes] = await Promise.all([
+        // Admin: refresh recent topups, withdrawals queue, and full users directory
+        const [topupsRes, withdrawalsRes, usersResp] = await Promise.all([
           supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(15),
           supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(15),
+          fetch('/api/admin/users').then((r) => r.json()).catch(() => ({ success: false, users: [] })),
         ]);
 
         if (topupsRes.data && topupsRes.data.length > 0) {
@@ -503,6 +506,10 @@ class DataService {
         }
         if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
           this.applyWithdrawalRows(withdrawalsRes.data, false);
+          changed = true;
+        }
+        if (usersResp?.success && Array.isArray(usersResp.users) && usersResp.users.length > 0) {
+          this.applyUserRows(usersResp.users);
           changed = true;
         }
       }

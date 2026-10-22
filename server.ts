@@ -644,6 +644,25 @@ app.post('/api/auth/register', async (req, res) => {
     }
   });
 
+  // Get all users for admin directory (bypassing RLS)
+  app.get('/api/admin/users', async (req, res) => {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from('users')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (error) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      return res.json({ success: true, users: data || [] });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to fetch users directory' });
+    }
+  });
+
   // Delete user completely from all tables and Supabase Auth
   app.delete('/api/admin/users/:userId', async (req, res) => {
     try {
