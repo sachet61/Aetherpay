@@ -12,6 +12,11 @@ import {
   HelpCircle,
   Radio,
   ExternalLink,
+  Wrench,
+  Check,
+  X,
+  Copy,
+  Info,
 } from 'lucide-react';
 
 export const TelegramBotConfigCard: React.FC = () => {
@@ -24,8 +29,13 @@ export const TelegramBotConfigCard: React.FC = () => {
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
-  const [showGuide, setShowGuide] = useState(false);
+  const [feedback, setFeedback] = useState<{
+    type: 'success' | 'error' | 'info';
+    text: string;
+    suggestedFix?: string;
+  } | null>(null);
+  const [showGuideModal, setShowGuideModal] = useState(false);
+  const [copiedText, setCopiedText] = useState<string | null>(null);
 
   const refreshStatus = async () => {
     setIsLoadingStatus(true);
@@ -45,6 +55,17 @@ export const TelegramBotConfigCard: React.FC = () => {
     const interval = setInterval(refreshStatus, 8000);
     return () => clearInterval(interval);
   }, []);
+
+  const handleCopy = (text: string, label: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedText(label);
+    setTimeout(() => setCopiedText(null), 2000);
+  };
+
+  // Check if current channel ID is missing the -100 prefix for supergroups
+  const cleanId = channelId.trim();
+  const isMissingSupergroupPrefix = cleanId.startsWith('-') && !cleanId.startsWith('-100');
+  const suggestedSupergroupId = isMissingSupergroupPrefix ? `-100${cleanId.replace(/^-/, '')}` : null;
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -98,9 +119,17 @@ export const TelegramBotConfigCard: React.FC = () => {
     try {
       const res = await telegramService.testConnection(effectiveToken, effectiveChannel);
       if (res.success) {
+        if ((res as any).suggestedChannelId) {
+          setChannelId((res as any).suggestedChannelId);
+        }
         setFeedback({ type: 'success', text: res.message });
       } else {
-        setFeedback({ type: 'error', text: res.message });
+        const suggestedFix = (res as any).suggestedChannelId || (isMissingSupergroupPrefix ? suggestedSupergroupId : undefined);
+        setFeedback({
+          type: 'error',
+          text: res.message,
+          suggestedFix: suggestedFix || undefined,
+        });
       }
     } catch (err: any) {
       setFeedback({ type: 'error', text: err.message || 'Test failed.' });
@@ -142,37 +171,13 @@ export const TelegramBotConfigCard: React.FC = () => {
 
         <button
           type="button"
-          onClick={() => setShowGuide(!showGuide)}
-          className="text-xs text-sky-400 hover:text-sky-300 font-semibold flex items-center gap-1.5 transition-colors self-start sm:self-auto"
+          onClick={() => setShowGuideModal(true)}
+          className="text-xs text-sky-400 hover:text-sky-300 font-semibold flex items-center gap-1.5 transition-colors self-start sm:self-auto bg-sky-500/10 hover:bg-sky-500/20 px-3 py-1.5 rounded-lg border border-sky-500/30 shadow-sm"
         >
           <HelpCircle className="w-4 h-4" />
-          <span>{showGuide ? 'Hide Instructions' : 'Bot Setup Guide'}</span>
+          <span>Bot Setup Guide</span>
         </button>
       </div>
-
-      {/* Guide Box */}
-      {showGuide && (
-        <div className="p-4 rounded-xl bg-slate-950/90 border border-slate-800 text-xs space-y-2.5 text-slate-300">
-          <div className="font-bold text-white flex items-center gap-2">
-            <Radio className="w-4 h-4 text-sky-400" />
-            <span>3-Step Quick Telegram Bot Setup:</span>
-          </div>
-          <ol className="list-decimal list-inside space-y-1.5 pl-1 leading-relaxed text-slate-300">
-            <li>
-              Open Telegram and search for <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="text-sky-400 underline font-semibold">@BotFather</a>. Send <code className="text-amber-300 bg-slate-900 px-1 py-0.5 rounded">/newbot</code>, choose a name and username, then copy your HTTP API token.
-            </li>
-            <li>
-              Create a private group or channel for your support staff. Add your bot into the group and grant it <strong>Administrator</strong> privileges.
-            </li>
-            <li>
-              Send a message in that group or channel. Get the Chat ID (e.g. <code className="text-amber-300 bg-slate-900 px-1 py-0.5 rounded">-100XXXXXXXXXX</code> or <code className="text-amber-300 bg-slate-900 px-1 py-0.5 rounded">@mychannel</code>) and paste below.
-            </li>
-          </ol>
-          <div className="text-[11px] text-sky-300/80 bg-sky-950/40 p-2.5 rounded-lg border border-sky-800/40">
-            💡 <strong>Two-Way Magic:</strong> Whenever a player sends a message or submits top-up proof, an alert arrives in your Telegram group. Simply <em>reply</em> to that Telegram notification message, and your reply appears right on the player's screen!
-          </div>
-        </div>
-      )}
 
       {/* Real-time Engine Metrics */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
@@ -240,24 +245,45 @@ export const TelegramBotConfigCard: React.FC = () => {
 
           {/* Target Channel ID */}
           <div className="space-y-1.5">
-            <label className="text-slate-300 font-semibold flex items-center justify-between">
-              <span>Support Channel / Chat ID</span>
+            <div className="flex items-center justify-between">
+              <label className="text-slate-300 font-semibold flex items-center gap-1">
+                <span>Support Channel / Chat ID</span>
+              </label>
               <span className="text-[10px] text-slate-500 font-mono">Channel ID or @handle</span>
-            </label>
+            </div>
             <input
               type="text"
               value={channelId}
               onChange={(e) => setChannelId(e.target.value)}
-              placeholder="e.g. -1002345678901 or @swiftsweepssupport"
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 font-mono text-white text-xs placeholder-slate-600 focus:outline-none focus:border-sky-500"
+              placeholder="e.g. -1004339845768 or @swiftsweeps_support"
+              className={`w-full bg-slate-950 border rounded-xl px-3.5 py-2.5 font-mono text-white text-xs placeholder-slate-600 focus:outline-none ${
+                isMissingSupergroupPrefix ? 'border-amber-500/80 focus:border-amber-400' : 'border-slate-800 focus:border-sky-500'
+              }`}
             />
+
+            {/* Quick-Fix Supergroup Prefix Helper */}
+            {suggestedSupergroupId && (
+              <div className="flex items-center justify-between text-[11px] p-2 rounded-lg bg-amber-950/40 border border-amber-600/40 text-amber-300 mt-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Wrench className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+                  <span>Channel format hint: Telegram groups/channels require <strong>-100</strong> prefix.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setChannelId(suggestedSupergroupId)}
+                  className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/50 text-[10px] font-bold font-mono transition"
+                >
+                  Auto-Fix to {suggestedSupergroupId}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Feedback message */}
+        {/* Feedback message & Troubleshooting Box */}
         {feedback && (
           <div
-            className={`p-3 rounded-xl text-xs flex items-center gap-2.5 ${
+            className={`p-3.5 rounded-xl text-xs space-y-2 ${
               feedback.type === 'success'
                 ? 'bg-emerald-950/80 border border-emerald-700 text-emerald-200'
                 : feedback.type === 'error'
@@ -265,14 +291,56 @@ export const TelegramBotConfigCard: React.FC = () => {
                 : 'bg-sky-950/80 border border-sky-700 text-sky-200'
             }`}
           >
-            {feedback.type === 'success' ? (
-              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
-            ) : feedback.type === 'error' ? (
-              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-            ) : (
-              <RefreshCw className="w-4 h-4 shrink-0 text-sky-400 animate-spin" />
+            <div className="flex items-start gap-2.5">
+              {feedback.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400 mt-0.5" />
+              ) : feedback.type === 'error' ? (
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+              ) : (
+                <RefreshCw className="w-4 h-4 shrink-0 text-sky-400 animate-spin mt-0.5" />
+              )}
+              <div className="flex-1 space-y-1">
+                <span className="font-medium leading-relaxed block">{feedback.text}</span>
+
+                {/* If test returned a suggested auto-fix */}
+                {feedback.suggestedFix && (
+                  <div className="pt-1 flex items-center gap-2">
+                    <span className="text-[11px] text-amber-300">Recommended correction:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setChannelId(feedback.suggestedFix!);
+                        setFeedback(null);
+                      }}
+                      className="px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-[10px] font-bold font-mono"
+                    >
+                      Update to {feedback.suggestedFix}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Actionable Troubleshooting Guide when chat not found occurs */}
+            {feedback.type === 'error' && feedback.text.includes('chat not found') && (
+              <div className="mt-2 pt-2 border-t border-rose-900/60 text-[11px] text-rose-200/90 space-y-1.5 pl-6">
+                <div className="font-bold text-white flex items-center gap-1">
+                  <Info className="w-3.5 h-3.5 text-amber-400" />
+                  <span>How to fix "chat not found":</span>
+                </div>
+                <ul className="list-disc list-inside space-y-1 pl-1 text-slate-300">
+                  <li>
+                    <strong>Add the bot as an Administrator:</strong> Open your Telegram group or channel, tap Group Settings &gt; Administrators &gt; Add Administrator, and select your bot.
+                  </li>
+                  <li>
+                    <strong>Check the Supergroup / Channel prefix:</strong> If your chat ID looks like <code className="text-amber-300 bg-slate-900 px-1 py-0.5 rounded font-mono">-4339845768</code>, it must be entered with <code className="text-amber-300 bg-slate-900 px-1 py-0.5 rounded font-mono">-100</code> prefix: <code className="text-amber-300 bg-slate-900 px-1 py-0.5 rounded font-mono">-1004339845768</code>.
+                  </li>
+                  <li>
+                    <strong>Send a test message:</strong> Post at least one message inside the group so Telegram registers the chat before clicking Test Connection.
+                  </li>
+                </ul>
+              </div>
             )}
-            <span>{feedback.text}</span>
           </div>
         )}
 
@@ -295,7 +363,7 @@ export const TelegramBotConfigCard: React.FC = () => {
               type="button"
               disabled={isTesting}
               onClick={handleTest}
-              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-colors disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
             >
               {isTesting && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
               <span>Test Bot Connection</span>
@@ -304,7 +372,7 @@ export const TelegramBotConfigCard: React.FC = () => {
             <button
               type="submit"
               disabled={isSaving}
-              className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold transition-all shadow-md shadow-sky-600/25 flex items-center gap-1.5 disabled:opacity-50"
+              className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold transition-all shadow-md shadow-sky-600/25 flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
             >
               {isSaving && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
               <span>Save &amp; Start 24/7 Engine</span>
@@ -312,6 +380,110 @@ export const TelegramBotConfigCard: React.FC = () => {
           </div>
         </div>
       </form>
+
+      {/* Step-by-Step Telegram Channel Setup Guide Modal */}
+      {showGuideModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm"
+            onClick={() => setShowGuideModal(false)}
+          />
+          <div className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl z-10 space-y-4 text-xs text-slate-300 max-h-[90vh] overflow-y-auto animate-in zoom-in-95 duration-150">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-sky-500/10 text-sky-400 flex items-center justify-center font-bold">
+                  <Send className="w-4 h-4 -rotate-12" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Telegram Support Bot Setup Guide</h3>
+                  <p className="text-[11px] text-slate-400">Step-by-step instructions to connect your bot &amp; channel</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowGuideModal(false)}
+                className="w-7 h-7 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Steps Container */}
+            <div className="space-y-4">
+              {/* Step 1 */}
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
+                <div className="flex items-center gap-2 font-bold text-white">
+                  <span className="w-5 h-5 rounded-full bg-sky-500/20 text-sky-400 flex items-center justify-center text-[11px]">1</span>
+                  <span>Create Bot with @BotFather</span>
+                </div>
+                <p className="text-slate-400 leading-relaxed text-[11px] pl-7">
+                  Open Telegram and search for <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="text-sky-400 underline font-semibold">@BotFather</a>. Send <code className="text-amber-300 bg-slate-900 px-1 py-0.5 rounded font-mono">/newbot</code>, choose a display name and username ending in 'bot' (e.g. <code>swiftsweeps_support_bot</code>).
+                </p>
+                <p className="text-slate-400 leading-relaxed text-[11px] pl-7">
+                  BotFather will reply with your HTTP API Token. Copy and paste it into the <strong>Telegram Bot API Token</strong> field.
+                </p>
+              </div>
+
+              {/* Step 2 */}
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
+                <div className="flex items-center gap-2 font-bold text-white">
+                  <span className="w-5 h-5 rounded-full bg-sky-500/20 text-sky-400 flex items-center justify-center text-[11px]">2</span>
+                  <span>Create Support Group &amp; Add Bot as Administrator</span>
+                </div>
+                <p className="text-slate-400 leading-relaxed text-[11px] pl-7">
+                  Create a new private Telegram Group or Channel where your support agents will work.
+                </p>
+                <div className="pl-7 pt-1 text-[11px] text-amber-200/90 bg-amber-950/30 p-2.5 rounded-lg border border-amber-800/40">
+                  ⚠️ <strong>Critical Step:</strong> Add your bot to the group and promote it to <strong>Administrator</strong> with permissions to <em>Send Messages</em>. If the bot is not an administrator, Telegram blocks automated notifications!
+                </div>
+              </div>
+
+              {/* Step 3 */}
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
+                <div className="flex items-center gap-2 font-bold text-white">
+                  <span className="w-5 h-5 rounded-full bg-sky-500/20 text-sky-400 flex items-center justify-center text-[11px]">3</span>
+                  <span>Get the Exact Chat / Channel ID</span>
+                </div>
+                <div className="pl-7 space-y-2 text-[11px] text-slate-400">
+                  <p>
+                    • <strong>Public Channel/Group:</strong> You can simply use its public username, e.g. <code className="text-amber-300 font-mono">@yourchannelname</code>.
+                  </p>
+                  <p>
+                    • <strong>Private Channel/Group:</strong> Add <a href="https://t.me/RawDataBot" target="_blank" rel="noreferrer" className="text-sky-400 underline">@RawDataBot</a> or <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer" className="text-sky-400 underline">@userinfobot</a> to the group to inspect the chat ID.
+                  </p>
+                  <div className="bg-slate-900 p-2 rounded-lg border border-slate-800 text-[11px] font-mono text-slate-300">
+                    <span className="text-amber-300 font-bold">Important:</span> Telegram supergroups and channels always have a 13-14 digit ID starting with <strong>-100</strong>, e.g. <span className="text-emerald-400">-1004339845768</span>.
+                  </div>
+                </div>
+              </div>
+
+              {/* Step 4: Two-Way Chat */}
+              <div className="p-3.5 rounded-xl bg-sky-950/30 border border-sky-800/40 space-y-1 text-slate-300">
+                <div className="font-bold text-white flex items-center gap-1.5">
+                  <Radio className="w-4 h-4 text-sky-400" />
+                  <span>How Two-Way Support Works:</span>
+                </div>
+                <p className="text-[11px] text-slate-300/90 leading-relaxed pl-5">
+                  Whenever a customer asks a question or submits a deposit/cashout request, a notification arrives in your Telegram channel with ticket ID <code className="text-amber-300 font-mono">#conv_xxx</code>.
+                  Simply <strong>reply directly</strong> to that Telegram message to answer the customer right on their web chat screen!
+                </p>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="pt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowGuideModal(false)}
+                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition cursor-pointer"
+              >
+                Got It
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,18 +1,23 @@
-# Implementation Plan - Image Preloading & Client Caching
+# Implementation Plan - Telegram Bot Setup Guide & Error Troubleshooting UI
 
 ## Problem
-Images (game logos, badges, banners) are re-fetched or reloaded on tab transitions or page refreshes, causing slight layout re-renders and network overhead.
+When users configure the Telegram bot with an incorrect or unjoined chat ID (e.g. `-4339845768`), Telegram returns a "Bad Request: chat not found" error. The current UI shows a basic error banner, but lacks interactive step-by-step guidance on how to invite the bot as an administrator to the group/channel and obtain the correct numeric Chat ID.
 
 ## Solution
-Integrate a robust image preloader pool in `StartupSplash.tsx` that leverages JavaScript `Image` objects (`new Image()`) to preload all core game platform banners, logos, and UI assets during the cinematic startup splash screen sequence (0% to 100%). This populates the browser and client-side image cache immediately upon launch.
+1. Enhance the Telegram bot configuration panel (`AdminConfig.tsx` or `TelegramConfigModal`) to display clear troubleshooting instructions when "chat not found" or authorization errors occur.
+2. Add an interactive "Bot Setup Guide Modal" with step-by-step instructions on:
+   - Creating a bot via `@BotFather`.
+   - Adding the bot to a Telegram Group or Channel.
+   - Promoting the bot as an **Administrator** with message posting permissions.
+   - Retrieving the correct Channel/Chat ID (e.g. starting with `-100...`).
+3. Handle API connection errors gracefully with actionable troubleshooting steps.
 
 ## Proposed Changes
 
-### 1. `src/components/common/StartupSplash.tsx`
-- Add a preloader utility function and asset array containing paths to all platform and game images (`/src/images/Firekirin.png`, `/src/images/GameVault.png`, `/src/images/Juwa.png`, `/src/images/OrionStars.png`, `/src/images/PandaMaster.png`, `/src/images/MilkyWay.png`, `/src/images/Vblink.png`, `/src/images/UltraPanda.png`, `/src/images/RiverSweeps.png`, `/src/images/VegasSweeps.png`, `/src/images/VegasX.png`, `/src/images/Winstar.png`, `/src/images/CashMachine.png`, `/src/images/CasinoIgnite.jpeg`, `/src/images/CasinoRoyale.png`, `/src/images/Egame.png`, `/src/images/GamblingGalaxy.png`, `/src/images/Gameroom.png`, `/src/images/Mafia.png`, `/src/images/Yolo.png`, etc.).
-- Initiate preloading in `useEffect` as soon as the splash screen mounts.
-- Track preload progress or cache instances so images are stored in browser memory cache.
+### 1. `src/pages/admin/AdminConfig.tsx` (or Telegram Config Section)
+- Add a dedicated "Telegram Bot Setup Guide" modal triggered by clicking "Bot Setup Guide".
+- Provide clear, actionable error styling and quick-fix recommendations when Telegram returns error 400 ("chat not found").
 
 ## Verification Plan
-- Run `compile_applet` to ensure successful compilation.
-- Verify that opening the app triggers preloading during the splash screen and images load instantly from cache on subsequent navigation.
+- Run `compile_applet` to verify build success.
+- Test the Telegram setup guide modal and error handling UI.

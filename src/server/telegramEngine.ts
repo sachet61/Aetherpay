@@ -327,13 +327,26 @@ class TelegramEngine {
         payload.reply_to_message_id = replyToMessageId;
       }
 
-      const resp = await fetch(`https://api.telegram.org/bot${this.config.botToken}/sendMessage`, {
+      let resp = await fetch(`https://api.telegram.org/bot${this.config.botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
-      const data = await resp.json();
+      let data = await resp.json();
+
+      // Smart fallback: If chat not found and ID starts with single minus, retry with supergroup -100 prefix
+      const strId = String(chatId).trim();
+      if (!data.ok && data.description?.includes('chat not found') && strId.startsWith('-') && !strId.startsWith('-100')) {
+        payload.chat_id = `-100${strId.replace(/^-/, '')}`;
+        resp = await fetch(`https://api.telegram.org/bot${this.config.botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        data = await resp.json();
+      }
+
       if (!data.ok) {
         // Fallback without Markdown if markdown parsing failed
         payload.parse_mode = undefined;
@@ -352,7 +365,7 @@ class TelegramEngine {
     }
   }
 
-  public async testConnection(token: string, chatId: string): Promise<{ success: boolean; message: string }> {
+  public async testConnection(token: string, chatId: string): Promise<{ success: boolean; message: string; suggestedChannelId?: string }> {
     const cleanToken = token.trim() || this.config.botToken;
     const cleanChatId = chatId.trim() || this.config.channelId;
 
@@ -381,11 +394,38 @@ class TelegramEngine {
         }),
       });
 
-      const sendData = await sendRes.json();
+      let sendData = await sendRes.json();
+
+      // Smart Supergroup Auto-Retry: if chat not found and user entered -XXXXXXXXXX instead of -100XXXXXXXXXX
+      if (!sendData.ok && sendData.description?.includes('chat not found') && cleanChatId.startsWith('-') && !cleanChatId.startsWith('-100')) {
+        const supergroupId = `-100${cleanChatId.replace(/^-/, '')}`;
+        const retryRes = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: supergroupId,
+            text: testMsg,
+            parse_mode: 'Markdown',
+          }),
+        });
+        const retryData = await retryRes.json();
+        if (retryData.ok) {
+          return {
+            success: true,
+            suggestedChannelId: supergroupId,
+            message: `Connection successful! Auto-detected supergroup ID format: ${supergroupId}. Test message delivered to @${botUser}.`,
+          };
+        }
+      }
+
       if (!sendData.ok) {
+        const hint = cleanChatId.startsWith('-') && !cleanChatId.startsWith('-100')
+          ? ` (Hint: Telegram supergroups and channels require '-100' prefix, e.g. -100${cleanChatId.replace(/^-/, '')})`
+          : '';
+
         return {
           success: false,
-          message: `Bot @${botUser} verified, but cannot post to Chat ID (${cleanChatId}): ${sendData.description}. Ensure bot is added as Administrator!`,
+          message: `Bot @${botUser} verified, but cannot send message to ${cleanChatId}: ${sendData.description}.${hint} Ensure bot is added to the channel as an Administrator with 'Post Messages' rights!`,
         };
       }
 

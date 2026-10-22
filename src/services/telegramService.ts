@@ -117,11 +117,39 @@ class TelegramService {
         }),
       });
 
-      const sendData = await sendRes.json();
+      let sendData = await sendRes.json();
+
+      // Smart Supergroup Auto-Retry: if chat not found and ID starts with single minus, retry with -100
+      if (!sendData.ok && sendData.description?.includes('chat not found') && cleanChatId.startsWith('-') && !cleanChatId.startsWith('-100')) {
+        const supergroupId = `-100${cleanChatId.replace(/^-/, '')}`;
+        const retryRes = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: supergroupId,
+            text: testMsg,
+            parse_mode: 'Markdown',
+          }),
+        });
+        const retryData = await retryRes.json();
+        if (retryData.ok) {
+          return {
+            success: true,
+            suggestedChannelId: supergroupId,
+            message: `Connection successful! Auto-detected supergroup ID format: ${supergroupId}. Test message delivered to @${botUser}.`,
+          };
+        }
+      }
+
       if (!sendData.ok) {
+        const hint = cleanChatId.startsWith('-') && !cleanChatId.startsWith('-100')
+          ? ` (Hint: Telegram supergroups and channels require '-100' prefix, e.g. -100${cleanChatId.replace(/^-/, '')})`
+          : '';
+
         return {
           success: false,
-          message: `Bot @${botUser} verified, but cannot send message to ${cleanChatId}: ${sendData.description}. Ensure bot is added as Administrator!`,
+          suggestedChannelId: cleanChatId.startsWith('-') && !cleanChatId.startsWith('-100') ? `-100${cleanChatId.replace(/^-/, '')}` : undefined,
+          message: `Bot @${botUser} verified, but cannot send message to ${cleanChatId}: ${sendData.description}.${hint} Ensure bot is added as Administrator!`,
         };
       }
 
