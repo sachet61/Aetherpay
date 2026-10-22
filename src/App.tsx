@@ -140,18 +140,37 @@ export default function App() {
       return;
     }
 
-    if (tab !== 'ops_chat') {
+    // Normalize shorthand staff tabs to ops_* routes when in staff mode
+    let targetTab = tab;
+    if (!isCustomer) {
+      const staffTabMap: Record<string, string> = {
+        dashboard: 'ops_dashboard',
+        requests: 'ops_requests',
+        chat: 'ops_chat',
+        credentials: 'ops_game_credentials',
+        game_credentials: 'ops_game_credentials',
+        users: 'ops_users',
+        config: 'ops_config',
+        audit: 'ops_audit',
+        game_catalog: 'ops_game_catalog',
+      };
+      if (staffTabMap[tab]) {
+        targetTab = staffTabMap[tab];
+      }
+    }
+
+    if (targetTab !== 'ops_chat') {
       setIsMobileChatActive(false);
     }
 
     // Role-based route guard: agents cannot access Admin-exclusive routes
-    if (isAgent && (tab === 'ops_game_catalog' || tab === 'ops_config' || tab === 'ops_audit')) {
+    if (isAgent && (targetTab === 'ops_game_catalog' || targetTab === 'ops_config' || targetTab === 'ops_audit')) {
       alert('Access Restricted: This configuration area is reserved for Platform Administrators.');
       return;
     }
 
     setTabMeta(meta || null);
-    setActiveTab(tab);
+    setActiveTab(targetTab);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 

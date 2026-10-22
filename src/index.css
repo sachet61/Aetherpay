@@ -44,6 +44,15 @@
   overscroll-behavior-y: contain;
 }
 
+/* Hide scrollbar for Chrome, Safari, Opera and Firefox */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 /* GPU-accelerated continuous seamless horizontal marquee for live payouts */
 @keyframes marquee-seamless {
   0% {

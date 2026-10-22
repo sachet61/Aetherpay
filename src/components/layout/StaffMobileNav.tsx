@@ -30,31 +30,31 @@ export const StaffMobileNav: React.FC<StaffMobileNavProps> = ({
 
   const navItems = [
     {
-      id: 'dashboard',
+      id: 'ops_dashboard',
       label: 'Overview',
       icon: LayoutDashboard,
       badge: 0,
     },
     {
-      id: 'requests',
+      id: 'ops_requests',
       label: 'Requests',
       icon: Inbox,
       badge: pendingRequests,
     },
     {
-      id: 'chat',
+      id: 'ops_chat',
       label: 'Live Chat',
       icon: MessageSquare,
       badge: unreadChatCount,
     },
     {
-      id: 'credentials',
+      id: 'ops_game_credentials',
       label: 'Accounts',
       icon: KeyRound,
       badge: 0,
     },
     {
-      id: 'users',
+      id: 'ops_users',
       label: 'Users',
       icon: Users,
       badge: 0,
