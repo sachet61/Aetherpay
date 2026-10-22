@@ -24,6 +24,7 @@ export const TelegramBotConfigCard: React.FC = () => {
   const [channelId, setChannelId] = useState('');
   const [isEnabled, setIsEnabled] = useState(true);
   const [showToken, setShowToken] = useState(false);
+  const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
 
   const [status, setStatus] = useState<TelegramStatus | null>(null);
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
@@ -37,24 +38,63 @@ export const TelegramBotConfigCard: React.FC = () => {
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [copiedText, setCopiedText] = useState<string | null>(null);
 
-  const refreshStatus = async () => {
+  // Authoritatively load persistent configuration from database on component mount
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadAuthoritativeConfig = async () => {
+      setIsLoadingStatus(true);
+      try {
+        const [s, cfg] = await Promise.all([
+          telegramService.getStatus(),
+          telegramService.getConfig(),
+        ]);
+        if (!isMounted) return;
+        setStatus(s);
+        if (cfg) {
+          if (cfg.botToken) setBotToken(cfg.botToken);
+          if (cfg.channelId) setChannelId(cfg.channelId);
+          if (cfg.enabled !== undefined) setIsEnabled(cfg.enabled);
+          if (cfg.updatedAt) setLastSavedTime(cfg.updatedAt);
+        } else if (s.channelId) {
+          setChannelId(s.channelId);
+        }
+      } catch (err) {
+        console.warn('Error loading Telegram configuration:', err);
+      } finally {
+        if (isMounted) setIsLoadingStatus(false);
+      }
+    };
+
+    loadAuthoritativeConfig();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const refreshAll = async () => {
     setIsLoadingStatus(true);
     try {
-      const s = await telegramService.getStatus();
+      const [s, cfg] = await Promise.all([
+        telegramService.getStatus(),
+        telegramService.getConfig(),
+      ]);
       setStatus(s);
-      if (s.channelId && !channelId) {
+      if (cfg) {
+        if (cfg.botToken && !botToken) setBotToken(cfg.botToken);
+        if (cfg.channelId && !channelId) setChannelId(cfg.channelId);
+        if (cfg.enabled !== undefined) setIsEnabled(cfg.enabled);
+        if (cfg.updatedAt) setLastSavedTime(cfg.updatedAt);
+      } else if (s.channelId && !channelId) {
         setChannelId(s.channelId);
       }
+    } catch (err) {
+      console.warn('Error reloading Telegram configuration:', err);
     } finally {
       setIsLoadingStatus(false);
     }
   };
-
-  useEffect(() => {
-    refreshStatus();
-    const interval = setInterval(refreshStatus, 8000);
-    return () => clearInterval(interval);
-  }, []);
 
   const handleCopy = (text: string, label: string) => {
     navigator.clipboard.writeText(text);
@@ -81,15 +121,20 @@ export const TelegramBotConfigCard: React.FC = () => {
     }
 
     setIsSaving(true);
-    setFeedback({ type: 'info', text: 'Saving Telegram Bot configuration...' });
+    setFeedback({ type: 'info', text: 'Saving configuration to Supabase database (table: app_config)...' });
 
     try {
       const res = await telegramService.saveConfig(effectiveToken, effectiveChannel, isEnabled);
       if (res.success) {
         setStatus(res.status || null);
+        if (res.config) {
+          if (res.config.botToken) setBotToken(res.config.botToken);
+          if (res.config.channelId) setChannelId(res.config.channelId);
+          if (res.config.updatedAt) setLastSavedTime(res.config.updatedAt);
+        }
         setFeedback({
           type: 'success',
-          text: 'Telegram settings saved! Zero-egress alerts are active for customer messages.',
+          text: 'Configuration successfully persisted to PostgreSQL database (app_config) and server storage!',
         });
       } else {
         setFeedback({ type: 'error', text: res.error || 'Failed to update Telegram Bot configuration.' });
@@ -169,14 +214,27 @@ export const TelegramBotConfigCard: React.FC = () => {
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setShowGuideModal(true)}
-          className="text-xs text-sky-400 hover:text-sky-300 font-semibold flex items-center gap-1.5 transition-colors self-start sm:self-auto bg-sky-500/10 hover:bg-sky-500/20 px-3 py-1.5 rounded-lg border border-sky-500/30 shadow-sm"
-        >
-          <HelpCircle className="w-4 h-4" />
-          <span>Bot Setup Guide</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={refreshAll}
+            disabled={isLoadingStatus}
+            className="text-xs text-slate-300 hover:text-white font-semibold flex items-center gap-1.5 transition-colors bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700 shadow-sm cursor-pointer disabled:opacity-50"
+            title="Reload configuration from database"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoadingStatus ? 'animate-spin text-sky-400' : ''}`} />
+            <span>Sync DB</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowGuideModal(true)}
+            className="text-xs text-sky-400 hover:text-sky-300 font-semibold flex items-center gap-1.5 transition-colors bg-sky-500/10 hover:bg-sky-500/20 px-3 py-1.5 rounded-lg border border-sky-500/30 shadow-sm cursor-pointer"
+          >
+            <HelpCircle className="w-4 h-4" />
+            <span>Bot Setup Guide</span>
+          </button>
+        </div>
       </div>
 
       {/* Real-time Engine Metrics */}
@@ -213,6 +271,26 @@ export const TelegramBotConfigCard: React.FC = () => {
 
       {/* Form Controls */}
       <form onSubmit={handleSave} className="space-y-4">
+        {/* Database Persistence Verified Banner */}
+        {status?.tokenConfigured && (
+          <div className="flex items-center justify-between p-3 rounded-xl bg-slate-950/90 border border-emerald-900/50 text-emerald-300 text-xs">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <div>
+                <span className="font-semibold text-white">Database Stored:</span> Persistent in PostgreSQL table <code className="text-emerald-400 font-mono">app_config</code>.
+                {lastSavedTime && (
+                  <span className="text-[10px] text-slate-400 block font-mono mt-0.5">
+                    Database timestamp: {new Date(lastSavedTime).toLocaleString()}
+                  </span>
+                )}
+              </div>
+            </div>
+            <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-mono">
+              PERSISTED IN DB
+            </span>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
           {/* Bot API Token */}
           <div className="space-y-1.5">

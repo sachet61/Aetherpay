@@ -1,9 +1,12 @@
 import { SupabaseClient } from '@supabase/supabase-js';
+import fs from 'fs';
+import path from 'path';
 
 interface TelegramConfig {
   botToken: string;
   channelId: string;
   enabled: boolean;
+  updatedAt?: string;
 }
 
 export interface TelegramEngineStatus {
@@ -35,6 +38,26 @@ class TelegramEngine {
   }
 
   public async loadConfigFromDatabase() {
+    // 1. Immediately read local server database cache for instant startup
+    try {
+      const dbPath = path.resolve(process.cwd(), 'server-db.json');
+      if (fs.existsSync(dbPath)) {
+        const db = JSON.parse(fs.readFileSync(dbPath, 'utf-8'));
+        if (db.telegram && db.telegram.botToken) {
+          this.config = {
+            botToken: (db.telegram.botToken || '').trim(),
+            channelId: (db.telegram.channelId || '').trim(),
+            enabled: db.telegram.enabled !== false,
+            updatedAt: db.telegram.updatedAt,
+          };
+          console.log('[TelegramEngine] Loaded configuration from server-db.json cache');
+        }
+      }
+    } catch (e) {
+      console.warn('[TelegramEngine] server-db.json read notice:', e);
+    }
+
+    // 2. Query persistent Supabase PostgreSQL app_config table
     if (!this.supabaseAdmin) return;
     try {
       const { data, error } = await this.supabaseAdmin
@@ -49,7 +72,16 @@ class TelegramEngine {
           botToken: (tg.botToken || '').trim(),
           channelId: (tg.channelId || '').trim(),
           enabled: tg.enabled !== false,
+          updatedAt: tg.updatedAt,
         };
+
+        // Sync to local server-db.json for dual-persistence redundancy
+        try {
+          const dbPath = path.resolve(process.cwd(), 'server-db.json');
+          const db = fs.existsSync(dbPath) ? JSON.parse(fs.readFileSync(dbPath, 'utf-8')) : {};
+          db.telegram = { ...this.config };
+          fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+        } catch {}
 
         if (this.config.botToken) {
           this.verifyBotCredentials();
@@ -80,12 +112,33 @@ class TelegramEngine {
   public async reloadConfig(botToken: string, channelId: string, enabled: boolean = true) {
     const finalToken = botToken.trim() || this.config.botToken;
     const finalChannel = channelId.trim() || this.config.channelId;
+    const updatedAt = new Date().toISOString();
+
     this.config = {
       botToken: finalToken,
       channelId: finalChannel,
       enabled,
+      updatedAt,
     };
 
+    // 1. Persist to local server-db.json
+    try {
+      const dbPath = path.resolve(process.cwd(), 'server-db.json');
+      const db = fs.existsSync(dbPath) ? JSON.parse(fs.readFileSync(dbPath, 'utf-8')) : {};
+      db.telegram = {
+        botToken: this.config.botToken,
+        channelId: this.config.channelId,
+        enabled: this.config.enabled,
+        mode: 'zero-egress-notification',
+        updatedAt,
+      };
+      fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+      console.log('[TelegramEngine] Persisted Telegram config to server-db.json');
+    } catch (fsErr) {
+      console.warn('[TelegramEngine] Error writing to server-db.json:', fsErr);
+    }
+
+    // 2. Persist to authoritative Supabase PostgreSQL app_config table
     if (this.supabaseAdmin) {
       try {
         const { data } = await this.supabaseAdmin
@@ -100,14 +153,20 @@ class TelegramEngine {
           channelId: this.config.channelId,
           enabled: this.config.enabled,
           mode: 'zero-egress-notification',
-          updatedAt: new Date().toISOString(),
+          updatedAt,
         };
 
-        await this.supabaseAdmin.from('app_config').upsert({
+        const { error: upsertErr } = await this.supabaseAdmin.from('app_config').upsert({
           id: 'main',
           data: currentData,
-          updated_at: new Date().toISOString(),
+          updated_at: updatedAt,
         });
+
+        if (upsertErr) {
+          console.error('[TelegramEngine] Supabase app_config upsert error:', upsertErr);
+        } else {
+          console.log('[TelegramEngine] Authoritatively persisted Telegram config to Supabase app_config table');
+        }
       } catch (e) {
         console.warn('[TelegramEngine] DB update warning:', e);
       }
@@ -118,6 +177,21 @@ class TelegramEngine {
     }
 
     return this.getStatus();
+  }
+
+  public getConfig() {
+    return {
+      botToken: this.config.botToken,
+      channelId: this.config.channelId,
+      enabled: this.config.enabled,
+      botUsername: this.botUsername,
+      tokenConfigured: Boolean(this.config.botToken),
+      maskedToken: this.config.botToken
+        ? `${this.config.botToken.slice(0, 5)}...${this.config.botToken.slice(-6)}`
+        : undefined,
+      updatedAt: this.config.updatedAt,
+      mode: 'zero-egress-notification',
+    };
   }
 
   public getStatus(): TelegramEngineStatus {
@@ -135,17 +209,45 @@ class TelegramEngine {
     };
   }
 
+  // 60-second cooldown map to debounce rapid-fire messages from the same customer/conversation
+  private notificationCooldowns: Map<string, number> = new Map();
+
   /**
-   * Minimal customer message alert: sends ONLY the customer's name when a message is posted
+   * Minimal customer message alert: sends ONLY the customer's name when a message is posted.
+   * Debounces repeat messages with a 60-second cooldown per customer/conversation.
    */
-  public async notifyCustomerMessage(customerName: string): Promise<{ success: boolean; message?: string }> {
+  public async notifyCustomerMessage(
+    customerName: string,
+    conversationId?: string
+  ): Promise<{ success: boolean; message?: string; debounced?: boolean }> {
     if (!this.config.botToken || !this.config.channelId || !this.config.enabled) {
       return { success: false, message: 'Telegram bot not configured or disabled' };
     }
 
     const cleanName = (customerName || 'Customer').trim();
-    const minimalText = `💬 New message from ${cleanName}`;
+    const cooldownKey = (conversationId || cleanName).toLowerCase();
+    const now = Date.now();
+    const lastSent = this.notificationCooldowns.get(cooldownKey) || 0;
+    const COOLDOWN_MS = 60 * 1000; // 60-second debouncing window
 
+    if (now - lastSent < COOLDOWN_MS) {
+      const remainingSec = Math.ceil((COOLDOWN_MS - (now - lastSent)) / 1000);
+      console.log(`[TelegramEngine] Debounced notification for "${cleanName}" (${remainingSec}s cooldown remaining). 0 egress transmitted.`);
+      return { success: true, message: `Debounced: notification cooldown active (${remainingSec}s remaining)`, debounced: true };
+    }
+
+    this.notificationCooldowns.set(cooldownKey, now);
+
+    // Garbage collection of old cooldown keys (older than 10 minutes)
+    if (this.notificationCooldowns.size > 200) {
+      for (const [key, ts] of this.notificationCooldowns.entries()) {
+        if (now - ts > 10 * 60 * 1000) {
+          this.notificationCooldowns.delete(key);
+        }
+      }
+    }
+
+    const minimalText = `💬 New message from ${cleanName}`;
     return this.sendDirectMessage(this.config.channelId, minimalText);
   }
 

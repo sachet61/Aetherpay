@@ -724,6 +724,11 @@ app.post('/api/auth/register', async (req, res) => {
     return res.json(telegramEngine.getStatus());
   });
 
+  // Get saved Telegram Bot configuration (for pre-filling admin settings on load)
+  app.get('/api/telegram/config', (_req, res) => {
+    return res.json({ success: true, ...telegramEngine.getConfig() });
+  });
+
   // Save & dynamically reload Telegram Bot configuration
   app.post('/api/telegram/config', async (req, res) => {
     try {
@@ -733,7 +738,7 @@ app.post('/api/auth/register', async (req, res) => {
         channelId || '',
         enabled !== false
       );
-      return res.json({ success: true, status });
+      return res.json({ success: true, status, config: telegramEngine.getConfig() });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Failed to update Telegram configuration' });
     }
@@ -760,11 +765,11 @@ app.post('/api/auth/register', async (req, res) => {
     }
   });
 
-  // Zero-Egress Minimal Outbound Alert: send customer name when a message is sent in chat
+  // Zero-Egress Minimal Outbound Alert: send customer name when a message is sent in chat (debounced)
   app.post('/api/telegram/notify-message', async (req, res) => {
     try {
-      const { customerName } = req.body;
-      const result = await telegramEngine.notifyCustomerMessage(customerName);
+      const { customerName, conversationId } = req.body;
+      const result = await telegramEngine.notifyCustomerMessage(customerName, conversationId);
       return res.json(result);
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message });

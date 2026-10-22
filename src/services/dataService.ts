@@ -4094,13 +4094,16 @@ class DataService {
       console.warn('Realtime chat dispatch notice:', e);
     }
 
-    // Zero-Egress Telegram Alert: send customer name when a customer posts a message
+    // Zero-Egress Telegram Alert: send customer name when a customer posts a message (debounced on server)
     if (params.senderRole === 'customer') {
       try {
         fetch('/api/telegram/notify-message', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ customerName: params.senderName || 'Customer' }),
+          body: JSON.stringify({
+            customerName: params.senderName || 'Customer',
+            conversationId: params.conversationId,
+          }),
         }).catch((err) => console.warn('Telegram notify-message notice:', err));
       } catch (err) {
         console.warn('Telegram notify dispatch notice:', err);

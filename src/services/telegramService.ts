@@ -31,11 +31,32 @@ class TelegramService {
     };
   }
 
+  public async getConfig(): Promise<{
+    success?: boolean;
+    botToken?: string;
+    channelId?: string;
+    enabled?: boolean;
+    botUsername?: string;
+    tokenConfigured?: boolean;
+    maskedToken?: string;
+    updatedAt?: string;
+  }> {
+    try {
+      const resp = await fetch('/api/telegram/config');
+      if (resp.ok) {
+        return await resp.json();
+      }
+    } catch (e) {
+      console.warn('[TelegramService] getConfig error:', e);
+    }
+    return {};
+  }
+
   public async saveConfig(
     botToken: string,
     channelId: string,
     enabled: boolean = true
-  ): Promise<{ success: boolean; status?: TelegramStatus; error?: string }> {
+  ): Promise<{ success: boolean; status?: TelegramStatus; config?: any; error?: string }> {
     const cleanToken = botToken.trim();
     const cleanChatId = channelId.trim();
 
@@ -55,7 +76,7 @@ class TelegramService {
       }
 
       if (resp.ok && data.success) {
-        return { success: true, status: data.status };
+        return { success: true, status: data.status, config: data.config };
       }
       return { success: false, error: data.error || 'Failed to update configuration' };
     } catch (err: any) {
@@ -190,12 +211,15 @@ class TelegramService {
     }
   }
 
-  public async notifyCustomerMessage(customerName: string): Promise<{ success: boolean; message?: string }> {
+  public async notifyCustomerMessage(
+    customerName: string,
+    conversationId?: string
+  ): Promise<{ success: boolean; message?: string; debounced?: boolean }> {
     try {
       const resp = await fetch('/api/telegram/notify-message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ customerName }),
+        body: JSON.stringify({ customerName, conversationId }),
       });
       const data = await resp.json().catch(() => ({}));
       return data;
