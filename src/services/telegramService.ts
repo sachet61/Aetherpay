@@ -189,6 +189,20 @@ class TelegramService {
       return { success: false, message: err.message };
     }
   }
+
+  public async notifyCustomerMessage(customerName: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      const resp = await fetch('/api/telegram/notify-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customerName }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      return data;
+    } catch (err: any) {
+      return { success: false, message: err.message };
+    }
+  }
 }
 
 export const telegramService = new TelegramService();

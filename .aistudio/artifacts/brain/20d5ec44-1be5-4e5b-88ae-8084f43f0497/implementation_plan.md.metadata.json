@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for enhancing Telegram bot configuration UI with clear troubleshooting guidance, error diagnosis, and a step-by-step channel setup guide modal.",
-  "updatedAt":  "2026-10-22T08:36:26.357136576Z",
+  "summary":  "Implementation plan to convert the Telegram bot into a zero-egress, one-way outbound notification bot that alerts with the customer's name when a customer messages, completely removing continuous long-polling.",
+  "updatedAt":  "2026-10-22T08:50:49.590270865Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

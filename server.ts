@@ -760,6 +760,17 @@ app.post('/api/auth/register', async (req, res) => {
     }
   });
 
+  // Zero-Egress Minimal Outbound Alert: send customer name when a message is sent in chat
+  app.post('/api/telegram/notify-message', async (req, res) => {
+    try {
+      const { customerName } = req.body;
+      const result = await telegramEngine.notifyCustomerMessage(customerName);
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   // USPay / Keyhub API Proxy Route to avoid CORS issues
   app.all('/api/uspay/*', async (req, res) => {
     try {
@@ -831,9 +842,9 @@ app.post('/api/auth/register', async (req, res) => {
 
   app.listen(port, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${port}`);
-    // Start continuous 24/7 background Telegram polling
+    // Initialize Telegram notification engine (zero-egress mode, polling disabled)
     telegramEngine.init(supabaseAdmin).catch((err) => {
-      console.warn('[TelegramEngine] Background startup warning:', err);
+      console.warn('[TelegramEngine] Startup warning:', err);
     });
 
     // Authoritative Parent Admin Verification & Role Lock

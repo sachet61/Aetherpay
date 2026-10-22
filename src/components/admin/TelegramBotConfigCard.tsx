@@ -81,7 +81,7 @@ export const TelegramBotConfigCard: React.FC = () => {
     }
 
     setIsSaving(true);
-    setFeedback({ type: 'info', text: 'Connecting bot to 24/7 server polling engine...' });
+    setFeedback({ type: 'info', text: 'Saving Telegram Bot configuration...' });
 
     try {
       const res = await telegramService.saveConfig(effectiveToken, effectiveChannel, isEnabled);
@@ -89,7 +89,7 @@ export const TelegramBotConfigCard: React.FC = () => {
         setStatus(res.status || null);
         setFeedback({
           type: 'success',
-          text: 'Telegram Bot engine updated and polling indefinitely 24/7 alongside the web application!',
+          text: 'Telegram settings saved! Zero-egress alerts are active for customer messages.',
         });
       } else {
         setFeedback({ type: 'error', text: res.error || 'Failed to update Telegram Bot configuration.' });
@@ -138,7 +138,7 @@ export const TelegramBotConfigCard: React.FC = () => {
     }
   };
 
-  const isConnected = status?.running && status?.botUsername;
+  const isConnected = Boolean(status?.tokenConfigured && (status?.channelId || channelId));
 
   return (
     <div className="p-6 rounded-2xl border border-sky-900/50 bg-gradient-to-br from-slate-900 via-slate-900 to-[#0A1628] shadow-xl space-y-5">
@@ -150,21 +150,21 @@ export const TelegramBotConfigCard: React.FC = () => {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-bold text-white">24/7 Telegram Support Bot Engine</h2>
+              <h2 className="text-base font-bold text-white">Telegram Customer Alerts (Zero-Egress Mode)</h2>
               {isConnected ? (
                 <span className="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  ONLINE &amp; POLLING 24/7
+                  ACTIVE • ZERO EGRESS
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30">
                   <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                  OFFLINE / CONFIG PENDING
+                  CONFIG PENDING
                 </span>
               )}
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Runs indefinitely server-side inside this web app. Two-way messaging: notifies your channel on player messages, and staff replies in Telegram post directly to player chat.
+              Event-driven notifications only. Server polling loop is disabled to eliminate 100% of background data egress. Whenever a customer posts a message in chat, an instant alert with their name is sent directly to your Telegram channel.
             </p>
           </div>
         </div>
@@ -184,7 +184,7 @@ export const TelegramBotConfigCard: React.FC = () => {
         <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800">
           <span className="text-[11px] text-slate-400">Bot Handle</span>
           <div className="text-sm font-mono font-bold text-sky-400 mt-1 truncate">
-            {status?.botUsername ? `@${status.botUsername}` : 'Not Connected'}
+            {status?.botUsername ? `@${status.botUsername}` : status?.tokenConfigured ? 'Connected' : 'Not Configured'}
           </div>
         </div>
 
@@ -196,17 +196,17 @@ export const TelegramBotConfigCard: React.FC = () => {
         </div>
 
         <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800">
-          <span className="text-[11px] text-slate-400">Updates Processed</span>
+          <span className="text-[11px] text-slate-400">Delivery Architecture</span>
           <div className="text-sm font-mono font-bold text-emerald-400 mt-1">
-            {status?.updatesReceived ?? 0}
+            Zero-Egress Push
           </div>
         </div>
 
         <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800">
-          <span className="text-[11px] text-slate-400">Engine Heartbeat</span>
-          <div className="text-xs font-bold text-slate-300 mt-1 flex items-center gap-1.5">
-            <Zap className={`w-3.5 h-3.5 ${status?.running ? 'text-emerald-400 animate-pulse' : 'text-slate-600'}`} />
-            <span>{status?.running ? 'Listening' : 'Idle'}</span>
+          <span className="text-[11px] text-slate-400">Polling Loop</span>
+          <div className="text-xs font-bold text-emerald-400 mt-1 flex items-center gap-1.5">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Disabled (0 Egress)</span>
           </div>
         </div>
       </div>
@@ -354,7 +354,7 @@ export const TelegramBotConfigCard: React.FC = () => {
                 onChange={(e) => setIsEnabled(e.target.checked)}
                 className="rounded bg-slate-950 border-slate-800 text-sky-500"
               />
-              <span>Enable Server Polling Loop</span>
+              <span>Enable Customer Message Alerts</span>
             </label>
           </div>
 
@@ -375,7 +375,7 @@ export const TelegramBotConfigCard: React.FC = () => {
               className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold transition-all shadow-md shadow-sky-600/25 flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
             >
               {isSaving && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-              <span>Save &amp; Start 24/7 Engine</span>
+              <span>Save &amp; Enable Alerts</span>
             </button>
           </div>
         </div>
@@ -458,15 +458,14 @@ export const TelegramBotConfigCard: React.FC = () => {
                 </div>
               </div>
 
-              {/* Step 4: Two-Way Chat */}
+              {/* Step 4: Zero-Egress Notifications */}
               <div className="p-3.5 rounded-xl bg-sky-950/30 border border-sky-800/40 space-y-1 text-slate-300">
                 <div className="font-bold text-white flex items-center gap-1.5">
-                  <Radio className="w-4 h-4 text-sky-400" />
-                  <span>How Two-Way Support Works:</span>
+                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                  <span>Zero-Egress Customer Notifications:</span>
                 </div>
                 <p className="text-[11px] text-slate-300/90 leading-relaxed pl-5">
-                  Whenever a customer asks a question or submits a deposit/cashout request, a notification arrives in your Telegram channel with ticket ID <code className="text-amber-300 font-mono">#conv_xxx</code>.
-                  Simply <strong>reply directly</strong> to that Telegram message to answer the customer right on their web chat screen!
+                  Continuous polling has been removed to conserve server bandwidth. Whenever a customer sends a message in support chat, a minimal alert with their name (<code>💬 New message from [Customer Name]</code>) is immediately dispatched to your Telegram channel.
                 </p>
               </div>
             </div>
