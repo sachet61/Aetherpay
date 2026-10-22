@@ -27,10 +27,18 @@ async function startServer() {
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-  // Static assets support for /src/images, /images, and /images/qr
-  app.use('/src/images', express.static(path.resolve(process.cwd(), 'src/images')));
-  app.use('/images', express.static(path.resolve(process.cwd(), 'public/images')));
-  app.use(express.static(path.resolve(process.cwd(), 'public')));
+  // Static assets support with aggressive HTTP cache-control headers (7 days)
+  const staticCacheOptions = {
+    maxAge: '7d',
+    immutable: true,
+    etag: true,
+    setHeaders: (res: express.Response) => {
+      res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    },
+  };
+  app.use('/src/images', express.static(path.resolve(process.cwd(), 'src/images'), staticCacheOptions));
+  app.use('/images', express.static(path.resolve(process.cwd(), 'public/images'), staticCacheOptions));
+  app.use(express.static(path.resolve(process.cwd(), 'public'), staticCacheOptions));
 
   // Upload QR code image from PC or Mobile and store in server storage / repo
   app.post('/api/upload-qr', async (req, res) => {

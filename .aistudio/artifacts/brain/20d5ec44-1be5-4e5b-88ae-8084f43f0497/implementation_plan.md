@@ -1,13 +1,18 @@
-# Implementation Plan - Fix OTP Modal Z-Index and Layering
+# Implementation Plan - Image Preloading & Client Caching
 
-## Problem Statement
-When triggering email verification or password recovery OTP codes, the 6-digit OTP confirmation modal appears behind other UI elements (such as the main dashboard, header, or drawer). This is caused by stacking context isolation and rendering the modal within container nodes instead of the root document body.
+## Problem
+Images (game logos, badges, banners) are re-fetched or reloaded on tab transitions or page refreshes, causing slight layout re-renders and network overhead.
+
+## Solution
+Integrate a robust image preloader pool in `StartupSplash.tsx` that leverages JavaScript `Image` objects (`new Image()`) to preload all core game platform banners, logos, and UI assets during the cinematic startup splash screen sequence (0% to 100%). This populates the browser and client-side image cache immediately upon launch.
 
 ## Proposed Changes
-1. **EmailOtpModal (`src/components/auth/EmailOtpModal.tsx`)**:
-   - Wrap the modal backdrop and content in a React Portal (`ReactDOM.createPortal(..., document.body)`) when `isOpen` is true and `!isStandalone`.
-   - Elevate the modal wrapper `z-index` to `z-[99999]` with a robust dark backdrop (`bg-black/85 backdrop-blur-md`) to guarantee it sits at the very top of the stacking context above all app headers, drawers, and dashboard elements.
+
+### 1. `src/components/common/StartupSplash.tsx`
+- Add a preloader utility function and asset array containing paths to all platform and game images (`/src/images/Firekirin.png`, `/src/images/GameVault.png`, `/src/images/Juwa.png`, `/src/images/OrionStars.png`, `/src/images/PandaMaster.png`, `/src/images/MilkyWay.png`, `/src/images/Vblink.png`, `/src/images/UltraPanda.png`, `/src/images/RiverSweeps.png`, `/src/images/VegasSweeps.png`, `/src/images/VegasX.png`, `/src/images/Winstar.png`, `/src/images/CashMachine.png`, `/src/images/CasinoIgnite.jpeg`, `/src/images/CasinoRoyale.png`, `/src/images/Egame.png`, `/src/images/GamblingGalaxy.png`, `/src/images/Gameroom.png`, `/src/images/Mafia.png`, `/src/images/Yolo.png`, etc.).
+- Initiate preloading in `useEffect` as soon as the splash screen mounts.
+- Track preload progress or cache instances so images are stored in browser memory cache.
 
 ## Verification Plan
-1. Compile the applet with `compile_applet`.
-2. Trigger password recovery / email verification in the app preview to verify that the OTP modal renders cleanly on top of all dashboard and navigation elements.
+- Run `compile_applet` to ensure successful compilation.
+- Verify that opening the app triggers preloading during the splash screen and images load instantly from cache on subsequent navigation.

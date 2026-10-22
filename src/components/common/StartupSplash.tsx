@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { SwiftSweepsLogo } from './SwiftSweepsLogo';
-import { ShieldCheck, Sparkles } from 'lucide-react';
+import { ShieldCheck, Database, Layers } from 'lucide-react';
+import { preloadAssetPool, CORE_ASSET_URLS, getCachedImagesCount } from '../../utils/assetPreloader';
 
 interface StartupSplashProps {
   onComplete?: () => void;
@@ -25,6 +26,16 @@ export const StartupSplash: React.FC<StartupSplashProps> = ({
   const [progress, setProgress] = useState(0);
   const [fadingOut, setFadingOut] = useState(false);
   const [statusText, setStatusText] = useState('INITIALIZING SECURE VAULT...');
+  const [cachedAssets, setCachedAssets] = useState(0);
+  const preloadProgressRef = useRef(0);
+
+  // Background preload initiates immediately on mount to fill the client cache pool
+  useEffect(() => {
+    preloadAssetPool(CORE_ASSET_URLS, (loaded, total, percent) => {
+      preloadProgressRef.current = percent;
+      setCachedAssets(loaded);
+    });
+  }, []);
 
   useEffect(() => {
     if (!visible) {
@@ -33,24 +44,31 @@ export const StartupSplash: React.FC<StartupSplashProps> = ({
     }
 
     const startTime = Date.now();
-    const duration = 1600; // 1.6s animation for crisp cinematic startup
+    const minDuration = 1600; // 1.6s animation for crisp cinematic startup
 
     const interval = setInterval(() => {
       const elapsed = Date.now() - startTime;
-      const rawProgress = Math.min(100, Math.floor((elapsed / duration) * 100));
-      setProgress(rawProgress);
+      const timePercent = Math.min(100, Math.floor((elapsed / minDuration) * 100));
+      const assetPercent = preloadProgressRef.current;
 
-      if (rawProgress < 30) {
+      // Smooth blended progress between timer and real asset preloading
+      const currentProgress = Math.min(
+        100,
+        Math.max(timePercent, Math.floor((timePercent * 0.4) + (assetPercent * 0.6)))
+      );
+      setProgress(currentProgress);
+
+      if (currentProgress < 25) {
         setStatusText('INITIALIZING SECURE VAULT...');
-      } else if (rawProgress < 65) {
-        setStatusText('SYNCHRONIZING GAME PLATFORMS...');
-      } else if (rawProgress < 95) {
-        setStatusText('CONNECTING 24/7 LIVE CASHOUT FEED...');
+      } else if (currentProgress < 70) {
+        setStatusText(`CACHING PLATFORMS & ASSETS (${preloadProgressRef.current}%)...`);
+      } else if (currentProgress < 95) {
+        setStatusText('SYNCHRONIZING 24/7 LIVE CASHOUT FEED...');
       } else {
-        setStatusText('SYSTEM READY');
+        setStatusText('SYSTEM READY & ASSETS CACHED');
       }
 
-      if (rawProgress >= 100) {
+      if (elapsed >= minDuration && currentProgress >= 100) {
         clearInterval(interval);
         // Start smooth fade-out exit transition
         setFadingOut(true);
@@ -64,7 +82,7 @@ export const StartupSplash: React.FC<StartupSplashProps> = ({
           if (onComplete) onComplete();
         }, 400); // 400ms CSS fade-out duration
       }
-    }, 20);
+    }, 25);
 
     return () => clearInterval(interval);
   }, [visible, onComplete]);
@@ -116,6 +134,14 @@ export const StartupSplash: React.FC<StartupSplashProps> = ({
               {progress}%
             </span>
           </div>
+
+          {/* Asset Cache Metric Indicator */}
+          {cachedAssets > 0 && (
+            <div className="text-[9px] font-mono text-slate-400 flex items-center gap-1 mt-0.5">
+              <Layers className="w-3 h-3 text-amber-400" />
+              <span>Client Memory Cache: {cachedAssets} / {CORE_ASSET_URLS.length} assets ready</span>
+            </div>
+          )}
         </div>
 
         {/* Security / Verification Footnote */}
