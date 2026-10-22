@@ -26,6 +26,7 @@ import {
   Plus,
   X,
   Edit3,
+  RefreshCw,
 } from 'lucide-react';
 
 interface AdminUsersProps {
@@ -34,10 +35,48 @@ interface AdminUsersProps {
 }
 
 export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateTab }) => {
-  const isAdmin = currentUser.role === 'admin';
-  const isAgent = currentUser.role === 'agent';
+  const isAdmin = currentUser?.role === 'admin';
+  const isAgent = currentUser?.role === 'agent';
+  const isStaff = isAdmin || isAgent;
 
-  const [users, setUsers] = useState<UserProfile[]>(dataService.getUsers());
+  // 1. Mandatory Security Barrier: Non-admin visitors cannot view or query privileged user directory
+  if (!currentUser || !isStaff) {
+    return (
+      <div className="max-w-xl mx-auto py-16 px-4">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center shadow-2xl">
+          <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mx-auto mb-5 text-amber-400">
+            <ShieldAlert className="w-8 h-8" />
+          </div>
+          <h2 className="text-xl font-bold text-white mb-2">Admin Authentication Required</h2>
+          <p className="text-xs text-slate-400 leading-relaxed max-w-md mx-auto mb-6">
+            The User Directory &amp; Staff Governance catalog contains privileged member records, active balances, and role authorizations. Access is strictly limited to authorized platform administrators and support agents.
+          </p>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+            <button
+              onClick={() => onNavigateTab('auth')}
+              className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <KeyRound className="w-4 h-4" />
+              Sign In as Administrator
+            </button>
+            <button
+              onClick={() => onNavigateTab('dashboard')}
+              className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors cursor-pointer"
+            >
+              Back to Overview
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Pure on-demand database state (zero localStorage reading)
+  const [users, setUsers] = useState<UserProfile[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
+
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | 'customer' | 'agent' | 'admin'>('all');
   const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
@@ -57,22 +96,39 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
   const [revealedPasswords, setRevealedPasswords] = useState<Record<string, boolean>>({});
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
-  const loadUsers = () => {
-    setUsers(dataService.getUsers());
+  // Load live users on-demand from PostgreSQL database
+  const loadUsersLive = async (showSpinner = false) => {
+    if (showSpinner) setIsLoading(true);
+    setFetchError(null);
+    try {
+      const res = await dataService.fetchLiveUsersDirectory(currentUser);
+      if (res.success) {
+        setUsers(res.users);
+        setLastRefreshedAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+        if (selectedUser) {
+          const refreshed = res.users.find((u) => u.id === selectedUser.id);
+          if (refreshed) setSelectedUser(refreshed);
+        }
+      } else {
+        setFetchError(res.error || 'Failed to retrieve live user directory from database.');
+      }
+    } catch (err: any) {
+      setFetchError(err.message || 'Network error fetching user directory.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   useEffect(() => {
-    loadUsers();
-    const handleState = () => {
-      loadUsers();
-      if (selectedUser) {
-        const refreshed = dataService.getUserById(selectedUser.id);
-        if (refreshed) setSelectedUser(refreshed);
+    loadUsersLive(true);
+    const handleState = (e: any) => {
+      if (e?.detail?.key === 'user_role_updated' || e?.detail?.key === 'users') {
+        loadUsersLive(false);
       }
     };
     window.addEventListener('aetherpay_state_changed', handleState);
     return () => window.removeEventListener('aetherpay_state_changed', handleState);
-  }, [selectedUser?.id]);
+  }, [currentUser?.id]);
 
   const handleRoleChange = async (targetUser: UserProfile, newRole: UserRole) => {
     if (!isAdmin) {
@@ -118,7 +174,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
         const succ = { type: 'success' as const, text: res.message };
         setFeedback(succ);
         setModalFeedback(succ);
-        loadUsers();
+        loadUsersLive(false);
         if (res.user) {
           setSelectedUser(res.user);
         }
@@ -144,9 +200,10 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
       const res = await dataService.deleteUserCompletely(userToDelete.id, currentUser);
       if (res.success) {
         setFeedback({ type: 'success', text: res.message });
-        setUsers(dataService.getUsers());
+        setUsers((prev) => prev.filter((u) => u.id !== userToDelete.id));
         setUserToDelete(null);
         setSelectedUser(null);
+        loadUsersLive(false);
       } else {
         setFeedback({ type: 'error', text: res.message });
       }
@@ -280,7 +337,23 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
           </p>
         </div>
 
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex items-center gap-2 text-xs flex-wrap">
+          <button
+            type="button"
+            onClick={() => loadUsersLive(true)}
+            disabled={isLoading}
+            className="p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+            title="Refresh user directory directly from database"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-indigo-400' : 'text-slate-400'}`} />
+            <span className="font-medium">Refresh</span>
+            {lastRefreshedAt && (
+              <span className="text-[10px] text-slate-500 font-mono hidden sm:inline">
+                ({lastRefreshedAt})
+              </span>
+            )}
+          </button>
+
           <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 flex items-center gap-3">
             <div>
               <span className="text-[10px] text-slate-500 uppercase block">Total Directory</span>
@@ -366,7 +439,32 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 text-slate-300">
-              {filteredUsers.length === 0 ? (
+              {isLoading ? (
+                <tr>
+                  <td colSpan={6} className="py-16 text-center text-slate-400">
+                    <div className="flex flex-col items-center justify-center gap-2.5">
+                      <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
+                      <span className="text-xs font-medium">Loading live user directory from PostgreSQL database...</span>
+                    </div>
+                  </td>
+                </tr>
+              ) : fetchError ? (
+                <tr>
+                  <td colSpan={6} className="py-12 text-center text-rose-300">
+                    <div className="flex flex-col items-center justify-center gap-2 max-w-md mx-auto">
+                      <AlertCircle className="w-6 h-6 text-rose-400" />
+                      <span className="text-xs font-semibold">{fetchError}</span>
+                      <button
+                        type="button"
+                        onClick={() => loadUsersLive(true)}
+                        className="mt-2 px-3 py-1.5 rounded-lg bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-200 text-xs font-semibold cursor-pointer"
+                      >
+                        Retry Database Query
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ) : filteredUsers.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-12 text-center text-slate-500">
                     No users matching the selected filters.
@@ -374,8 +472,8 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                 </tr>
               ) : (
                 filteredUsers.map((u) => {
-                  const wallet = dataService.getWallet(u.id);
-                  const gameAccounts = dataService.getGameAccounts(u.id);
+                  const wallet = (u as any).wallet || dataService.getWallet(u.id);
+                  const gameAccounts = (u as any).gameAccounts || dataService.getGameAccounts(u.id);
                   const isParentAdmin =
                     u.role === 'admin' &&
                     (dataService.isProtectedParentAdmin(u.email, u) ||
@@ -653,7 +751,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                     <Wallet className="w-3 h-3 text-emerald-400" />
                   </div>
                   <div className="text-base font-bold font-mono text-emerald-400 mt-0.5">
-                    ${(dataService.getWallet(selectedUser.id)?.availableBalance || 0).toFixed(2)}
+                    ${(((selectedUser as any).wallet?.availableBalance ?? dataService.getWallet(selectedUser.id)?.availableBalance) || 0).toFixed(2)}
                   </div>
                 </div>
 
@@ -663,7 +761,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                     <Clock className="w-3 h-3 text-amber-400" />
                   </div>
                   <div className="text-base font-bold font-mono text-amber-400 mt-0.5">
-                    ${(dataService.getWallet(selectedUser.id)?.reservedBalance || 0).toFixed(2)}
+                    ${(((selectedUser as any).wallet?.reservedBalance ?? dataService.getWallet(selectedUser.id)?.reservedBalance) || 0).toFixed(2)}
                   </div>
                 </div>
               </div>
@@ -887,7 +985,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] text-amber-300 font-mono bg-amber-950/60 border border-amber-800/60 px-2 py-0.5 rounded-full font-bold">
                       {(() => {
-                        const accs = dataService.getGameAccounts(selectedUser.id);
+                        const accs = (selectedUser as any).gameAccounts || dataService.getGameAccounts(selectedUser.id);
                         const count = accs.length;
                         return `${count} game${count === 1 ? '' : 's'} (1 ID per game)`;
                       })()}
@@ -905,7 +1003,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
 
                 <div className="max-h-44 overflow-y-auto space-y-1.5 pr-0.5">
                   {(() => {
-                    const accs = dataService.getGameAccounts(selectedUser.id);
+                    const accs = (selectedUser as any).gameAccounts || dataService.getGameAccounts(selectedUser.id);
                     if (accs.length === 0) {
                       return (
                         <div className="p-3 rounded-lg bg-slate-950 text-center text-slate-500 text-[11px] border border-slate-800/60">

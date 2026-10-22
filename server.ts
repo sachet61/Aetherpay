@@ -644,21 +644,146 @@ app.post('/api/auth/register', async (req, res) => {
     }
   });
 
-  // Get all users for admin directory (bypassing RLS)
+  // Get all users for admin directory (bypassing RLS with live wallet and game accounts aggregation)
   app.get('/api/admin/users', async (req, res) => {
     try {
-      const { data, error } = await supabaseAdmin
+      // 1. Authorize admin/agent access
+      const cookies = parseCookies(req);
+      const token = cookies['aetherpay_session'] || req.headers.authorization?.replace('Bearer ', '');
+      const actingRole = (req.headers['x-user-role'] as string) || (req.query.role as string);
+      const actingUserId = (req.headers['x-user-id'] as string) || (req.query.userId as string);
+
+      let isAuthorized = false;
+      if (token && serverSessions.has(token)) {
+        const sess = serverSessions.get(token)!;
+        if (Date.now() <= sess.expiresAt) {
+          const { data: authUser } = await supabaseAdmin.from('users').select('role').eq('id', sess.userId).maybeSingle();
+          if (authUser?.role === 'admin' || authUser?.role === 'agent' || sess.email === 'sachet61@gmail.com') {
+            isAuthorized = true;
+          }
+        }
+      }
+
+      if (!isAuthorized && actingUserId) {
+        const { data: directUser } = await supabaseAdmin.from('users').select('role, email').eq('id', actingUserId).maybeSingle();
+        if (directUser?.role === 'admin' || directUser?.role === 'agent' || directUser?.email === 'sachet61@gmail.com') {
+          isAuthorized = true;
+        }
+      }
+
+      if (!isAuthorized && (actingRole === 'admin' || actingRole === 'agent')) {
+        isAuthorized = true;
+      }
+
+      if (!isAuthorized) {
+        return res.status(403).json({ error: 'Access Denied: Administrator or Support Agent authorization required to view user directory.' });
+      }
+
+      // Fetch up to 100 users ordered by created_at DESC
+      const { data: users, error: userErr } = await supabaseAdmin
         .from('users')
         .select('*')
         .order('created_at', { ascending: false })
         .limit(100);
 
-      if (error) {
-        return res.status(400).json({ error: error.message });
+      if (userErr) {
+        return res.status(400).json({ error: userErr.message });
       }
 
-      return res.json({ success: true, users: data || [] });
+      const userList = users || [];
+      const userIds = userList.map((u) => u.id).filter(Boolean);
+
+      // Batched lookup of wallets
+      const walletsMap: Record<string, any> = {};
+      if (userIds.length > 0) {
+        const { data: wallets } = await supabaseAdmin
+          .from('wallets')
+          .select('*')
+          .in('customer_id', userIds);
+
+        if (wallets && wallets.length > 0) {
+          for (const w of wallets) {
+            walletsMap[w.customer_id] = {
+              customerId: w.customer_id,
+              currency: w.currency || 'USD',
+              availableBalance: Number(w.available_balance || 0),
+              referralBonusBalance: Number(w.referral_bonus_balance || 0),
+              reservedBalance: Number(w.reserved_balance || 0),
+              pendingDepositBalance: Number(w.pending_deposit_balance || 0),
+              lastUpdatedAt: w.last_updated_at || w.updated_at,
+            };
+          }
+        }
+      }
+
+      // Batched lookup of game accounts
+      const gameAccountsMap: Record<string, any[]> = {};
+      if (userIds.length > 0) {
+        const { data: gameAccs } = await supabaseAdmin
+          .from('game_accounts')
+          .select('*')
+          .in('customer_id', userIds);
+
+        if (gameAccs && gameAccs.length > 0) {
+          for (const g of gameAccs) {
+            if (!gameAccountsMap[g.customer_id]) {
+              gameAccountsMap[g.customer_id] = [];
+            }
+            gameAccountsMap[g.customer_id].push({
+              id: g.id,
+              customerId: g.customer_id,
+              gameCatalogId: g.game_catalog_id,
+              gameName: g.game_name,
+              username: g.game_username,
+              password: g.game_password,
+              status: g.status || 'active',
+              notes: g.notes || '',
+              createdAt: g.created_at,
+            });
+          }
+        }
+      }
+
+      // Merge into aggregated user profiles
+      const aggregatedUsers = userList.map((u) => {
+        const userWallet = walletsMap[u.id] || {
+          customerId: u.id,
+          currency: 'USD',
+          availableBalance: 0,
+          referralBonusBalance: 0,
+          reservedBalance: 0,
+          pendingDepositBalance: 0,
+        };
+        const userGameAccs = gameAccountsMap[u.id] || [];
+
+        return {
+          id: u.id,
+          email: u.email,
+          displayName: u.display_name || u.email?.split('@')[0] || 'User',
+          phone: u.phone,
+          role: u.role || 'customer',
+          status: u.status || 'active',
+          emailVerified: Boolean(u.email_verified),
+          avatarUrl: u.avatar_url,
+          referralCode: u.referral_code,
+          referredBy: u.referred_by,
+          registeredPaymentMethod: u.registered_payment_method,
+          registeredPaymentDetails: u.registered_payment_details,
+          isParentAdmin: u.email?.toLowerCase() === 'sachet61@gmail.com' || Boolean(u.is_parent_admin),
+          promotedBy: u.promoted_by,
+          promotedByName: u.promoted_by_name,
+          promotedAt: u.promoted_at,
+          createdAt: u.created_at,
+          lastLoginAt: u.last_login_at || u.updated_at,
+          wallet: userWallet,
+          gameAccounts: userGameAccs,
+          gameAccountsCount: userGameAccs.length,
+        };
+      });
+
+      return res.json({ success: true, users: aggregatedUsers });
     } catch (err: any) {
+      console.error('Fetch users directory error:', err);
       return res.status(500).json({ error: err.message || 'Failed to fetch users directory' });
     }
   });

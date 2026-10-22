@@ -118,9 +118,13 @@ class DataService {
   private cleanLegacyStorage(): void {
     if (typeof localStorage === 'undefined') return;
     try {
-      const CLEAN_FLAG = 'swift_sweeps_prod_clean_v5';
+      // Invariant: Users directory is NEVER cached to browser localStorage
+      localStorage.removeItem(STORAGE_KEYS.USERS);
+      localStorage.removeItem('aetherpay_users');
+
+      const CLEAN_FLAG = 'swift_sweeps_prod_clean_v6';
       if (!localStorage.getItem(CLEAN_FLAG)) {
-        console.log('[SwiftSweeps] Performing clean-slate migration: clearing legacy mock storage...');
+        console.log('[SwiftSweeps] Performing clean-slate migration: clearing legacy storage...');
         const keysToClean = [
           'aetherpay_users',
           'aetherpay_wallets',
@@ -151,6 +155,8 @@ class DataService {
     if (typeof localStorage === 'undefined') return;
     try {
       for (const key of Object.values(STORAGE_KEYS)) {
+        // Invariant: NEVER load user records from localStorage
+        if (key === STORAGE_KEYS.USERS) continue;
         const stored = localStorage.getItem(key);
         if (stored) {
           try {
@@ -167,6 +173,8 @@ class DataService {
 
   private saveToLocalStorage(key: string, value: any): void {
     if (typeof localStorage === 'undefined') return;
+    // Invariant: NEVER persist user directory records into browser localStorage
+    if (key === STORAGE_KEYS.USERS) return;
     try {
       localStorage.setItem(key, JSON.stringify(value));
     } catch (e) {
@@ -380,8 +388,8 @@ class DataService {
       }
 
       if (isAdmin) {
-        // Staff/Admin session: bounded administrative queue queries
-        const [appConfigRes, cashoutsRes, catRes, topupsRes, withdrawalsRes, walletsRes, convsRes, usersResp] =
+        // Staff/Admin session: bounded administrative queue queries (Users fetched on-demand on tab open)
+        const [appConfigRes, cashoutsRes, catRes, topupsRes, withdrawalsRes, walletsRes, convsRes] =
           await Promise.all([
             appConfigPromise,
             cashoutsPromise,
@@ -390,7 +398,6 @@ class DataService {
             supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(25),
             supabase.from('wallets').select('*').limit(50),
             supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
-            fetch('/api/admin/users').then((r) => r.json()).catch(() => ({ success: false, users: [] })),
           ]);
 
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
@@ -400,9 +407,6 @@ class DataService {
         if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
         if (walletsRes.data) this.applyWalletRows(walletsRes.data);
         if (convsRes.data) this.applyConversationRows(convsRes.data, true);
-        if (usersResp?.success && Array.isArray(usersResp.users)) {
-          this.applyUserRows(usersResp.users);
-        }
       } else if (currentUserId) {
         // Customer session: strictly scoped to CURRENT user only (no global table downloads)
         const [appConfigRes, cashoutsRes, catRes, walletRes, topupsRes, withdrawalsRes, gameAccsRes, convRes] =
@@ -493,11 +497,10 @@ class DataService {
           changed = true;
         }
       } else if (isAdmin) {
-        // Admin: refresh recent topups, withdrawals queue, and full users directory
-        const [topupsRes, withdrawalsRes, usersResp] = await Promise.all([
+        // Admin: refresh recent topups and withdrawals queue
+        const [topupsRes, withdrawalsRes] = await Promise.all([
           supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(15),
           supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(15),
-          fetch('/api/admin/users').then((r) => r.json()).catch(() => ({ success: false, users: [] })),
         ]);
 
         if (topupsRes.data && topupsRes.data.length > 0) {
@@ -506,10 +509,6 @@ class DataService {
         }
         if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
           this.applyWithdrawalRows(withdrawalsRes.data, false);
-          changed = true;
-        }
-        if (usersResp?.success && Array.isArray(usersResp.users) && usersResp.users.length > 0) {
-          this.applyUserRows(usersResp.users);
           changed = true;
         }
       }
@@ -1986,9 +1985,59 @@ class DataService {
     };
   }
 
-  // Users
+  // Users: In-memory runtime session store only (0 localStorage caching)
   public getUsers(): UserProfile[] {
-    return this.load<UserProfile[]>(STORAGE_KEYS.USERS, []);
+    return Array.isArray(this.cache[STORAGE_KEYS.USERS]) ? this.cache[STORAGE_KEYS.USERS] : [];
+  }
+
+  // Pure on-demand database fetch for Users & Staff Governance (0 local storage caching)
+  public async fetchLiveUsersDirectory(actingUser?: UserProfile | null): Promise<{
+    success: boolean;
+    users: UserProfile[];
+    error?: string;
+  }> {
+    try {
+      const activeUser = actingUser || this.getCurrentUser();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (activeUser) {
+        headers['x-user-id'] = activeUser.id;
+        headers['x-user-role'] = activeUser.role;
+      }
+      const resp = await fetch('/api/admin/users', {
+        method: 'GET',
+        headers,
+      });
+
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        return {
+          success: false,
+          users: [],
+          error: errData.error || `Server returned HTTP ${resp.status}`,
+        };
+      }
+
+      const data = await resp.json();
+      if (data.success && Array.isArray(data.users)) {
+        // Keep in-memory cache updated strictly for current active session; NEVER write to localStorage
+        this.cache[STORAGE_KEYS.USERS] = data.users;
+        return { success: true, users: data.users };
+      }
+
+      return {
+        success: false,
+        users: [],
+        error: data.error || 'Failed to parse user directory response from server.',
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        users: [],
+        error: err.message || 'Network error fetching user directory.',
+      };
+    }
   }
 
   public getUserById(userId: string): UserProfile | undefined {
@@ -2025,7 +2074,6 @@ class DataService {
             const cur = this.getUsers();
             if (!cur.some((x) => x.id === u.id)) {
               this.cache[STORAGE_KEYS.USERS] = [...cur, u];
-              this.saveToLocalStorage(STORAGE_KEYS.USERS, this.cache[STORAGE_KEYS.USERS]);
               window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'users' } }));
             }
           }
@@ -2137,7 +2185,6 @@ class DataService {
       u.id === targetUser.id ? { ...u, role: newRole, promotedBy: actingUser.id, promotedByName: actingUser.displayName, promotedAt: targetUser.promotedAt } : u
     );
     this.cache[STORAGE_KEYS.USERS] = allUsers;
-    this.saveToLocalStorage(STORAGE_KEYS.USERS, allUsers);
 
     if (supabase && isSupabaseConfigured()) {
       await supabase.from('users').update({ role: newRole, updated_at: new Date().toISOString() }).eq('id', targetUser.id);

@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan to convert the Telegram bot into a zero-egress, one-way outbound notification bot that alerts with the customer's name when a customer messages, completely removing continuous long-polling.",
-  "updatedAt":  "2026-10-22T08:50:49.590270865Z",
+  "summary":  "Revised plan to completely eliminate browser localStorage caching for user directory data. Users, wallet balances, and game accounts are loaded purely on-demand from the PostgreSQL database only when an admin opens the Users & Roles tab, minimizing server egress and ensuring 100% authoritative data.",
+  "updatedAt":  "2026-10-22T11:06:46.036314724Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
