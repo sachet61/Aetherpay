@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { UserProfile, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
+import { authSessionService } from '../../services/authSessionService';
+import { EmailOtpModal } from '../../components/auth/EmailOtpModal';
 import {
   User,
   Shield,
@@ -11,9 +13,7 @@ import {
   Calendar,
   KeyRound,
   CheckCircle2,
-  Lock,
-  Zap,
-  Send,
+  ShieldCheck,
 } from 'lucide-react';
 
 interface CustomerProfileProps {
@@ -31,60 +31,16 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
   onSwitchUser,
   onLogout,
 }) => {
-  const [phoneVerified, setPhoneVerified] = useState(true);
-  const [otpSent, setOtpSent] = useState(false);
-  const [otpCode, setOtpCode] = useState('');
   const [successNote, setSuccessNote] = useState<string | null>(null);
-  const [isVerifyingEmail, setIsVerifyingEmail] = useState(false);
-  const [isSendingEmailLink, setIsSendingEmailLink] = useState(false);
+  const [showOtpModal, setShowOtpModal] = useState(false);
 
-  const handleProfileVerifyNow = async () => {
-    if (isVerifyingEmail) return;
-    setIsVerifyingEmail(true);
-    setSuccessNote('Confirming email with Supabase Auth...');
-    try {
-      const res = await dataService.confirmEmailNow(currentUser.email);
-      if (res.success) {
-        setSuccessNote('Email address successfully verified in Supabase! Cashouts and referral bonuses unlocked.');
-      } else {
-        setSuccessNote(`Verification status: ${res.message || 'Please check email link.'}`);
-      }
-    } catch (e: any) {
-      setSuccessNote(e?.message || 'Verification error.');
-    } finally {
-      setIsVerifyingEmail(false);
-      setTimeout(() => setSuccessNote(null), 6000);
-    }
-  };
-
-  const handleProfileSendLink = async () => {
-    if (isSendingEmailLink) return;
-    setIsSendingEmailLink(true);
-    try {
-      const res = await dataService.sendVerificationEmail();
-      setSuccessNote(res.message || `Verification link dispatched to ${currentUser.email}.`);
-    } catch (e: any) {
-      setSuccessNote(e?.message || 'Error sending link.');
-    } finally {
-      setIsSendingEmailLink(false);
-      setTimeout(() => setSuccessNote(null), 6000);
-    }
-  };
-
-  const handleSimulateSendOTP = () => {
-    setOtpSent(true);
-    setSuccessNote('Demo OTP code [998822] generated. Enter it to verify.');
+  const handleOtpSuccess = (updatedUser: UserProfile) => {
+    setShowOtpModal(false);
+    dataService.registerUser(updatedUser);
+    authSessionService.updateUserProfile(updatedUser);
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
+    setSuccessNote('Email address successfully verified via OTP!');
     setTimeout(() => setSuccessNote(null), 5000);
-  };
-
-  const handleVerifyOTP = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (otpCode === '998822' || otpCode.length === 6) {
-      setPhoneVerified(true);
-      setOtpSent(false);
-      setSuccessNote('Phone number verified successfully with 2FA protection active!');
-      setTimeout(() => setSuccessNote(null), 4000);
-    }
   };
 
   return (
@@ -92,7 +48,7 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
       <div>
         <h1 className="text-2xl font-bold text-white tracking-tight">Profile &amp; Security Settings</h1>
         <p className="text-xs text-slate-400 mt-1">
-          Manage your personal verification credentials, two-factor authentication, and login sessions.
+          Manage your personal verification credentials, account security, and login sessions.
         </p>
       </div>
 
@@ -160,23 +116,12 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
               <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={handleProfileVerifyNow}
-                  disabled={isVerifyingEmail}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center gap-1 shadow-md shadow-emerald-600/20 active:scale-95 disabled:opacity-50"
-                  title="Verify account instantly in Supabase Auth"
+                  onClick={() => setShowOtpModal(true)}
+                  className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-indigo-600/20 active:scale-95"
+                  title="Verify email with 6-digit OTP code"
                 >
-                  <Zap className={`w-3.5 h-3.5 ${isVerifyingEmail ? 'animate-bounce' : ''}`} />
-                  <span>{isVerifyingEmail ? 'Verifying...' : 'Verify Now (Instant)'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleProfileSendLink}
-                  disabled={isSendingEmailLink}
-                  className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-semibold transition flex items-center gap-1 disabled:opacity-50"
-                  title="Dispatch email confirmation link to inbox"
-                >
-                  <Send className="w-3 h-3" />
-                  <span>{isSendingEmailLink ? 'Sending...' : 'Send Email Link'}</span>
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Verify by OTP / Enter OTP</span>
                 </button>
               </div>
             )}
@@ -219,43 +164,14 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
         </div>
       </div>
 
-      {/* Security & 2FA Card */}
-      <div className="p-6 rounded-2xl border border-slate-800 bg-slate-900 shadow-xl space-y-4">
-        <div className="flex items-center gap-2">
-          <Lock className="w-5 h-5 text-indigo-400" />
-          <h3 className="text-sm font-bold text-white">Security &amp; Phone OTP Verification</h3>
-        </div>
-
-        <p className="text-xs text-slate-300 leading-relaxed">
-          Phone number SMS verification protects cashout requests from unauthorized access. In demo mode, simulated OTP codes are instantly provided.
-        </p>
-
-        {!otpSent ? (
-          <button
-            onClick={handleSimulateSendOTP}
-            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs border border-slate-700 transition-colors"
-          >
-            Re-verify Phone via SMS OTP
-          </button>
-        ) : (
-          <form onSubmit={handleVerifyOTP} className="flex items-center gap-2 max-w-sm">
-            <input
-              type="text"
-              placeholder="Enter 6-digit OTP code"
-              value={otpCode}
-              onChange={(e) => setOtpCode(e.target.value)}
-              className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-indigo-500"
-            />
-            <button
-              type="submit"
-              className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs"
-            >
-              Verify OTP
-            </button>
-          </form>
-        )}
-      </div>
-
+      {showOtpModal && (
+        <EmailOtpModal
+          email={currentUser.email}
+          isOpen={showOtpModal}
+          onClose={() => setShowOtpModal(false)}
+          onSuccess={handleOtpSuccess}
+        />
+      )}
     </div>
   );
 };
