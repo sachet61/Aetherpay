@@ -552,23 +552,6 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
                       <ArrowRight className="w-4 h-4" />
                     </button>
                   </form>
-
-                  {/* Immediate Unverified Account Verification Trigger */}
-                  <div className="pt-2 text-center border-t border-slate-800/80">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const targetEmail = email.trim();
-                        setOtpEmail(targetEmail);
-                        setShowOtpModal(true);
-                        setErrorMessage(null);
-                      }}
-                      className="text-[11px] text-amber-400 hover:text-amber-300 hover:underline transition font-medium cursor-pointer inline-flex items-center gap-1"
-                    >
-                      <span>Unverified account? Enter 6-digit code or resend</span>
-                      <ArrowRight className="w-3 h-3" />
-                    </button>
-                  </div>
                 </div>
               ) : (
                 /* Registration Form */
