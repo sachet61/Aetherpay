@@ -1,6 +1,6 @@
 {
-  "summary":  "Revised plan to completely eliminate browser localStorage caching for user directory data. Users, wallet balances, and game accounts are loaded purely on-demand from the PostgreSQL database only when an admin opens the Users & Roles tab, minimizing server egress and ensuring 100% authoritative data.",
-  "updatedAt":  "2026-10-22T11:06:46.036314724Z",
+  "summary":  "Implementation plan for diagnosing and fixing the HTTP 404 error on /api/admin/users in the Swift Sweeps Admin Users and Roles catalog.",
+  "updatedAt":  "2026-10-23T05:13:24.225372203Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
