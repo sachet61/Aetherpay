@@ -114,9 +114,16 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     setConversations(list);
 
     if (selectedConvId) {
-      const active = list.find((c) => c.id === selectedConvId);
+      let active = list.find((c) => c.id === selectedConvId);
+      if (!active) {
+        const canonicalId = dataService.resolveCanonicalConvId(selectedConvId);
+        active = list.find((c) => c.id === canonicalId);
+        if (active && active.id !== selectedConvId) {
+          setSelectedConvId(active.id);
+        }
+      }
       if (active) {
-        setMessages(dataService.getMessages(selectedConvId));
+        setMessages(dataService.getMessages(active.id));
       }
     }
   };
@@ -350,9 +357,10 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   });
 
   const handleSelectConversation = (convId: string) => {
-    setSelectedConvId(convId);
-    setMessages(dataService.getMessages(convId));
-    dataService.markConversationRead(convId, 'staff');
+    const canonicalId = dataService.resolveCanonicalConvId(convId);
+    setSelectedConvId(canonicalId);
+    setMessages(dataService.getMessages(canonicalId));
+    dataService.markConversationRead(canonicalId, 'staff');
   };
 
   const handleBackToCustomerList = () => {

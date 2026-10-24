@@ -100,6 +100,7 @@ class DataService {
   private mutationDebounceTimer: number | null = null;
   private isVisibilityListenerAttached = false;
   private isSyncingDelta = false;
+  private conversationAliasMap: Map<string, string> = new Map();
 
   constructor() {
     this.cleanLegacyStorage();
@@ -110,6 +111,13 @@ class DataService {
       const clean = this.deduplicateGameAccounts(initialAccounts);
       this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = clean;
       this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, clean);
+    }
+    // Enforce invariant: Strictly 1 persistent conversation per customer across all agents & admins
+    const initialConvs = this.cache[STORAGE_KEYS.CONVERSATIONS] as SupportConversation[];
+    if (Array.isArray(initialConvs) && initialConvs.length > 0) {
+      const cleanConvs = this.deduplicateAndMergeConversations(initialConvs);
+      this.cache[STORAGE_KEYS.CONVERSATIONS] = cleanConvs;
+      this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, cleanConvs);
     }
     this.attachVisibilityListener();
     this.initPersistence();
@@ -543,7 +551,8 @@ class DataService {
     options?: { beforeCreatedAt?: string; limit?: number }
   ): Promise<ChatMessage[]> {
     if (!conversationId) return [];
-    const localMsgs = this.getMessages(conversationId);
+    const targetConvId = this.resolveCanonicalConvId(conversationId);
+    const localMsgs = this.getMessages(targetConvId);
 
     if (!supabase || !isSupabaseConfigured()) {
       return localMsgs;
@@ -554,7 +563,7 @@ class DataService {
       let query = supabase
         .from('messages')
         .select('*')
-        .eq('conversation_id', conversationId);
+        .eq('conversation_id', targetConvId);
 
       if (options?.beforeCreatedAt) {
         query = query.lt('created_at', options.beforeCreatedAt);
@@ -1015,8 +1024,9 @@ class DataService {
     const mergedList = Array.from(convMap.values()).sort(
       (a, b) => new Date(b.lastMessageTimestamp).getTime() - new Date(a.lastMessageTimestamp).getTime()
     );
-    this.cache[STORAGE_KEYS.CONVERSATIONS] = mergedList;
-    this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, mergedList);
+    const cleanList = this.deduplicateAndMergeConversations(mergedList);
+    this.cache[STORAGE_KEYS.CONVERSATIONS] = cleanList;
+    this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, cleanList);
   }
 
   private applyMessageRows(rows: any[]): void {
@@ -3956,17 +3966,175 @@ class DataService {
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_migrated' } }));
   }
 
-  // Real-Time Chat & Customer Support Center
-  public getConversations(): SupportConversation[] {
-    return this.load<SupportConversation[]>(STORAGE_KEYS.CONVERSATIONS, INITIAL_CONVERSATIONS).sort(
+  // Real-Time Chat & Customer Support Center (Invariant: Strictly 1 persistent conversation per customer)
+  public resolveCanonicalConvId(convId: string): string {
+    if (!convId) return '';
+    return this.conversationAliasMap.get(convId) || convId;
+  }
+
+  private getCustomerGroupKey(c: SupportConversation): string {
+    const user = this.getUserById(c.customerId) || (c.customerEmail ? this.getUsers().find((u) => u.email.toLowerCase() === c.customerEmail?.toLowerCase()) : undefined);
+    if (user) {
+      return `usr_${user.id}`;
+    }
+    if (c.customerEmail && c.customerEmail.trim()) {
+      return `email_${c.customerEmail.trim().toLowerCase()}`;
+    }
+    if (c.customerId && c.customerId.trim()) {
+      return `id_${c.customerId.trim().toLowerCase()}`;
+    }
+    if (c.customerName && c.customerName.trim()) {
+      return `name_${c.customerName.trim().toLowerCase()}`;
+    }
+    return `conv_${c.id}`;
+  }
+
+  public deduplicateAndMergeConversations(rawList?: SupportConversation[]): SupportConversation[] {
+    const list = rawList || (this.cache[STORAGE_KEYS.CONVERSATIONS] as SupportConversation[]) || [];
+    if (!Array.isArray(list) || list.length === 0) return [];
+
+    const messagesDict = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+    let messagesUpdated = false;
+
+    // Group conversations by customer
+    const groups = new Map<string, SupportConversation[]>();
+    for (const c of list) {
+      const key = this.getCustomerGroupKey(c);
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key)!.push(c);
+    }
+
+    const deduplicated: SupportConversation[] = [];
+    const duplicateIdsToDeleteInDb: string[] = [];
+    const messagesToReassignInDb: { fromIds: string[]; toId: string }[] = [];
+
+    for (const [, convs] of groups.entries()) {
+      if (convs.length === 1) {
+        deduplicated.push(convs[0]);
+        continue;
+      }
+
+      // Multiple conversations found for this single customer: sort earliest created first
+      convs.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      const canonical = { ...convs[0] };
+      const duplicates = convs.slice(1);
+      const dupIds: string[] = [];
+
+      // Collect all messages across canonical and duplicates
+      const canonicalMsgs: ChatMessage[] = [...(messagesDict[canonical.id] || [])];
+
+      let maxUnreadStaff = canonical.unreadCountStaff || 0;
+      let maxUnreadCustomer = canonical.unreadCountCustomer || 0;
+      let hasOpenStatus = canonical.status === 'open';
+
+      for (const dup of duplicates) {
+        dupIds.push(dup.id);
+        this.conversationAliasMap.set(dup.id, canonical.id);
+
+        if (dup.status === 'open') hasOpenStatus = true;
+        maxUnreadStaff = Math.max(maxUnreadStaff, dup.unreadCountStaff || 0);
+        maxUnreadCustomer = Math.max(maxUnreadCustomer, dup.unreadCountCustomer || 0);
+
+        const dupMsgs = messagesDict[dup.id] || [];
+        if (dupMsgs.length > 0) {
+          for (const m of dupMsgs) {
+            canonicalMsgs.push({
+              ...m,
+              conversationId: canonical.id,
+            });
+          }
+          delete messagesDict[dup.id];
+          messagesUpdated = true;
+        }
+      }
+
+      // Deduplicate messages by id and sort chronologically
+      const seenMsgIds = new Set<string>();
+      const cleanMsgs: ChatMessage[] = [];
+      for (const m of canonicalMsgs) {
+        if (!seenMsgIds.has(m.id)) {
+          seenMsgIds.add(m.id);
+          cleanMsgs.push(m);
+        }
+      }
+      cleanMsgs.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      messagesDict[canonical.id] = cleanMsgs;
+      messagesUpdated = true;
+
+      // Update canonical conversation attributes
+      canonical.status = hasOpenStatus ? 'open' : canonical.status;
+      canonical.unreadCountStaff = maxUnreadStaff;
+      canonical.unreadCountCustomer = maxUnreadCustomer;
+
+      if (cleanMsgs.length > 0) {
+        const lastMsg = cleanMsgs[cleanMsgs.length - 1];
+        canonical.lastMessageText = lastMsg.text || canonical.lastMessageText;
+        canonical.lastMessageTimestamp = lastMsg.createdAt || canonical.lastMessageTimestamp;
+        canonical.updatedAt = lastMsg.createdAt || canonical.updatedAt;
+      }
+
+      // Reconcile user profile if available
+      const user = this.getUserById(canonical.customerId) || (canonical.customerEmail ? this.getUsers().find((u) => u.email.toLowerCase() === canonical.customerEmail?.toLowerCase()) : undefined);
+      if (user) {
+        canonical.customerId = user.id;
+        canonical.customerName = user.displayName;
+        canonical.customerEmail = user.email;
+      }
+
+      deduplicated.push(canonical);
+      duplicateIdsToDeleteInDb.push(...dupIds);
+      messagesToReassignInDb.push({ fromIds: dupIds, toId: canonical.id });
+    }
+
+    if (messagesUpdated) {
+      this.cache[STORAGE_KEYS.MESSAGES] = messagesDict;
+      this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, messagesDict);
+    }
+
+    deduplicated.sort(
       (a, b) => new Date(b.lastMessageTimestamp).getTime() - new Date(a.lastMessageTimestamp).getTime()
     );
+
+    this.cache[STORAGE_KEYS.CONVERSATIONS] = deduplicated;
+    this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, deduplicated);
+
+    // Asynchronously update Supabase database to maintain single persistent thread invariant
+    if (duplicateIdsToDeleteInDb.length > 0 && supabase && isSupabaseConfigured()) {
+      (async () => {
+        try {
+          for (const item of messagesToReassignInDb) {
+            if (item.fromIds.length > 0) {
+              await supabase
+                .from('messages')
+                .update({ conversation_id: item.toId })
+                .in('conversation_id', item.fromIds);
+            }
+          }
+          await supabase
+            .from('conversations')
+            .delete()
+            .in('id', duplicateIdsToDeleteInDb);
+        } catch (dbErr) {
+          console.warn('[SwiftSweeps] Supabase conversation consolidation sync notice:', dbErr);
+        }
+      })();
+    }
+
+    return deduplicated;
+  }
+
+  public getConversations(): SupportConversation[] {
+    const raw = this.load<SupportConversation[]>(STORAGE_KEYS.CONVERSATIONS, INITIAL_CONVERSATIONS);
+    return this.deduplicateAndMergeConversations(raw);
   }
 
   public getOrCreateConversationForCustomer(customerId: string, customerName: string): SupportConversation {
     const list = this.getConversations();
     const user = this.getUserById(customerId);
     const userEmail = user?.email?.toLowerCase();
+    const cleanCustomerName = customerName?.trim().toLowerCase();
 
     // 1. First look by customerId
     let conv = list.find((c) => c.customerId === customerId);
@@ -3977,15 +4145,22 @@ class DataService {
     }
 
     // 3. Look by customer name
-    if (!conv && customerName) {
-      const cleanName = customerName.trim().toLowerCase();
-      conv = list.find((c) => c.customerName && c.customerName.trim().toLowerCase() === cleanName);
+    if (!conv && cleanCustomerName) {
+      conv = list.find((c) => c.customerName && c.customerName.trim().toLowerCase() === cleanCustomerName);
     }
 
     // 4. Look by conv ID alias (e.g. conv_haude_maxe)
-    if (!conv && customerName) {
-      const idAlias = `conv_${customerName.toLowerCase().replace(/\s+/g, '_')}`;
+    if (!conv && cleanCustomerName) {
+      const idAlias = `conv_${cleanCustomerName.replace(/\s+/g, '_')}`;
       conv = list.find((c) => c.id.toLowerCase() === idAlias);
+    }
+
+    // 5. Look if any registered user has matching name/id to link
+    if (!conv && user) {
+      conv = list.find((c) => {
+        const cUser = this.getUserById(c.customerId);
+        return cUser && cUser.id === user.id;
+      });
     }
 
     if (conv) {
@@ -4062,8 +4237,9 @@ class DataService {
   }
 
   public getMessages(conversationId: string): ChatMessage[] {
+    const targetId = this.resolveCanonicalConvId(conversationId);
     const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-    return all[conversationId] || [];
+    return all[targetId] || [];
   }
 
   public sendChatMessage(params: {
@@ -4077,9 +4253,10 @@ class DataService {
     isInternalNote?: boolean;
     transactionData?: ChatTransactionData;
   }): ChatMessage {
+    const targetConvId = this.resolveCanonicalConvId(params.conversationId);
     const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-    if (!all[params.conversationId]) {
-      all[params.conversationId] = [];
+    if (!all[targetConvId]) {
+      all[targetConvId] = [];
     }
 
     // Deterministic Intent Parsing
@@ -4117,7 +4294,7 @@ class DataService {
 
     const newMsg: ChatMessage = {
       id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      conversationId: params.conversationId,
+      conversationId: targetConvId,
       senderId: params.senderId,
       senderName: params.senderName,
       senderRole: params.senderRole,
@@ -4131,12 +4308,12 @@ class DataService {
       isRead: false,
     };
 
-    all[params.conversationId].push(newMsg);
+    all[targetConvId].push(newMsg);
     this.save(STORAGE_KEYS.MESSAGES, all);
 
     // Update conversation summary
     const conversations = this.getConversations();
-    const conv = conversations.find((c) => c.id === params.conversationId);
+    const conv = conversations.find((c) => c.id === targetConvId);
     if (conv) {
       if (!params.isInternalNote) {
         conv.lastMessageText = params.text;
@@ -4155,7 +4332,7 @@ class DataService {
     try {
       if (supabase && isSupabaseConfigured()) {
         // 1. Room specific broadcast
-        const channel = supabase.channel(`room_${params.conversationId}`);
+        const channel = supabase.channel(`room_${targetConvId}`);
         if ((channel as any).state === 'joined') {
           channel
             .send({
@@ -4232,7 +4409,7 @@ class DataService {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             customerName: params.senderName || 'Customer',
-            conversationId: params.conversationId,
+            conversationId: targetConvId,
           }),
         }).catch((err) => console.warn('Telegram notify-message notice:', err));
       } catch (err) {
@@ -4245,18 +4422,21 @@ class DataService {
 
   public appendIncomingMessage(msg: ChatMessage): void {
     if (!msg || !msg.conversationId || !msg.id) return;
+    const targetConvId = this.resolveCanonicalConvId(msg.conversationId);
+    msg.conversationId = targetConvId;
+
     const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-    if (!all[msg.conversationId]) {
-      all[msg.conversationId] = [];
+    if (!all[targetConvId]) {
+      all[targetConvId] = [];
     }
-    if (!all[msg.conversationId].some((m) => m.id === msg.id)) {
-      all[msg.conversationId].push(msg);
+    if (!all[targetConvId].some((m) => m.id === msg.id)) {
+      all[targetConvId].push(msg);
       this.cache[STORAGE_KEYS.MESSAGES] = all;
       this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
 
       // Also ensure conversation summary has latest message
       const conversations = this.getConversations();
-      const conv = conversations.find((c) => c.id === msg.conversationId);
+      const conv = conversations.find((c) => c.id === targetConvId);
       if (conv) {
         if (!msg.isInternalNote) {
           conv.lastMessageText = msg.text;
@@ -4268,7 +4448,7 @@ class DataService {
 
       window.dispatchEvent(
         new CustomEvent('aetherpay_state_changed', {
-          detail: { key: 'chat_incoming', message: msg, conversationId: msg.conversationId },
+          detail: { key: 'chat_incoming', message: msg, conversationId: targetConvId },
         })
       );
     }
@@ -4325,8 +4505,9 @@ class DataService {
   }
 
   public markConversationRead(conversationId: string, role: 'customer' | 'staff'): void {
+    const targetConvId = this.resolveCanonicalConvId(conversationId);
     const conversations = this.getConversations();
-    const conv = conversations.find((c) => c.id === conversationId);
+    const conv = conversations.find((c) => c.id === targetConvId);
     if (conv) {
       if (role === 'customer') conv.unreadCountCustomer = 0;
       else conv.unreadCountStaff = 0;
