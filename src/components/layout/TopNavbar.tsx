@@ -783,22 +783,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
               )}
             </div>
 
-            {/* Drawer Footer Actions */}
-            <div className="p-3 border-t border-slate-800/80 bg-[#0E1726]/60">
-              {onLogout && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsMobileDrawerOpen(false);
-                    onLogout();
-                  }}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold text-rose-300 bg-rose-950/40 hover:bg-rose-950/70 border border-rose-900/50 hover:border-rose-700 transition-colors cursor-pointer shadow-lg"
-                >
-                  <LogOut className="w-4 h-4 text-rose-400" />
-                  <span>Sign Out</span>
-                </button>
-              )}
-            </div>
+
           </aside>
         </div>
       )}
