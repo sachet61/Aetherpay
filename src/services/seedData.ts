@@ -99,10 +99,7 @@ export const INITIAL_CONFIG: AppConfig = {
     },
   ],
   gatewaySimulator: {
-    autoWebhookEnabled: true,
-    webhookEndpointUrl: 'https://api.swiftsweeps.com/v1/webhooks/gateway_receiver',
     autoApproveInstantGateway: true,
-    simulateWebhookLatencyMs: 1200,
     failureRatePercentage: 0,
     activeProviders: {
       zelleFedNow: true,

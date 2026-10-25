@@ -18,7 +18,6 @@ import {
   PaymentMethodType,
   WithdrawalStatus,
   CashoutFeedItem,
-  WebhookLog,
   PasswordResetToken,
   UserRole,
 } from '../types';
@@ -63,7 +62,6 @@ const STORAGE_KEYS = {
   NOTIFICATIONS: 'aetherpay_notifications',
   AUDIT_LOGS: 'aetherpay_audit_logs',
   CONFIG: 'aetherpay_config',
-  WEBHOOK_LOGS: 'aetherpay_webhook_logs',
   FAKED_CASHOUTS: 'aetherpay_faked_cashouts',
   PASSWORD_RESET_TOKENS: 'aetherpay_password_reset_tokens',
   CURRENT_USER_ID: 'aetherpay_current_user_id',
@@ -84,7 +82,6 @@ class DataService {
     [STORAGE_KEYS.NOTIFICATIONS]: [],
     [STORAGE_KEYS.AUDIT_LOGS]: [],
     [STORAGE_KEYS.CONFIG]: { ...INITIAL_CONFIG },
-    [STORAGE_KEYS.WEBHOOK_LOGS]: [],
     [STORAGE_KEYS.FAKED_CASHOUTS]: [],
     [STORAGE_KEYS.PASSWORD_RESET_TOKENS]: [],
   };
@@ -2662,17 +2659,6 @@ class DataService {
       updatedAt: new Date().toISOString(),
     };
 
-    if (config.gatewaySimulator?.autoWebhookEnabled) {
-      this.triggerAutomatedWebhookSimulation({
-        gateway: params.methodName,
-        eventType: initialStatus === 'completed' ? 'payment.succeeded' : 'payment.succeeded',
-        amount: params.amount,
-        customerId: params.customerId,
-        customerName: params.customerName,
-        requestId: newReqId,
-      });
-    }
-
     const allReqs = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
     allReqs.unshift(newReq);
     this.save(STORAGE_KEYS.TOPUPS, allReqs);
@@ -3230,20 +3216,7 @@ class DataService {
         message: `Your $${req.netPayout.toFixed(2)} cashout was dispatched. Reference: ${params.payoutReference || 'Completed'}`,
         type: 'withdrawal',
         linkTab: 'withdrawal',
-        linkRequestId: req.id,
       });
-
-      const cfg = this.getAppConfig();
-      if (cfg.gatewaySimulator?.autoWebhookEnabled) {
-        this.triggerAutomatedWebhookSimulation({
-          gateway: req.methodName || 'Bank Transfer',
-          eventType: 'payout.settled',
-          amount: req.netPayout,
-          customerId: req.customerId,
-          customerName: req.customerName,
-          requestId: req.id,
-        });
-      }
     } else if (params.newStatus === 'rejected' || params.newStatus === 'cancelled') {
       // Compensating transaction: release reserved funds back to available balance!
       if (wallet) {
@@ -4769,65 +4742,6 @@ class DataService {
     };
     all.unshift(newTx);
     this.save(STORAGE_KEYS.TRANSACTIONS, all);
-  }
-
-  // Gateway Simulator & Automated Webhook Notifications
-  public getWebhookLogs(): WebhookLog[] {
-    return this.load<WebhookLog[]>(STORAGE_KEYS.WEBHOOK_LOGS, []).sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-    );
-  }
-
-  public recordWebhookLog(log: Omit<WebhookLog, 'id' | 'timestamp'>): WebhookLog {
-    const list = this.getWebhookLogs();
-    const newLog: WebhookLog = {
-      ...log,
-      id: `whk_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      timestamp: new Date().toISOString(),
-    };
-    list.unshift(newLog);
-    if (list.length > 50) list.pop(); // Keep recent 50 logs
-    this.save(STORAGE_KEYS.WEBHOOK_LOGS, list);
-    return newLog;
-  }
-
-  public clearWebhookLogs(): void {
-    this.save(STORAGE_KEYS.WEBHOOK_LOGS, []);
-  }
-
-  public triggerAutomatedWebhookSimulation(params: {
-    gateway: string;
-    eventType: 'payment.succeeded' | 'payment.failed' | 'payout.settled' | 'crypto.confirmations_reached';
-    amount: number;
-    customerId: string;
-    customerName: string;
-    requestId?: string;
-  }): WebhookLog {
-    const cfg = this.getAppConfig();
-    const isSuccess = Math.random() * 100 >= (cfg.gatewaySimulator.failureRatePercentage || 0);
-
-    const payload = {
-      event_id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      type: params.eventType,
-      gateway: params.gateway,
-      created_at: new Date().toISOString(),
-      data: {
-        customer_id: params.customerId,
-        customer_name: params.customerName,
-        amount: params.amount,
-        currency: cfg.currency,
-        reference_id: params.requestId || `GW_SIM_${Date.now().toString(36).toUpperCase()}`,
-        status: isSuccess ? 'succeeded' : 'failed',
-      },
-    };
-
-    return this.recordWebhookLog({
-      gateway: params.gateway,
-      eventType: params.eventType,
-      payload,
-      status: isSuccess ? 'delivered' : 'failed',
-      responseStatus: isSuccess ? 200 : 500,
-    });
   }
 
   // Real-Time Mixed Cashouts Feed (Real + Admin-Configured Fake Pool)

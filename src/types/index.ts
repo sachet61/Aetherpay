@@ -344,51 +344,12 @@ export interface WithdrawalMethodConfig {
 }
 
 export interface GatewaySimulatorConfig {
-  autoWebhookEnabled: boolean;
-  webhookEndpointUrl: string;
   autoApproveInstantGateway: boolean;
-  simulateWebhookLatencyMs: number;
   failureRatePercentage: number;
   activeProviders: {
     zelleFedNow: boolean;
     cryptoTrc20: boolean;
   };
-}
-
-export interface CashoutFeedItem {
-  id: string;
-  customerName: string;
-  amount: number;
-  currency: string;
-  methodName: string;
-  gameName?: string;
-  isFake: boolean;
-  timestamp: string;
-}
-
-export interface CashoutFeedConfig {
-  enabled: boolean;
-  minAmount: number;
-  maxAmount: number;
-  intervalSeconds: number;
-  namesPool: string[]; // customizable list of names or usernames
-  probableAmounts?: number[]; // custom most probable cashout amounts (e.g. 50, 75, 100, 120, 150, 200, 250)
-  timeWindowHours?: number; // default 2 hours ago
-  displayLocations: {
-    customerHome: boolean;
-    withdrawalPage: boolean;
-    walletPage: boolean;
-  };
-}
-
-export interface WebhookLog {
-  id: string;
-  gateway: string;
-  eventType: string;
-  payload: Record<string, any>;
-  status: 'delivered' | 'failed' | 'simulated';
-  timestamp: string;
-  responseStatus: number;
 }
 
 export interface AppConfig {

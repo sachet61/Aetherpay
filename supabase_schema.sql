@@ -265,3 +265,114 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation ON public.messages(conversa
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON public.notifications(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_game_accounts_customer ON public.game_accounts(customer_id);
 CREATE INDEX IF NOT EXISTS idx_cashouts_timestamp ON public.faked_cashouts(timestamp DESC);
+
+-- ====================================================================
+-- 13. Automated Auth Synchronization & Email Verification Triggers
+-- Keeps public.users.email_verified in lockstep with auth.users.email_confirmed_at
+-- with zero client-side egress and guarantees verified status is never wiped.
+-- ====================================================================
+
+-- Trigger Function 1: Synchronize changes from auth.users into public.users
+CREATE OR REPLACE FUNCTION public.handle_auth_user_sync()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth
+AS $$
+DECLARE
+  v_display_name TEXT;
+  v_role TEXT;
+  v_verified BOOLEAN;
+BEGIN
+  v_display_name := COALESCE(
+    NEW.raw_user_meta_data->>'display_name',
+    NEW.raw_user_meta_data->>'full_name',
+    split_part(COALESCE(NEW.email, 'user@domain.com'), '@', 1),
+    'User'
+  );
+
+  v_role := CASE 
+    WHEN NEW.email = 'sachet61@gmail.com' THEN 'admin' 
+    ELSE COALESCE(NEW.raw_user_meta_data->>'role', 'customer') 
+  END;
+
+  v_verified := (NEW.email_confirmed_at IS NOT NULL);
+
+  -- Check if user exists by id or email to avoid unique constraint violations
+  IF EXISTS (SELECT 1 FROM public.users WHERE id = NEW.id::text OR email = NEW.email) THEN
+    UPDATE public.users
+    SET
+      id = NEW.id::text,
+      email = NEW.email,
+      email_verified = CASE 
+        WHEN v_verified THEN true 
+        ELSE public.users.email_verified 
+      END,
+      role = CASE 
+        WHEN NEW.email = 'sachet61@gmail.com' THEN 'admin' 
+        ELSE public.users.role 
+      END,
+      updated_at = now()
+    WHERE id = NEW.id::text OR email = NEW.email;
+  ELSE
+    INSERT INTO public.users (
+      id,
+      email,
+      display_name,
+      role,
+      status,
+      email_verified,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      NEW.id::text,
+      NEW.email,
+      v_display_name,
+      v_role,
+      'active',
+      v_verified,
+      COALESCE(NEW.created_at, now()),
+      now()
+    );
+  END IF;
+
+  RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  -- Guard auth.users transaction: log warning without failing authentication
+  RAISE WARNING 'handle_auth_user_sync exception: %', SQLERRM;
+  RETURN NEW;
+END;
+$$;
+
+-- Bind Trigger to auth.users (only on INSERT or when email_confirmed_at changes)
+DROP TRIGGER IF EXISTS on_auth_user_sync_trigger ON auth.users;
+CREATE TRIGGER on_auth_user_sync_trigger
+  AFTER INSERT OR UPDATE OF email_confirmed_at ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_auth_user_sync();
+
+-- Drop old problematic guard trigger and function if present
+DROP TRIGGER IF EXISTS tr_protect_public_user_verification ON public.users;
+DROP FUNCTION IF EXISTS public.sync_user_verification_status();
+
+-- Trigger Function 2: Guard public.users from accidental downgrades by client upserts (pure local check, zero cross-table queries)
+CREATE OR REPLACE FUNCTION public.prevent_verification_downgrade()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.email_verified = true AND (NEW.email_verified IS NULL OR NEW.email_verified = false) THEN
+    NEW.email_verified := true;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+-- Bind Downgrade Guard Trigger to public.users
+DROP TRIGGER IF EXISTS tr_prevent_verification_downgrade ON public.users;
+CREATE TRIGGER tr_prevent_verification_downgrade
+  BEFORE UPDATE ON public.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.prevent_verification_downgrade();
+

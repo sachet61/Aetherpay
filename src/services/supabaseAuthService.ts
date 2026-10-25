@@ -707,17 +707,20 @@ class SupabaseAuthService {
     dataService.registerUser(profile);
 
     try {
-      await supabase.from('users').upsert({
+      const upsertData: Record<string, any> = {
         id: profile.id,
         email: profile.email,
         display_name: profile.displayName,
         role: profile.role,
         phone: profile.phone || null,
         status: profile.status,
-        email_verified: profile.emailVerified ?? false,
         referred_by: profile.referredBy || null,
         created_at: profile.createdAt,
-      });
+      };
+      if (profile.emailVerified === true) {
+        upsertData.email_verified = true;
+      }
+      await supabase.from('users').upsert(upsertData);
 
       const wallet = dataService.getWallet(profile.id);
       if (wallet) {

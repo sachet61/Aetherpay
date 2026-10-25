@@ -338,25 +338,6 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
           </p>
         </div>
 
-        <button
-          onClick={() => {
-            const log = dataService.triggerAutomatedWebhookSimulation({
-              gateway: 'Automated Gateway Webhook',
-              eventType: 'payment.succeeded',
-              amount: 500,
-              customerId: currentUser.id,
-              customerName: currentUser.displayName,
-            });
-            setFeedbackMsg({
-              text: `Simulated gateway webhook callback received (${log.gateway} -> ${log.eventType}). Response: ${log.responseStatus} OK.`,
-              type: 'success',
-            });
-          }}
-          className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-amber-600/50 text-amber-300 font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-sm self-start sm:self-auto"
-        >
-          <Zap className="w-4 h-4 text-amber-400" />
-          <span>Simulate Gateway Webhook</span>
-        </button>
       </div>
 
       {feedbackMsg && (

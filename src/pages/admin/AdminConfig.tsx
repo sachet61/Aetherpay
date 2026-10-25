@@ -342,7 +342,6 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
   const [successNote, setSuccessNote] = useState<string | null>(null);
   const [feedNotice, setFeedNotice] = useState<string | null>(null);
   const [simulatorNotice, setSimulatorNotice] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
-  const [webhookLogs, setWebhookLogs] = useState(dataService.getWebhookLogs());
   const [isResettingDatabase, setIsResettingDatabase] = useState(false);
   const [databaseNotice, setDatabaseNotice] = useState<string | null>(null);
 

@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for unifying support chat into a single persistent conversation per customer with message history merging.",
-  "updatedAt":  "2026-10-23T06:32:06.645823671Z",
+  "summary":  "Resolution for 'Database error granting user' by removing cross-schema type comparison errors and adding transaction exception guards to auth triggers.",
+  "updatedAt":  "2026-10-25T14:41:03.401688820Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
