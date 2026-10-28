@@ -113,13 +113,20 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     const list = dataService.getConversations();
     setConversations(list);
 
-    if (selectedConvId) {
-      let active = list.find((c) => c.id === selectedConvId);
+    let activeId = selectedConvId;
+    if (!activeId && list.length > 0 && typeof window !== 'undefined' && window.innerWidth >= 768) {
+      activeId = list[0].id;
+      setSelectedConvId(activeId);
+    }
+
+    if (activeId) {
+      let active = list.find((c) => c.id === activeId);
       if (!active) {
-        const canonicalId = dataService.resolveCanonicalConvId(selectedConvId);
+        const canonicalId = dataService.resolveCanonicalConvId(activeId);
         active = list.find((c) => c.id === canonicalId);
-        if (active && active.id !== selectedConvId) {
+        if (active && active.id !== activeId) {
           setSelectedConvId(active.id);
+          activeId = active.id;
         }
       }
       if (active) {
@@ -152,12 +159,19 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       dataService.fetchMessagesForConversation(selectedConvId, { limit: 40 }).then((fresh) => {
         if (fresh && fresh.length > 0) {
           setMessages(fresh);
+        } else {
+          setMessages(dataService.getMessages(selectedConvId));
         }
       });
     }
 
     // 3. Reactive updates from Realtime events: purely read from memory cache, ZERO REST calls!
-    const handleSync = () => syncFromMemory();
+    const handleSync = () => {
+      syncFromMemory();
+      if (selectedConvId) {
+        setMessages(dataService.getMessages(selectedConvId));
+      }
+    };
     window.addEventListener('aetherpay_state_changed', handleSync);
     window.addEventListener('storage', handleSync);
     return () => {
@@ -361,6 +375,11 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     setSelectedConvId(canonicalId);
     setMessages(dataService.getMessages(canonicalId));
     dataService.markConversationRead(canonicalId, 'staff');
+    dataService.fetchMessagesForConversation(canonicalId, { limit: 40 }).then((fresh) => {
+      if (fresh && fresh.length > 0) {
+        setMessages(fresh);
+      }
+    });
   };
 
   const handleBackToCustomerList = () => {

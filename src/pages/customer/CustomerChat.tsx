@@ -109,13 +109,16 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     dataService.fetchMessagesForConversation(conv.id, { limit: 40 }).then((freshMsgs) => {
       if (freshMsgs && freshMsgs.length > 0) {
         setMessages(freshMsgs);
+      } else {
+        setMessages(dataService.getMessages(conv.id));
       }
     });
 
     const handleSync = () => {
-      if (conv) {
-        setMessages(dataService.getMessages(conv.id));
-        setConversation(dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName));
+      const updated = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
+      if (updated) {
+        setConversation(updated);
+        setMessages(dataService.getMessages(updated.id));
       }
     };
 

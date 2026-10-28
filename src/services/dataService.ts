@@ -557,10 +557,29 @@ class DataService {
 
     try {
       const limit = options?.limit || 50;
+
+      // Identify all related conversation IDs for this customer to retrieve complete thread history
+      const candidateIds = new Set<string>([conversationId, targetConvId].filter(Boolean));
+      const conv = this.getConversations().find((c) => c.id === conversationId || c.id === targetConvId);
+      if (conv?.customerId) {
+        candidateIds.add(`conv_${conv.customerId}`);
+        for (const c of this.getConversations()) {
+          if (c.customerId === conv.customerId) {
+            candidateIds.add(c.id);
+          }
+        }
+      }
+      const queryIds = Array.from(candidateIds);
+
       let query = supabase
         .from('messages')
-        .select('*')
-        .eq('conversation_id', targetConvId);
+        .select('*');
+
+      if (queryIds.length === 1) {
+        query = query.eq('conversation_id', queryIds[0]);
+      } else {
+        query = query.in('conversation_id', queryIds);
+      }
 
       if (options?.beforeCreatedAt) {
         query = query.lt('created_at', options.beforeCreatedAt);
@@ -578,17 +597,19 @@ class DataService {
 
       if (data && data.length > 0) {
         const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-        const currentList = all[conversationId] || [];
         const msgMap = new Map<string, ChatMessage>();
 
-        for (const m of currentList) {
-          msgMap.set(m.id, m);
+        for (const cid of queryIds) {
+          const currentList = all[cid] || [];
+          for (const m of currentList) {
+            msgMap.set(m.id, m);
+          }
         }
 
         for (const row of data) {
           const item: ChatMessage = {
             id: row.id,
-            conversationId: row.conversation_id,
+            conversationId: targetConvId,
             senderId: row.sender_id,
             senderName: row.sender_name,
             senderRole: row.sender_role || 'customer',
@@ -603,16 +624,35 @@ class DataService {
           msgMap.set(item.id, item);
         }
 
-        const merged = Array.from(msgMap.values()).sort(
+        const sorted = Array.from(msgMap.values()).sort(
           (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
         );
 
+        // Filter duplicate Sarah Lin greeting messages
+        let greetingSeen = false;
+        const merged = sorted.filter((m) => {
+          const isGreeting =
+            (m.senderRole === 'agent' || m.senderId === 'usr_agent_1') &&
+            m.text &&
+            m.text.includes('Welcome to Swift Sweeps Support!');
+          if (isGreeting) {
+            if (greetingSeen) return false;
+            greetingSeen = true;
+          }
+          return true;
+        });
+
+        for (const cid of queryIds) {
+          all[cid] = merged;
+        }
+        all[targetConvId] = merged;
         all[conversationId] = merged;
+
         this.cache[STORAGE_KEYS.MESSAGES] = all;
         this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
         window.dispatchEvent(
           new CustomEvent('aetherpay_state_changed', {
-            detail: { key: 'conversation_messages_fetched', conversationId, count: data.length },
+            detail: { key: 'conversation_messages_fetched', conversationId: targetConvId, count: merged.length },
           })
         );
         return merged;
@@ -1045,14 +1085,18 @@ class DataService {
         transactionData: m.transaction_data || undefined,
         createdAt: m.created_at || new Date().toISOString(),
       };
-      if (!msgMap[m.conversation_id]) {
-        msgMap[m.conversation_id] = [];
-      }
-      const idx = msgMap[m.conversation_id].findIndex((x) => x.id === item.id);
-      if (idx >= 0) {
-        msgMap[m.conversation_id][idx] = item;
-      } else {
-        msgMap[m.conversation_id].push(item);
+      const canonicalId = this.resolveCanonicalConvId(m.conversation_id);
+      const targetIds = Array.from(new Set([m.conversation_id, canonicalId].filter(Boolean)));
+      for (const tid of targetIds) {
+        if (!msgMap[tid]) {
+          msgMap[tid] = [];
+        }
+        const idx = msgMap[tid].findIndex((x) => x.id === item.id);
+        if (idx >= 0) {
+          msgMap[tid][idx] = item;
+        } else {
+          msgMap[tid].push(item);
+        }
       }
     }
 
@@ -4140,6 +4184,11 @@ class DataService {
       });
     }
 
+    // 6. Look by deterministic canonical ID
+    if (!conv) {
+      conv = list.find((c) => c.id === `conv_${customerId}`);
+    }
+
     if (conv) {
       let needsSave = false;
       if (conv.customerId !== customerId) {
@@ -4160,8 +4209,9 @@ class DataService {
     }
 
     if (!conv) {
+      const canonicalId = `conv_${customerId}`;
       conv = {
-        id: `conv_${Date.now()}`,
+        id: canonicalId,
         customerId,
         customerName: user?.displayName || customerName,
         customerEmail: user?.email || `${customerId}@user.com`,
@@ -4178,15 +4228,31 @@ class DataService {
       list.unshift(conv);
       this.save(STORAGE_KEYS.CONVERSATIONS, list);
 
-      // Create initial greeting message
-      this.sendChatMessage({
-        conversationId: conv.id,
-        senderId: 'usr_agent_1',
-        senderName: 'Sarah Lin',
-        senderRole: 'agent',
-        text: 'Welcome to Swift Sweeps Support! How can our treasury and gaming care specialists assist you today?',
-        isInternalNote: false,
-      });
+      // Automated greeting policy: Strictly for brand-new accounts on initial registration only
+      const greetingFlagKey = `swiftsweeps_greeting_sent_${customerId}`;
+      const isAlreadySent = typeof localStorage !== 'undefined' && localStorage.getItem(greetingFlagKey) === 'true';
+      const isNewAccount = user?.createdAt
+        ? Date.now() - new Date(user.createdAt).getTime() < 1000 * 60 * 15
+        : false;
+
+      const allMsgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+      const existingUserMsgs = allMsgs[canonicalId] || [];
+
+      if (!isAlreadySent && isNewAccount && existingUserMsgs.length === 0) {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(greetingFlagKey, 'true');
+        }
+        this.sendChatMessage({
+          conversationId: conv.id,
+          senderId: 'usr_agent_1',
+          senderName: 'Sarah Lin',
+          senderRole: 'agent',
+          text: 'Welcome to Swift Sweeps Support! How can our treasury and gaming care specialists assist you today?',
+          isInternalNote: false,
+        });
+      } else if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(greetingFlagKey, 'true');
+      }
     }
 
     // Ensure conversation is immediately recorded in Supabase PostgreSQL
@@ -4216,7 +4282,23 @@ class DataService {
   public getMessages(conversationId: string): ChatMessage[] {
     const targetId = this.resolveCanonicalConvId(conversationId);
     const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-    return all[targetId] || [];
+    const rawList = all[targetId] || all[conversationId] || [];
+
+    // Filter out duplicate greeting messages from chat history
+    let greetingSeen = false;
+    return rawList.filter((m) => {
+      const isGreeting =
+        (m.senderRole === 'agent' || m.senderId === 'usr_agent_1') &&
+        m.text &&
+        m.text.includes('Welcome to Swift Sweeps Support!');
+      if (isGreeting) {
+        if (greetingSeen) {
+          return false;
+        }
+        greetingSeen = true;
+      }
+      return true;
+    });
   }
 
   public sendChatMessage(params: {
