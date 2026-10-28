@@ -9,41 +9,72 @@ export const DEFAULT_SUPABASE_JWKS_URL = 'https://fsykihwprqdptrqapxxg.supabase.
 const env = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : ({} as Record<string, string | undefined>);
 const proc = typeof process !== 'undefined' && process.env ? process.env : ({} as Record<string, string | undefined>);
 
-export const supabaseUrl = (
-  env.VITE_SUPABASE_URL ||
-  proc.VITE_SUPABASE_URL ||
-  proc.SUPABASE_URL ||
-  DEFAULT_SUPABASE_URL
-).trim();
+const isPlaceholder = (val: string | undefined | null): boolean => {
+  if (!val) return true;
+  const v = val.trim().toLowerCase();
+  return (
+    !v ||
+    v.includes('your-project') ||
+    v.includes('your-supabase') ||
+    v.includes('example.com') ||
+    v === 'placeholder' ||
+    v.includes('undefined') ||
+    v.includes('null')
+  );
+};
 
-export const supabaseAnonKey = (
-  env.VITE_SUPABASE_ANON_KEY ||
-  env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-  proc.VITE_SUPABASE_ANON_KEY ||
-  proc.SUPABASE_PUBLISHABLE_KEY ||
-  proc.SUPABASE_ANON_KEY ||
-  DEFAULT_SUPABASE_ANON_KEY
-).trim();
+const resolveSupabaseUrl = (): string => {
+  const candidate = (
+    env.VITE_SUPABASE_URL ||
+    proc.VITE_SUPABASE_URL ||
+    proc.SUPABASE_URL ||
+    ''
+  ).trim();
+  return isPlaceholder(candidate) ? DEFAULT_SUPABASE_URL : candidate;
+};
 
-export const supabaseServiceRoleKey = (
-  proc.SUPABASE_SERVICE_ROLE_KEY ||
-  proc.SUPABASE_SECRET_KEY ||
-  DEFAULT_SUPABASE_SERVICE_ROLE_KEY
-).trim();
+const resolveSupabaseAnonKey = (): string => {
+  const candidate = (
+    env.VITE_SUPABASE_ANON_KEY ||
+    env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    proc.VITE_SUPABASE_ANON_KEY ||
+    proc.SUPABASE_PUBLISHABLE_KEY ||
+    proc.SUPABASE_ANON_KEY ||
+    ''
+  ).trim();
+  return isPlaceholder(candidate) ? DEFAULT_SUPABASE_ANON_KEY : candidate;
+};
 
-export const supabaseJwksUrl = (
-  env.VITE_SUPABASE_JWKS_URL ||
-  proc.SUPABASE_JWKS_URL ||
-  DEFAULT_SUPABASE_JWKS_URL
-).trim();
+const resolveSupabaseServiceRoleKey = (): string => {
+  const candidate = (
+    proc.SUPABASE_SERVICE_ROLE_KEY ||
+    proc.SUPABASE_SECRET_KEY ||
+    ''
+  ).trim();
+  return isPlaceholder(candidate) ? DEFAULT_SUPABASE_SERVICE_ROLE_KEY : candidate;
+};
+
+const resolveSupabaseJwksUrl = (): string => {
+  const candidate = (
+    env.VITE_SUPABASE_JWKS_URL ||
+    proc.SUPABASE_JWKS_URL ||
+    ''
+  ).trim();
+  return isPlaceholder(candidate) ? DEFAULT_SUPABASE_JWKS_URL : candidate;
+};
+
+export const supabaseUrl = resolveSupabaseUrl();
+export const supabaseAnonKey = resolveSupabaseAnonKey();
+export const supabaseServiceRoleKey = resolveSupabaseServiceRoleKey();
+export const supabaseJwksUrl = resolveSupabaseJwksUrl();
 
 export const isSupabaseConfigured = (): boolean => {
   return Boolean(
     supabaseUrl &&
     supabaseAnonKey &&
     supabaseUrl.startsWith('http') &&
-    !supabaseUrl.includes('your-project.supabase.co') &&
-    !supabaseAnonKey.includes('your-supabase-anon-key')
+    !isPlaceholder(supabaseUrl) &&
+    !isPlaceholder(supabaseAnonKey)
   );
 };
 

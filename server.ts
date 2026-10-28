@@ -9,14 +9,37 @@ import { telegramEngine } from './src/server/telegramEngine.ts';
 
 dotenv.config();
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://fsykihwprqdptrqapxxg.supabase.co';
-const SUPABASE_SERVICE_ROLE_KEY =
+const isPlaceholder = (val: string | undefined | null): boolean => {
+  if (!val) return true;
+  const v = val.trim().toLowerCase();
+  return (
+    !v ||
+    v.includes('your-project') ||
+    v.includes('your-supabase') ||
+    v.includes('example.com') ||
+    v === 'placeholder' ||
+    v.includes('undefined') ||
+    v.includes('null')
+  );
+};
+
+const rawServerSupabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+const SUPABASE_URL = isPlaceholder(rawServerSupabaseUrl)
+  ? 'https://fsykihwprqdptrqapxxg.supabase.co'
+  : rawServerSupabaseUrl.trim();
+
+const rawServerServiceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SECRET_KEY ||
-  ['sb_secret', 'RlSK7HlbIF7slBFyLi6Yfg_o1rhaSLU'].join('_');
-const SUPABASE_JWKS_URL =
-  process.env.SUPABASE_JWKS_URL ||
-  'https://fsykihwprqdptrqapxxg.supabase.co/auth/v1/.well-known/jwks.json';
+  '';
+const SUPABASE_SERVICE_ROLE_KEY = isPlaceholder(rawServerServiceRoleKey)
+  ? ['sb_secret', 'RlSK7HlbIF7slBFyLi6Yfg_o1rhaSLU'].join('_')
+  : rawServerServiceRoleKey.trim();
+
+const rawServerJwksUrl = process.env.SUPABASE_JWKS_URL || '';
+const SUPABASE_JWKS_URL = isPlaceholder(rawServerJwksUrl)
+  ? 'https://fsykihwprqdptrqapxxg.supabase.co/auth/v1/.well-known/jwks.json'
+  : rawServerJwksUrl.trim();
 
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false },
