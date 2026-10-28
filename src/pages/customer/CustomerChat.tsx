@@ -33,11 +33,13 @@ import { notificationSoundService } from '../../services/notificationSoundServic
 interface CustomerChatProps {
   currentUser: UserProfile;
   onNavigateTab: (tab: string, meta?: any) => void;
+  onGoBack?: () => void;
 }
 
 export const CustomerChat: React.FC<CustomerChatProps> = ({
   currentUser,
   onNavigateTab,
+  onGoBack,
 }) => {
   const [inputText, setInputText] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -271,12 +273,18 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
         <div className="flex items-center gap-3">
           {/* Back out of chat */}
           <button
-            onClick={() => onNavigateTab('dashboard')}
+            onClick={() => {
+              if (onGoBack) {
+                onGoBack();
+              } else {
+                onNavigateTab('dashboard');
+              }
+            }}
             className="p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg bg-slate-950 border border-slate-800 hover:bg-slate-800 text-slate-300 hover:text-white transition-colors flex items-center gap-1 text-xs"
-            title="Exit chat and return to dashboard"
+            title="Exit chat and return to previous screen"
           >
             <ChevronLeft className="w-4 h-4 text-amber-400" />
-            <span className="font-semibold text-xs hidden sm:inline">Dashboard</span>
+            <span className="font-semibold text-xs hidden sm:inline">Back</span>
           </button>
 
           <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#131C2E] border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">

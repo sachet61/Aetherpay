@@ -48,6 +48,7 @@ import { notificationSoundService } from '../../services/notificationSoundServic
 interface AdminChatProps {
   currentUser: UserProfile;
   onNavigateTab?: (tab: string, meta?: any) => void;
+  onGoBack?: () => void;
   highlightConvId?: string;
   onActiveChatChange?: (isOpen: boolean) => void;
 }
@@ -55,6 +56,7 @@ interface AdminChatProps {
 export const AdminChat: React.FC<AdminChatProps> = ({
   currentUser,
   onNavigateTab,
+  onGoBack,
   highlightConvId,
   onActiveChatChange,
 }) => {
@@ -387,7 +389,9 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   };
 
   const handleExitChat = () => {
-    if (onNavigateTab) {
+    if (onGoBack) {
+      onGoBack();
+    } else if (onNavigateTab) {
       onNavigateTab('ops_dashboard');
     } else {
       setSelectedConvId('');

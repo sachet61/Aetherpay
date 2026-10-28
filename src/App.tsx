@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useDataService } from './hooks/useDataService';
 import { dataService } from './services/dataService';
 import { authSessionService } from './services/authSessionService';
@@ -51,12 +51,6 @@ export default function App() {
 
   const [currentHash, setCurrentHash] = useState<string>(window.location.hash);
 
-  useEffect(() => {
-    const handleHashChange = () => setCurrentHash(window.location.hash);
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
-  }, []);
-
   const getDefaultTab = (role?: string) => {
     if (role === 'customer') return 'dashboard';
     if (role === 'agent') return 'ops_chat';
@@ -64,9 +58,71 @@ export default function App() {
     return 'dashboard';
   };
 
-  const [activeTab, setActiveTab] = useState<string>(() =>
-    getDefaultTab(currentUser?.role)
-  );
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const fromHash = window.location.hash.replace(/^#\/?/, '').trim();
+      if (fromHash && fromHash !== 'privacy' && fromHash !== 'data-deletion' && fromHash !== 'datadeletion') {
+        return fromHash;
+      }
+    }
+    return getDefaultTab(currentUser?.role);
+  });
+
+  const tabHistoryRef = useRef<string[]>([activeTab]);
+
+  // Synchronize browser history and hash changes
+  useEffect(() => {
+    const handleHashChange = () => {
+      const hash = window.location.hash;
+      setCurrentHash(hash);
+      const clean = hash.replace(/^#\/?/, '').trim();
+      if (clean && clean !== 'privacy' && clean !== 'data-deletion' && clean !== 'datadeletion' && clean !== activeTab) {
+        setActiveTab(clean);
+      }
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, [activeTab]);
+
+  // Synchronize browser popstate events (Back / Forward buttons & mobile swipe-back gestures)
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      const currentWindowHash = window.location.hash;
+      setCurrentHash(currentWindowHash);
+
+      if (currentWindowHash === '#privacy' || currentWindowHash === '#data-deletion' || currentWindowHash === '#datadeletion') {
+        return;
+      }
+
+      const stateTab = event.state?.tab;
+      const hashTab = currentWindowHash.replace(/^#\/?/, '').trim();
+      const destinationTab = stateTab || (hashTab && hashTab !== 'privacy' ? hashTab : getDefaultTab(currentUser?.role));
+
+      if (destinationTab) {
+        if (tabHistoryRef.current.length > 1) {
+          tabHistoryRef.current.pop();
+        }
+        setActiveTab(destinationTab);
+        setTabMeta(null);
+        if (destinationTab !== 'ops_chat') {
+          setIsMobileChatActive(false);
+        }
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [currentUser?.role]);
+
+  // Ensure initial activeTab is properly recorded in history.state on mount
+  useEffect(() => {
+    if (currentUser && typeof window !== 'undefined') {
+      const stateTab = window.history.state?.tab;
+      if (!stateTab || stateTab !== activeTab) {
+        window.history.replaceState({ tab: activeTab }, '', `#${activeTab}`);
+      }
+    }
+  }, [currentUser?.id, activeTab]);
 
   const [tabMeta, setTabMeta] = useState<any>(null);
   const [showMobileMoreDrawer, setShowMobileMoreDrawer] = useState(false);
@@ -87,12 +143,14 @@ export default function App() {
     if (currentUser) {
       if (currentUser.role === 'customer' && activeTab.startsWith('ops_')) {
         setActiveTab('dashboard');
+        window.history.replaceState({ tab: 'dashboard' }, '', '#dashboard');
       } else if (currentUser.role !== 'customer' && !activeTab.startsWith('ops_')) {
-        setActiveTab(currentUser.role === 'agent' ? 'ops_chat' : 'ops_dashboard');
+        const next = currentUser.role === 'agent' ? 'ops_chat' : 'ops_dashboard';
+        setActiveTab(next);
+        window.history.replaceState({ tab: next }, '', `#${next}`);
       }
     }
   }, [currentUser?.id, currentUser?.role]);
-
 
   if (currentHash === '#privacy') {
     return <LegalContent initialTab="privacy" onBack={() => { window.location.hash = ''; setCurrentHash(''); }} />;
@@ -105,8 +163,6 @@ export default function App() {
   const isAgent = currentUser?.role === 'agent';
   const isAdmin = currentUser?.role === 'admin';
 
-  // Default active tab based strictly on role
-
   // If not logged in, render dedicated Auth & Landing Portal
   if (!currentUser) {
     return (
@@ -116,7 +172,10 @@ export default function App() {
           key="auth"
           onLoginSuccess={(user) => {
             setTimeoutNotice(null);
-            setActiveTab(getDefaultTab(user.role));
+            const defaultTab = getDefaultTab(user.role);
+            setActiveTab(defaultTab);
+            window.history.replaceState({ tab: defaultTab }, '', `#${defaultTab}`);
+            tabHistoryRef.current = [defaultTab];
           }}
           timeoutNotice={timeoutNotice}
         />
@@ -131,11 +190,18 @@ export default function App() {
     const targetUser = dataService.getUserById(userId);
     if (targetUser) {
       setIsMobileChatActive(false);
-      setActiveTab(getDefaultTab(targetUser.role));
+      const defaultTab = getDefaultTab(targetUser.role);
+      setActiveTab(defaultTab);
+      window.history.replaceState({ tab: defaultTab }, '', `#${defaultTab}`);
+      tabHistoryRef.current = [defaultTab];
     }
   };
 
-  const handleNavigateTab = (tab: string, meta?: any) => {
+  const handleNavigateTab = (
+    tab: string,
+    meta?: any,
+    options?: { replace?: boolean; isBack?: boolean }
+  ) => {
     if (tab === 'menu') {
       setShowMobileMoreDrawer(true);
       return;
@@ -172,7 +238,33 @@ export default function App() {
 
     setTabMeta(meta || null);
     setActiveTab(targetTab);
+
+    // Synchronize browser history and hash
+    if (!options?.isBack && typeof window !== 'undefined') {
+      if (options?.replace) {
+        window.history.replaceState({ tab: targetTab }, '', `#${targetTab}`);
+        if (tabHistoryRef.current.length > 0) {
+          tabHistoryRef.current[tabHistoryRef.current.length - 1] = targetTab;
+        } else {
+          tabHistoryRef.current.push(targetTab);
+        }
+      } else if (targetTab !== activeTab) {
+        window.history.pushState({ tab: targetTab }, '', `#${targetTab}`);
+        tabHistoryRef.current.push(targetTab);
+      }
+    }
+
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // Safe back navigation handler: pops previous app state or returns to role home
+  const handleGoBack = () => {
+    if (tabHistoryRef.current.length > 1) {
+      window.history.back();
+    } else {
+      const fallbackTab = getDefaultTab(currentUser?.role);
+      handleNavigateTab(fallbackTab, undefined, { replace: true });
+    }
   };
 
   return (
@@ -279,6 +371,7 @@ export default function App() {
               <CustomerChat
                 currentUser={currentUser}
                 onNavigateTab={handleNavigateTab}
+                onGoBack={handleGoBack}
               />
             )}
 
@@ -295,11 +388,11 @@ export default function App() {
             )}
 
             {activeTab === 'privacy' && (
-              <LegalContent initialTab="privacy" onBack={() => handleNavigateTab('rules')} />
+              <LegalContent initialTab="privacy" onBack={handleGoBack} />
             )}
 
             {activeTab === 'data_deletion' && (
-              <LegalContent initialTab="deletion" onBack={() => handleNavigateTab('rules')} />
+              <LegalContent initialTab="deletion" onBack={handleGoBack} />
             )}
 
             {activeTab === 'profile' && (
@@ -348,6 +441,7 @@ export default function App() {
               <AdminChat
                 currentUser={currentUser}
                 onNavigateTab={handleNavigateTab}
+                onGoBack={handleGoBack}
                 highlightConvId={tabMeta?.highlightConvId}
                 onActiveChatChange={(isOpen) => setIsMobileChatActive(isOpen)}
               />
