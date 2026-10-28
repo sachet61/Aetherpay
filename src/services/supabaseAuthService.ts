@@ -411,23 +411,19 @@ class SupabaseAuthService {
         body: JSON.stringify({ email: cleanEmail }),
       });
       if (resp.ok) {
-        return {
-          success: true,
-          message: `Password reset instructions have been dispatched to ${cleanEmail}. Please check your email inbox.`,
-        };
+        const data = await resp.json().catch(() => ({}));
+        if (data && data.success) {
+          return {
+            success: true,
+            message: data.message || `Password reset instructions have been dispatched to ${cleanEmail}. Please check your email inbox.`,
+          };
+        }
       }
       if (resp.status === 404) {
         const errorJson = await resp.json().catch(() => ({}));
         return {
           success: false,
           message: errorJson.error || 'No account found with this email address. Please check your spelling or sign up.',
-        };
-      }
-      if (!resp.ok) {
-        const errorJson = await resp.json().catch(() => ({}));
-        return {
-          success: false,
-          message: errorJson.error || errorJson.message || 'Unable to request password reset. Please verify your email address.',
         };
       }
     } catch (err) {

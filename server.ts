@@ -265,7 +265,21 @@ app.post('/api/auth/register', async (req, res) => {
 
       const cleanEmail = email.trim().toLowerCase();
 
-      // 1. Authoritative check in Supabase Auth user directory (strictly verify user exists in auth.users)
+      // 1. Authoritative check in Supabase PostgreSQL 'users' table
+      let dbUser: any = null;
+      try {
+        const { data: directMatch } = await supabaseAdmin
+          .from('users')
+          .select('id, email, display_name, status')
+          .ilike('email', cleanEmail)
+          .limit(1)
+          .maybeSingle();
+        dbUser = directMatch;
+      } catch (dbErr) {
+        console.warn('[Request Reset DB Query Notice]:', dbErr);
+      }
+
+      // 2. Check Supabase Auth user directory
       let authUser: any = null;
       try {
         const { data: userList, error: authListErr } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
@@ -279,25 +293,11 @@ app.post('/api/auth/register', async (req, res) => {
         console.warn('[Admin ListUsers Notice]:', authErr);
       }
 
-      // If user does NOT exist in Supabase Auth (auth.users), strictly return 404
-      if (!authUser) {
+      // If user does NOT exist in either Supabase Auth (auth.users) or public.users, strictly return 404
+      if (!authUser && !dbUser) {
         return res.status(404).json({
           error: 'No registered account found with this email address. Please check your spelling or sign up.',
         });
-      }
-
-      // 2. Fetch or sync profile in Supabase PostgreSQL 'users' table
-      let dbUser: any = null;
-      try {
-        const { data: directMatch } = await supabaseAdmin
-          .from('users')
-          .select('id, email, display_name, status')
-          .ilike('email', cleanEmail)
-          .limit(1)
-          .maybeSingle();
-        dbUser = directMatch;
-      } catch (dbErr) {
-        console.warn('[Request Reset DB Query Notice]:', dbErr);
       }
 
       // Ensure public.users profile exists if registered in Supabase Auth

@@ -157,8 +157,167 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  // 2. Health & Status
-  if (url.includes('/api/status') || url.includes('/api/telegram/status')) {
+  // Helper to parse JSON body across different serverless environments
+  const getBody = (r: any): any => {
+    if (!r.body) return {};
+    if (typeof r.body === 'object') return r.body;
+    try {
+      return JSON.parse(r.body);
+    } catch {
+      return {};
+    }
+  };
+
+  // 2. Password Reset Request Endpoint (Live Production Serverless)
+  if (url.includes('/api/auth/request-reset') && req.method === 'POST') {
+    try {
+      const body = getBody(req);
+      const email = body.email;
+      if (!email || !email.includes('@')) {
+        return res.status(400).json({ error: 'Valid email address is required.' });
+      }
+
+      const cleanEmail = email.trim().toLowerCase();
+
+      // Check PostgreSQL public.users database table first
+      let dbUser: any = null;
+      try {
+        const { data: directMatch } = await supabaseAdmin
+          .from('users')
+          .select('id, email, display_name, status')
+          .ilike('email', cleanEmail)
+          .limit(1)
+          .maybeSingle();
+        dbUser = directMatch;
+      } catch (dbErr) {
+        console.warn('[Vercel Serverless DB Query Warning]:', dbErr);
+      }
+
+      // Check Supabase Auth users directory
+      let authUser: any = null;
+      try {
+        const { data: userList, error: authListErr } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+        if (!authListErr && userList?.users) {
+          authUser = userList.users.find(
+            (u: any) => u.email && u.email.trim().toLowerCase() === cleanEmail
+          );
+        }
+      } catch (authErr) {
+        console.warn('[Vercel Serverless Auth Check Warning]:', authErr);
+      }
+
+      // Strict validation: Reject if user does not exist in either users table or auth.users
+      if (!dbUser && !authUser) {
+        return res.status(404).json({
+          error: 'No registered account found with this email address. Please check your spelling or sign up.',
+        });
+      }
+
+      // Determine active origin for recovery redirect
+      const host = req.headers['x-forwarded-host'] || req.headers.host;
+      const proto = req.headers['x-forwarded-proto'] || 'https';
+      const origin = req.headers.origin || (host ? `${proto}://${host}` : '');
+      const redirectTo = origin ? `${origin}/#type=recovery` : undefined;
+
+      // Dispatch password reset email via Supabase Auth
+      const { error: resetErr } = await supabaseAdmin.auth.resetPasswordForEmail(cleanEmail, {
+        redirectTo,
+      });
+
+      if (resetErr) {
+        console.warn('[Vercel Serverless resetPasswordForEmail Error]:', resetErr);
+        return res.status(400).json({ error: resetErr.message || 'Failed to dispatch reset email.' });
+      }
+
+      console.log(`[Vercel Serverless Auth] Password reset email dispatched for ${cleanEmail}`);
+      return res.status(200).json({
+        success: true,
+        email: cleanEmail,
+        message: `Password reset instructions have been dispatched to ${cleanEmail}. Please check your inbox.`,
+      });
+    } catch (err: any) {
+      console.error('[Vercel Serverless Request Reset Error]:', err);
+      return res.status(500).json({ error: err.message || 'Failed to dispatch reset email' });
+    }
+  }
+
+  // 3. Reset Password Confirmation Endpoint
+  if (url.includes('/api/auth/reset-password') && req.method === 'POST') {
+    try {
+      const body = getBody(req);
+      const { token, email, newPassword } = body;
+      if (!newPassword || newPassword.length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
+      }
+
+      const cleanEmail = (email || '').trim().toLowerCase();
+      if (!cleanEmail) {
+        return res.status(400).json({ error: 'Email address is required.' });
+      }
+
+      const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
+      const targetUser = (userList?.users as any[])?.find(
+        (u: any) => u.email?.toLowerCase() === cleanEmail
+      );
+
+      if (!targetUser) {
+        return res.status(404).json({ error: 'User account not found.' });
+      }
+
+      const { error: updateErr } = await supabaseAdmin.auth.admin.updateUserById(targetUser.id, {
+        password: newPassword,
+        email_confirm: true,
+      });
+
+      if (updateErr) {
+        return res.status(400).json({ error: updateErr.message });
+      }
+
+      return res.status(200).json({
+        success: true,
+        email: cleanEmail,
+        message: 'Password has been successfully updated.',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to update password' });
+    }
+  }
+
+  // 4. Instant Email Confirmation Endpoint
+  if (url.includes('/api/auth/confirm-email-now') && req.method === 'POST') {
+    try {
+      const body = getBody(req);
+      const email = body.email;
+      if (!email) return res.status(400).json({ error: 'Email is required' });
+      const cleanEmail = email.trim().toLowerCase();
+
+      const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
+      const targetUser = (userList?.users as any[])?.find(
+        (u: any) => u.email?.toLowerCase() === cleanEmail
+      );
+      if (!targetUser) {
+        return res.status(404).json({ error: 'User not found in Supabase Auth' });
+      }
+
+      const { error } = await supabaseAdmin.auth.admin.updateUserById(targetUser.id, {
+        email_confirm: true,
+      });
+
+      if (error) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Email ${cleanEmail} has been successfully verified!`,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Instant confirmation failed' });
+    }
+  }
+
+  // 5. Health & Status
+  if (url.includes('/api/status') || url.includes('/api/telegram/status') || url === '/api' || url === '/api/') {
     return res.status(200).json({
       online: true,
       runtime: 'vercel-serverless',
@@ -166,9 +325,9 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  return res.status(200).json({
-    success: true,
-    message: 'Swift Sweeps Serverless Backend Active',
+  // Return true 404 for any other unhandled API routes instead of false positive 200
+  return res.status(404).json({
+    error: 'Endpoint not found',
     path: url,
   });
 }
