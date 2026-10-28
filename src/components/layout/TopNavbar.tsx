@@ -45,6 +45,8 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   activeTab,
   onNavigateTab,
 }) => {
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
   const [stateTick, setStateTick] = useState(0);
 
   React.useEffect(() => {
