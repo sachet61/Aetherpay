@@ -151,6 +151,25 @@ class DataService {
         }
         localStorage.setItem(CLEAN_FLAG, 'true');
       }
+
+      // Purge legacy staff conversations from browser cache (e.g. haudemaxe@gmail.com)
+      const STAFF_CONV_CLEAN_FLAG = 'swift_sweeps_staff_conv_clean_v1';
+      if (!localStorage.getItem(STAFF_CONV_CLEAN_FLAG)) {
+        try {
+          const rawConvs = localStorage.getItem(STORAGE_KEYS.CONVERSATIONS);
+          if (rawConvs) {
+            const parsed = JSON.parse(rawConvs);
+            if (Array.isArray(parsed)) {
+              const cleaned = parsed.filter((c: any) => {
+                const email = (c.customerEmail || '').toLowerCase();
+                return email !== 'haudemaxe@gmail.com' && email !== 'sachet61@gmail.com';
+              });
+              localStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(cleaned));
+            }
+          }
+        } catch {}
+        localStorage.setItem(STAFF_CONV_CLEAN_FLAG, 'true');
+      }
     } catch (e) {
       console.warn('Storage wipe notice:', e);
     }
@@ -1105,7 +1124,11 @@ class DataService {
       convMap.set(c.id, c);
     }
     for (const c of rows) {
-      const user = this.getUserById(c.customer_id);
+      const user = this.getUserById(c.customer_id) || (c.customer_email ? this.getUserByEmail(c.customer_email) : undefined);
+      // Invariant: Support agents and administrators must never have customer support tickets
+      if (user && (user.role === 'agent' || user.role === 'admin')) {
+        continue;
+      }
       convMap.set(c.id, {
         id: c.id,
         customerId: c.customer_id,
@@ -2397,6 +2420,35 @@ class DataService {
 
     if (supabase && isSupabaseConfigured()) {
       await supabase.from('users').update({ role: newRole, updated_at: new Date().toISOString() }).eq('id', targetUser.id);
+    }
+
+    if (newRole === 'agent' || newRole === 'admin') {
+      // Purge any customer support conversation belonging to this newly elevated staff member
+      const convs = (this.cache[STORAGE_KEYS.CONVERSATIONS] as SupportConversation[] || []).filter(
+        (c) => c.customerId !== targetUser.id && (!c.customerEmail || c.customerEmail.toLowerCase() !== targetUser.email.toLowerCase())
+      );
+      this.cache[STORAGE_KEYS.CONVERSATIONS] = convs;
+      this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, convs);
+
+      // Clean up from Supabase PostgreSQL
+      if (supabase && isSupabaseConfigured()) {
+        (async () => {
+          try {
+            const { data: userConvs } = await supabase
+              .from('conversations')
+              .select('id')
+              .or(`customer_id.eq.${targetUser.id},customer_email.eq.${targetUser.email}`);
+            if (userConvs && userConvs.length > 0) {
+              const ids = userConvs.map((c: any) => c.id);
+              await supabase.from('messages').delete().in('conversation_id', ids);
+              await supabase.from('conversations').delete().in('id', ids);
+              console.log(`[Staff Inbox Guard] Purged customer conversation for elevated user ${targetUser.email}`);
+            }
+          } catch (e) {
+            console.warn('Supabase conversation purge error:', e);
+          }
+        })();
+      }
     }
 
     authSessionService.updateUserProfile(targetUser);
@@ -4280,6 +4332,14 @@ class DataService {
         canonical.customerEmail = user.email;
       }
 
+      // Invariant: Support agents and administrators must never have customer support tickets
+      if (user && (user.role === 'agent' || user.role === 'admin')) {
+        duplicateIdsToDeleteInDb.push(canonical.id, ...dupIds);
+        delete messagesDict[canonical.id];
+        messagesUpdated = true;
+        continue;
+      }
+
       deduplicated.push(canonical);
       duplicateIdsToDeleteInDb.push(...dupIds);
       messagesToReassignInDb.push({ fromIds: dupIds, toId: canonical.id });
@@ -4310,6 +4370,10 @@ class DataService {
             }
           }
           await supabase
+            .from('messages')
+            .delete()
+            .in('conversation_id', duplicateIdsToDeleteInDb);
+          await supabase
             .from('conversations')
             .delete()
             .in('id', duplicateIdsToDeleteInDb);
@@ -4324,12 +4388,42 @@ class DataService {
 
   public getConversations(): SupportConversation[] {
     const raw = this.load<SupportConversation[]>(STORAGE_KEYS.CONVERSATIONS, INITIAL_CONVERSATIONS);
-    return this.deduplicateAndMergeConversations(raw);
+    const deduplicated = this.deduplicateAndMergeConversations(raw);
+    const currentUser = this.getCurrentUser();
+    return deduplicated.filter((c) => {
+      const u = this.getUserById(c.customerId) || (c.customerEmail ? this.getUserByEmail(c.customerEmail) : undefined);
+      if (u && (u.role === 'agent' || u.role === 'admin')) return false;
+      if (currentUser && (currentUser.role === 'agent' || currentUser.role === 'admin')) {
+        if (c.customerId === currentUser.id || (c.customerEmail && c.customerEmail.toLowerCase() === currentUser.email?.toLowerCase())) {
+          return false;
+        }
+      }
+      return true;
+    });
   }
 
   public getOrCreateConversationForCustomer(customerId: string, customerName: string): SupportConversation {
+    const user = this.getUserById(customerId) || this.getUserByEmail(customerId);
+    if (user && (user.role === 'agent' || user.role === 'admin')) {
+      // Support staff accounts must not have active player support channels
+      return {
+        id: `conv_${customerId}`,
+        customerId,
+        customerName: user.displayName || customerName,
+        customerEmail: user.email,
+        assignedAgentId: 'usr_agent_1',
+        assignedAgentName: 'Sarah Lin',
+        status: 'closed',
+        lastMessageText: '',
+        lastMessageTimestamp: new Date().toISOString(),
+        unreadCountCustomer: 0,
+        unreadCountStaff: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
     const list = this.getConversations();
-    const user = this.getUserById(customerId);
     const userEmail = user?.email?.toLowerCase();
     const cleanCustomerName = customerName?.trim().toLowerCase();
 

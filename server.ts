@@ -725,6 +725,32 @@ app.post('/api/auth/register', async (req, res) => {
         console.warn('Auth metadata sync notice:', authSyncErr);
       }
 
+      // 3. Decommission legacy customer support conversation if user is now staff (agent or admin)
+      if (['agent', 'admin'].includes(newRole)) {
+        try {
+          const userIds = [targetUser.id, userId].filter(Boolean);
+          const userEmail = targetUser.email?.toLowerCase();
+          const { data: staffConvs } = await supabaseAdmin
+            .from('conversations')
+            .select('id, customer_id, customer_email');
+
+          const matchingConvs = (staffConvs || []).filter(
+            (c: any) =>
+              (c.customer_id && userIds.includes(c.customer_id)) ||
+              (c.customer_email && userEmail && c.customer_email.toLowerCase() === userEmail)
+          );
+
+          if (matchingConvs.length > 0) {
+            const ids = matchingConvs.map((c: any) => c.id);
+            await supabaseAdmin.from('messages').delete().in('conversation_id', ids);
+            await supabaseAdmin.from('conversations').delete().in('id', ids);
+            console.log(`[Staff Inbox Guard] Cleaned up customer support conversation for promoted user ${targetUser.email} (${ids.join(', ')})`);
+          }
+        } catch (cleanupErr) {
+          console.warn('[Staff Inbox Guard] Conversation decommissioning notice:', cleanupErr);
+        }
+      }
+
       return res.json({
         success: true,
         message: `Role successfully updated to ${newRole.toUpperCase()} for ${targetUser.display_name}.`,
@@ -1090,6 +1116,42 @@ app.post('/api/auth/register', async (req, res) => {
         }
       } catch (err: any) {
         console.warn('[Security Guard] Notice on parent admin check:', err.message);
+      }
+    })();
+
+    // Self-Healing Cleanup: Purge legacy customer support conversations belonging to staff (agent or admin)
+    (async () => {
+      try {
+        const { data: staffUsers } = await supabaseAdmin
+          .from('users')
+          .select('id, email, role')
+          .in('role', ['agent', 'admin']);
+
+        if (staffUsers && staffUsers.length > 0) {
+          const staffIds = staffUsers.map((u: any) => u.id).filter(Boolean);
+          const staffEmails = staffUsers.map((u: any) => u.email?.toLowerCase()).filter(Boolean);
+
+          const { data: lingeringConvs } = await supabaseAdmin
+            .from('conversations')
+            .select('id, customer_id, customer_email');
+
+          if (lingeringConvs && lingeringConvs.length > 0) {
+            const convsToDelete = lingeringConvs.filter(
+              (c: any) =>
+                (c.customer_id && staffIds.includes(c.customer_id)) ||
+                (c.customer_email && staffEmails.includes(c.customer_email.toLowerCase()))
+            );
+
+            if (convsToDelete.length > 0) {
+              const convIdsToDelete = convsToDelete.map((c: any) => c.id);
+              console.log(`[Staff Inbox Guard] Self-healing: purging ${convIdsToDelete.length} lingering staff support conversations:`, convIdsToDelete);
+              await supabaseAdmin.from('messages').delete().in('conversation_id', convIdsToDelete);
+              await supabaseAdmin.from('conversations').delete().in('id', convIdsToDelete);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn('[Staff Inbox Guard] Startup self-healing purge notice:', err?.message || err);
       }
     })();
   });

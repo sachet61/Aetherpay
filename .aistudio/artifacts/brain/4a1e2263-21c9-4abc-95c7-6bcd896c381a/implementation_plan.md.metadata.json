@@ -1,0 +1,6 @@
+{
+  "summary":  "Detailed architectural plan to eliminate duplicate support-customer personas and redundant welcome messages for staff users (such as haudemaxe@gmail.com). Covers role-based conversation filtering in AdminChat, auto-purging customer conversations upon promotion to agent/admin, self-healing database reconciliation on server.ts startup, and preventing customer support channel initialization for staff members.",
+  "updatedAt":  "2026-10-28T16:05:55.334418366Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

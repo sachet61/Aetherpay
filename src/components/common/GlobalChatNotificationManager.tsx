@@ -107,20 +107,22 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
     let roomChannel: any = null;
     let dbChannel: any = null;
 
-    if (isCustomer) {
+    if (isCustomer && currentUser.role === 'customer') {
       // Customer: listen to their personal support room and message updates
       const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
-      const roomName = `room_${conv.id}`;
+      if (conv && conv.status !== 'closed') {
+        const roomName = `room_${conv.id}`;
 
-      roomChannel = supabase
-        .channel(`global_bg_${roomName}`)
-        .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
-          if (payload && payload.id) {
-            dataService.appendIncomingMessage(payload);
-            handleIncomingMessage(payload);
-          }
-        })
-        .subscribe();
+        roomChannel = supabase
+          .channel(`global_bg_${roomName}`)
+          .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
+            if (payload && payload.id) {
+              dataService.appendIncomingMessage(payload);
+              handleIncomingMessage(payload);
+            }
+          })
+          .subscribe();
+      }
 
       dbChannel = supabase
         .channel(`global_db_${conv.id}`)

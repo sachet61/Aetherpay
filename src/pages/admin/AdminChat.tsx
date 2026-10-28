@@ -114,19 +114,31 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   // Sync conversations and messages from in-memory cache without REST overhead
   const syncFromMemory = () => {
     const list = dataService.getConversations();
-    setConversations(list);
+    // Invariant: Exclude staff (agents and administrators) from the Support Inbox queue
+    const validList = list.filter((c) => {
+      const u = dataService.getUserById(c.customerId) || (c.customerEmail ? dataService.getUserByEmail(c.customerEmail) : undefined);
+      if (u && (u.role === 'agent' || u.role === 'admin')) return false;
+      if (currentUser && (c.customerId === currentUser.id || (c.customerEmail && c.customerEmail.toLowerCase() === currentUser.email?.toLowerCase()))) {
+        if (currentUser.role === 'agent' || currentUser.role === 'admin') return false;
+      }
+      return true;
+    });
+    setConversations(validList);
 
     let activeId = selectedConvId;
-    if (!activeId && list.length > 0 && typeof window !== 'undefined' && window.innerWidth >= 768) {
-      activeId = list[0].id;
+    if ((!activeId || !validList.some((c) => c.id === activeId || dataService.resolveCanonicalConvId(activeId) === c.id)) && validList.length > 0 && typeof window !== 'undefined' && window.innerWidth >= 768) {
+      activeId = validList[0].id;
+      setSelectedConvId(activeId);
+    } else if (validList.length === 0 || !validList.some((c) => c.id === activeId || dataService.resolveCanonicalConvId(activeId) === c.id)) {
+      activeId = validList[0]?.id || '';
       setSelectedConvId(activeId);
     }
 
     if (activeId) {
-      let active = list.find((c) => c.id === activeId);
+      let active = validList.find((c) => c.id === activeId);
       if (!active) {
         const canonicalId = dataService.resolveCanonicalConvId(activeId);
-        active = list.find((c) => c.id === canonicalId);
+        active = validList.find((c) => c.id === canonicalId);
         if (active && active.id !== activeId) {
           setSelectedConvId(active.id);
           activeId = active.id;
@@ -365,6 +377,13 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   // Filter conversations Messenger-style
   const filteredConversations = useMemo(() => {
     return conversations.filter((c) => {
+      // Exclude staff/agent/admin conversations from customer support queue
+      const custUser = dataService.getUserById(c.customerId) || (c.customerEmail ? dataService.getUserByEmail(c.customerEmail) : undefined);
+      if (custUser && (custUser.role === 'agent' || custUser.role === 'admin')) return false;
+      if (currentUser && (c.customerId === currentUser.id || (c.customerEmail && c.customerEmail.toLowerCase() === currentUser.email?.toLowerCase()))) {
+        if (currentUser.role === 'agent' || currentUser.role === 'admin') return false;
+      }
+
       if (statusFilter === 'unread' && c.unreadCountStaff === 0) return false;
       if (statusFilter === 'pending') {
         const hasPendingGame = dataService
