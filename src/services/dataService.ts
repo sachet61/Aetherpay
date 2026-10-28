@@ -424,7 +424,7 @@ class DataService {
             supabase.from('topups').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20),
             supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20),
             supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(20),
-            supabase.from('conversations').select('*').eq('customer_id', currentUserId).maybeSingle(),
+            supabase.from('conversations').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: true }),
           ]);
 
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
@@ -465,13 +465,19 @@ class DataService {
         if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
         if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
         if (gameAccsRes.data) this.applyGameAccountRows(gameAccsRes.data, true);
-        if (convRes.data) {
-          this.applyConversationRows([convRes.data], false);
+        if (convRes?.data && convRes.data.length > 0) {
+          this.applyConversationRows(convRes.data, false);
           // Hydrate customer's active chat messages capped at 40
-          const { data: msgData } = await supabase
-            .from('messages')
-            .select('*')
-            .eq('conversation_id', convRes.data.id)
+          const convIds = convRes.data.map((c: any) => c.id);
+          const activeConv = this.getOrCreateConversationForCustomer(currentUserId, currentUser?.displayName || 'Player');
+          const allTargetIds = Array.from(new Set([...convIds, activeConv.id, `conv_${currentUserId}`].filter(Boolean)));
+          let msgQuery = supabase.from('messages').select('*');
+          if (allTargetIds.length === 1) {
+            msgQuery = msgQuery.eq('conversation_id', allTargetIds[0]);
+          } else {
+            msgQuery = msgQuery.in('conversation_id', allTargetIds);
+          }
+          const { data: msgData } = await msgQuery
             .order('created_at', { ascending: false })
             .limit(40);
           if (msgData) this.applyMessageRows(msgData);
@@ -593,13 +599,26 @@ class DataService {
       // Identify all related conversation IDs for this customer to retrieve complete thread history
       const candidateIds = new Set<string>([conversationId, targetConvId].filter(Boolean));
       const conv = this.getConversations().find((c) => c.id === conversationId || c.id === targetConvId);
-      if (conv?.customerId) {
-        candidateIds.add(`conv_${conv.customerId}`);
+      const customerId = conv?.customerId || (conversationId.startsWith('conv_') ? conversationId.replace('conv_', '') : undefined);
+      if (customerId) {
+        candidateIds.add(`conv_${customerId}`);
         for (const c of this.getConversations()) {
-          if (c.customerId === conv.customerId) {
+          if (c.customerId === customerId) {
             candidateIds.add(c.id);
           }
         }
+        try {
+          const { data: dbConvs } = await supabase
+            .from('conversations')
+            .select('id')
+            .eq('customer_id', customerId)
+            .limit(10);
+          if (dbConvs && dbConvs.length > 0) {
+            for (const row of dbConvs) {
+              candidateIds.add(row.id);
+            }
+          }
+        } catch {}
       }
       const queryIds = Array.from(candidateIds);
 
@@ -981,14 +1000,27 @@ class DataService {
   private applyWalletRows(rows: any[]): void {
     const walletMap = { ...((this.cache[STORAGE_KEYS.WALLETS] as Record<string, UserWallet>) || {}) };
     for (const w of rows) {
+      const existing = walletMap[w.customer_id];
+      const completedTopups = this.getTopUpRequests(w.customer_id).filter((t) => t.status === 'completed');
+      const latestTopup = completedTopups[0];
+      const derivedTopUpAmount =
+        existing?.lastTopUpAmount ||
+        latestTopup?.finalWalletCredit ||
+        latestTopup?.amount ||
+        Number(w.total_deposited || 0);
+      const derivedTopUpGame = existing?.lastTopUpGame || latestTopup?.targetGameName;
+      const derivedTopUpAt = existing?.lastTopUpAt || latestTopup?.updatedAt || latestTopup?.createdAt;
+
       walletMap[w.customer_id] = {
         customerId: w.customer_id,
         currency: w.currency || 'USD',
         availableBalance: Number(w.balance || 0),
-        referralBonusBalance: 0,
+        referralBonusBalance: existing?.referralBonusBalance || 0,
         reservedBalance: Number(w.pending_withdrawal || 0),
         pendingDepositBalance: Number(w.pending_deposit || 0),
-        lastTopUpAmount: Number(w.total_deposited || 0),
+        lastTopUpAmount: derivedTopUpAmount,
+        lastTopUpGame: derivedTopUpGame,
+        lastTopUpAt: derivedTopUpAt,
         lastUpdatedAt: w.updated_at || new Date().toISOString(),
       };
     }
@@ -1179,11 +1211,19 @@ class DataService {
         const currentUser = this.getCurrentUser();
         const target = currentUser ? (value.find((u: UserProfile) => u.id === currentUser.id) || value[0]) : value[0];
         if (target && target.id) {
+          let safeRole = target.role;
+          try {
+            const { data: dbUser } = await supabase.from('users').select('role').eq('id', target.id).maybeSingle();
+            if (dbUser?.role) {
+              safeRole = dbUser.role;
+            }
+          } catch {}
+
           await supabase.from('users').upsert({
             id: target.id,
             email: target.email,
             display_name: target.displayName,
-            role: target.role,
+            role: safeRole,
             phone: target.phone || null,
             avatar_url: target.avatarUrl || null,
             status: target.status || 'active',
@@ -2359,6 +2399,8 @@ class DataService {
       await supabase.from('users').update({ role: newRole, updated_at: new Date().toISOString() }).eq('id', targetUser.id);
     }
 
+    authSessionService.updateUserProfile(targetUser);
+
     this.logAudit({
       actorId: actingUser.id,
       actorName: actingUser.displayName,
@@ -2658,7 +2700,24 @@ class DataService {
       wallets[customerId].referralBonusBalance = 0;
       this.save(STORAGE_KEYS.WALLETS, wallets);
     }
-    return wallets[customerId];
+
+    const w = wallets[customerId];
+    // Dynamic reconciliation: Ensure latest top-up metrics are populated from completed top-up history
+    if (!w.lastTopUpAmount || w.lastTopUpAmount === 0 || !w.lastTopUpGame) {
+      const completedTopups = this.getTopUpRequests(customerId).filter((t) => t.status === 'completed');
+      if (completedTopups.length > 0) {
+        const latest = completedTopups[0];
+        w.lastTopUpAmount = latest.finalWalletCredit || latest.amount;
+        if (!w.lastTopUpGame) {
+          w.lastTopUpGame = latest.targetGameName || 'Game';
+        }
+        if (!w.lastTopUpAt) {
+          w.lastTopUpAt = latest.updatedAt || latest.createdAt;
+        }
+      }
+    }
+
+    return w;
   }
 
   public getTransactions(customerId?: string): WalletTransaction[] {
@@ -3055,6 +3114,11 @@ class DataService {
         review_notes: req.reviewNotes,
         updated_at: req.updatedAt,
       }).eq('id', req.id).then(() => {}, (err) => console.warn('Supabase topup approve sync error:', err));
+
+      supabase.from('wallets').update({
+        total_deposited: (wallet.availableBalance || 0) + req.amount,
+        updated_at: new Date().toISOString(),
+      }).eq('customer_id', req.customerId).then(() => {}, (err) => console.warn('Supabase wallet topup sync error:', err));
     }
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'topup_approved', requestId: req.id } }));
 
@@ -4144,8 +4208,13 @@ class DataService {
         continue;
       }
 
-      // Multiple conversations found for this single customer: sort earliest created first
-      convs.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      // Multiple conversations found for this single customer: prefer thread with messages, then earliest created
+      convs.sort((a, b) => {
+        const countA = (messagesDict[a.id] || []).length;
+        const countB = (messagesDict[b.id] || []).length;
+        if (countA !== countB) return countB - countA;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
       const canonical = { ...convs[0] };
       const duplicates = convs.slice(1);
       const dupIds: string[] = [];

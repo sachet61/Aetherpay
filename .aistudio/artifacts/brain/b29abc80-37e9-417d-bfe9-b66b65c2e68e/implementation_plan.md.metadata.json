@@ -1,6 +1,6 @@
 {
-  "summary":  "Comprehensive Architectural Plan to permanently resolve intermittent unverified email status for rashilbasukala@gmail.com and all production users across test and live environments. Identifies session deserialization state loss, missing user profile hydration in initialCompactLoad, and lack of emailVerified caching in authSessionService.",
-  "updatedAt":  "2026-10-28T14:29:00.962987583Z",
+  "summary":  "Implementation plan to permanently prevent user roles (such as agent for haudemaxe@gmail.com) from reverting to customer across test and production environments. Covers dual-syncing public.users and auth.users in server.ts, making PostgreSQL public.users the authoritative role source in supabaseAuthService and dataService, and eliminating blind client-side role overwrites.",
+  "updatedAt":  "2026-10-28T15:49:08.613503596Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

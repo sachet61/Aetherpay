@@ -646,14 +646,26 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(403).json({ error: 'Access Denied: Only administrators can modify roles.' });
       }
 
-      // Check target user
-      const { data: targetUser, error: findErr } = await supabaseAdmin
+      // Check target user by ID or email
+      let targetUser: any = null;
+      const { data: userById, error: findByIdErr } = await supabaseAdmin
         .from('users')
         .select('*')
         .eq('id', userId)
         .maybeSingle();
 
-      if (findErr || !targetUser) {
+      if (userById) {
+        targetUser = userById;
+      } else {
+        const { data: userByEmail } = await supabaseAdmin
+          .from('users')
+          .select('*')
+          .ilike('email', userId)
+          .maybeSingle();
+        targetUser = userByEmail;
+      }
+
+      if (!targetUser) {
         return res.status(404).json({ error: 'User not found in database.' });
       }
 
@@ -662,8 +674,8 @@ app.post('/api/auth/register', async (req, res) => {
       ];
       const isParentAdmin =
         protectedEmails.includes(targetUser.email?.toLowerCase()) ||
-        userId === 'usr_admin_master' ||
-        userId === 'usr_admin_1';
+        targetUser.id === 'usr_admin_master' ||
+        targetUser.id === 'usr_admin_1';
 
       if (isParentAdmin && newRole !== 'admin') {
         return res.status(403).json({
@@ -671,18 +683,46 @@ app.post('/api/auth/register', async (req, res) => {
         });
       }
 
+      // 1. Update public.users database row
       const { data: updated, error: updateErr } = await supabaseAdmin
         .from('users')
         .update({
           role: newRole,
           updated_at: new Date().toISOString(),
         })
-        .eq('id', userId)
+        .eq('id', targetUser.id)
         .select()
         .single();
 
       if (updateErr) {
         return res.status(500).json({ error: updateErr.message || 'Failed to update user role in database' });
+      }
+
+      // 2. Dual-sync to Supabase Auth metadata to prevent JWT/session downgrades
+      try {
+        let authUserId = targetUser.id;
+        const { data: authUserDirect } = await supabaseAdmin.auth.admin.getUserById(authUserId).catch(() => ({ data: null }));
+        let existingMeta = authUserDirect?.user?.user_metadata || {};
+
+        if (!authUserDirect?.user && targetUser.email) {
+          const { data: authList } = await supabaseAdmin.auth.admin.listUsers().catch(() => ({ data: { users: [] } }));
+          const matched = authList?.users?.find((u) => u.email?.toLowerCase() === targetUser.email?.toLowerCase());
+          if (matched) {
+            authUserId = matched.id;
+            existingMeta = matched.user_metadata || {};
+          }
+        }
+
+        if (authUserId) {
+          await supabaseAdmin.auth.admin.updateUserById(authUserId, {
+            user_metadata: {
+              ...existingMeta,
+              role: newRole,
+            },
+          });
+        }
+      } catch (authSyncErr) {
+        console.warn('Auth metadata sync notice:', authSyncErr);
       }
 
       return res.json({

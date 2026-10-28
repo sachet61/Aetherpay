@@ -72,23 +72,48 @@ class SupabaseAuthService {
             dataService.getUsers().find((u) => u.email.toLowerCase() === cleanEmail);
           const nowIso = new Date().toISOString();
 
+          // Authoritative check against PostgreSQL public.users to prevent role clobbering
+          let dbUser: any = null;
+          if (supabase && isSupabaseConfigured()) {
+            try {
+              const { data: fetchedUser } = await supabase
+                .from('users')
+                .select('*')
+                .or(`id.eq.${user.id},email.ilike.${cleanEmail}`)
+                .limit(1)
+                .maybeSingle();
+              dbUser = fetchedUser;
+            } catch (fetchErr) {
+              console.warn('Notice: direct user role fetch from DB:', fetchErr);
+            }
+          }
+
+          const authoritativeRole: UserRole = isParentAdminEmail
+            ? 'admin'
+            : (dbUser?.role || (user.user_metadata?.role as UserRole) || 'customer');
+
           if (!userProfile) {
             userProfile = {
-              id: user.id,
+              id: dbUser?.id || user.id,
               email: cleanEmail,
               displayName:
+                dbUser?.display_name ||
                 user.user_metadata?.display_name ||
                 user.user_metadata?.full_name ||
                 cleanEmail.split('@')[0],
-              role: isParentAdminEmail ? 'admin' : ((user.user_metadata?.role as UserRole) || 'customer'),
-              status: 'active',
-              emailVerified: isConfirmed,
-              referralCode: `REF_${user.id.slice(-5).toUpperCase()}`,
-              createdAt: user.created_at || nowIso,
+              role: authoritativeRole,
+              status: dbUser?.status || 'active',
+              emailVerified: isConfirmed || Boolean(dbUser?.email_verified),
+              referralCode: dbUser?.referral_code || `REF_${user.id.slice(-5).toUpperCase()}`,
+              createdAt: dbUser?.created_at || user.created_at || nowIso,
               lastLoginAt: nowIso,
               isParentAdmin: isParentAdminEmail ? true : undefined,
             };
-            await this.syncProfileAndWallet(userProfile);
+            if (!dbUser) {
+              await this.syncProfileAndWallet(userProfile);
+            } else {
+              dataService.registerUser(userProfile);
+            }
           } else {
             // Reconcile and migrate if user profile ID differs from Supabase canonical ID
             if (userProfile.id !== user.id) {
@@ -97,7 +122,9 @@ class SupabaseAuthService {
               dataService.migrateUserEntityIds(oldId, user.id);
             }
             // Update emailVerified dynamically from active Supabase session
-            userProfile.emailVerified = isConfirmed;
+            userProfile.emailVerified = isConfirmed || Boolean(dbUser?.email_verified);
+            userProfile.role = authoritativeRole;
+            if (dbUser?.display_name) userProfile.displayName = dbUser.display_name;
             if (isParentAdminEmail && userProfile.role !== 'admin') {
               userProfile.role = 'admin';
               userProfile.isParentAdmin = true;
@@ -118,7 +145,7 @@ class SupabaseAuthService {
       // 2. Initial check on startup
       supabase.auth
         .getSession()
-        .then(({ data: { session } }) => {
+        .then(async ({ data: { session } }) => {
           if (session?.user) {
             const cleanEmail = (session.user.email || '').trim().toLowerCase();
             const isConfirmed = Boolean(session.user.email_confirmed_at);
@@ -127,13 +154,34 @@ class SupabaseAuthService {
               let userProfile =
                 dataService.getUserById(session.user.id) ||
                 dataService.getUsers().find((u) => u.email.toLowerCase() === cleanEmail);
+
+              // Query database for authoritative role
+              let dbUser: any = null;
+              if (supabase && isSupabaseConfigured()) {
+                try {
+                  const { data: fetchedUser } = await supabase
+                    .from('users')
+                    .select('*')
+                    .or(`id.eq.${session.user.id},email.ilike.${cleanEmail}`)
+                    .limit(1)
+                    .maybeSingle();
+                  dbUser = fetchedUser;
+                } catch {}
+              }
+
+              const authoritativeRole: UserRole = isParentAdminEmail
+                ? 'admin'
+                : (dbUser?.role || (session.user.user_metadata?.role as UserRole) || 'customer');
+
               if (userProfile) {
                 if (userProfile.id !== session.user.id) {
                   const oldId = userProfile.id;
                   userProfile.id = session.user.id;
                   dataService.migrateUserEntityIds(oldId, session.user.id);
                 }
-                userProfile.emailVerified = isConfirmed;
+                userProfile.emailVerified = isConfirmed || Boolean(dbUser?.email_verified);
+                userProfile.role = authoritativeRole;
+                if (dbUser?.display_name) userProfile.displayName = dbUser.display_name;
                 if (isParentAdminEmail && userProfile.role !== 'admin') {
                   userProfile.role = 'admin';
                   userProfile.isParentAdmin = true;
@@ -306,28 +354,57 @@ class SupabaseAuthService {
         dataService.getUserById(data.user.id) ||
         dataService.getUsers().find((u) => u.email.toLowerCase() === cleanEmail);
 
+      // Query database for authoritative role to ensure agent/admin status is not overridden
+      let dbUser: any = null;
+      if (supabase && isSupabaseConfigured()) {
+        try {
+          const { data: fetchedUser } = await supabase
+            .from('users')
+            .select('*')
+            .or(`id.eq.${data.user.id},email.ilike.${cleanEmail}`)
+            .limit(1)
+            .maybeSingle();
+          dbUser = fetchedUser;
+        } catch (fetchErr) {
+          console.warn('Notice: direct user role fetch from DB on login:', fetchErr);
+        }
+      }
+
+      const authoritativeRole: UserRole = isParentAdminEmail
+        ? 'admin'
+        : (dbUser?.role || (data.user.user_metadata?.role as UserRole) || 'customer');
+
       if (!userProfile) {
         const nowIso = new Date().toISOString();
         userProfile = {
-          id: data.user.id,
+          id: dbUser?.id || data.user.id,
           email: cleanEmail,
-          displayName: data.user.user_metadata?.display_name || cleanEmail.split('@')[0],
-          role: isParentAdminEmail ? 'admin' : ((data.user.user_metadata?.role as UserRole) || 'customer'),
-          status: 'active',
-          emailVerified: isConfirmed,
-          referralCode: `REF_${data.user.id.slice(-5).toUpperCase()}`,
-          createdAt: data.user.created_at || nowIso,
+          displayName:
+            dbUser?.display_name ||
+            data.user.user_metadata?.display_name ||
+            cleanEmail.split('@')[0],
+          role: authoritativeRole,
+          status: dbUser?.status || 'active',
+          emailVerified: isConfirmed || Boolean(dbUser?.email_verified),
+          referralCode: dbUser?.referral_code || `REF_${data.user.id.slice(-5).toUpperCase()}`,
+          createdAt: dbUser?.created_at || data.user.created_at || nowIso,
           lastLoginAt: nowIso,
           isParentAdmin: isParentAdminEmail ? true : undefined,
         };
-        await this.syncProfileAndWallet(userProfile);
+        if (!dbUser) {
+          await this.syncProfileAndWallet(userProfile);
+        } else {
+          dataService.registerUser(userProfile);
+        }
       } else {
         if (userProfile.id !== data.user.id) {
           const oldId = userProfile.id;
           userProfile.id = data.user.id;
           dataService.migrateUserEntityIds(oldId, data.user.id);
         }
-        userProfile.emailVerified = isConfirmed;
+        userProfile.emailVerified = isConfirmed || Boolean(dbUser?.email_verified);
+        userProfile.role = authoritativeRole;
+        if (dbUser?.display_name) userProfile.displayName = dbUser.display_name;
         if (isParentAdminEmail && userProfile.role !== 'admin') {
           userProfile.role = 'admin';
           userProfile.isParentAdmin = true;
@@ -704,14 +781,29 @@ class SupabaseAuthService {
   }
 
   private async syncProfileAndWallet(profile: UserProfile): Promise<void> {
-    dataService.registerUser(profile);
-
     try {
+      // Check existing database row to avoid demoting an admin or agent
+      let targetRole = profile.role;
+      if (supabase && isSupabaseConfigured()) {
+        const { data: existingUser } = await supabase
+          .from('users')
+          .select('role')
+          .eq('id', profile.id)
+          .maybeSingle();
+
+        if (existingUser?.role) {
+          targetRole = existingUser.role as UserRole;
+          profile.role = targetRole;
+        }
+      }
+
+      dataService.registerUser(profile);
+
       const upsertData: Record<string, any> = {
         id: profile.id,
         email: profile.email,
         display_name: profile.displayName,
-        role: profile.role,
+        role: targetRole,
         phone: profile.phone || null,
         status: profile.status,
         referred_by: profile.referredBy || null,

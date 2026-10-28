@@ -42,6 +42,10 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
   const referralSummary = dataService.getReferralSummary(currentUser.id);
   const conversation = dataService.getConversations().find((c) => c.customerId === currentUser.id);
+  const completedTopUps = dataService.getTopUpRequests(currentUser.id).filter((r) => r.status === 'completed');
+  const latestCompletedTopUp = completedTopUps[0];
+  const displayTopUpAmount = wallet.lastTopUpAmount || latestCompletedTopUp?.finalWalletCredit || latestCompletedTopUp?.amount || 0;
+  const displayTopUpGame = wallet.lastTopUpGame || latestCompletedTopUp?.targetGameName || 'Orion Stars Elite';
 
   const handleCopyReferral = () => {
     navigator.clipboard.writeText(referralSummary.referralLink);
@@ -93,12 +97,12 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
             </div>
 
             <div className="text-3xl font-bold text-emerald-400 font-mono tabular-nums tracking-tight">
-              ${(wallet.lastTopUpAmount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              ${displayTopUpAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
 
             <div className="text-[11px] text-slate-300 flex items-center gap-1 font-medium">
               <span className="text-slate-400">Target Game:</span>
-              <span className="text-amber-300 font-bold">{wallet.lastTopUpGame || 'Orion Stars Elite'}</span>
+              <span className="text-amber-300 font-bold">{displayTopUpGame}</span>
             </div>
 
             <p className="text-[10px] text-slate-400 leading-snug bg-[#0A0F1D]/80 p-2 rounded-lg border border-slate-800/80">
