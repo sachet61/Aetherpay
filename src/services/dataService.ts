@@ -2535,14 +2535,18 @@ class DataService {
     };
     this.save(STORAGE_KEYS.WALLETS, wallets);
 
-    // Initial welcome notification
-    this.createNotification({
-      userId: newId,
-      title: 'Welcome to Swift Sweeps',
-      message: 'Your gaming wallet and customer support portal are ready.',
-      type: 'system',
-      linkTab: 'dashboard',
-    });
+    // Initial welcome notification (only once per user)
+    const welcomeKey = `welcome_shown_${newId}`;
+    if (typeof window !== 'undefined' && !localStorage.getItem(welcomeKey)) {
+      this.createNotification({
+        userId: newId,
+        title: 'Welcome to Swift Sweeps',
+        message: 'Your gaming wallet and customer support portal are ready.',
+        type: 'system',
+        linkTab: 'dashboard',
+      });
+      localStorage.setItem(welcomeKey, 'true');
+    }
 
     this.setCurrentUserId(newId);
     return { success: true, user: newUser };
@@ -4390,6 +4394,12 @@ class DataService {
       }
     }
 
+    window.dispatchEvent(
+      new CustomEvent('aetherpay_state_changed', {
+        detail: { key: 'chat_message', message: newMsg, conversationId: targetConvId },
+      })
+    );
+
     return newMsg;
   }
 
@@ -4407,7 +4417,7 @@ class DataService {
       this.cache[STORAGE_KEYS.MESSAGES] = all;
       this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
 
-      // Also ensure conversation summary has latest message
+      // Also ensure conversation summary has latest message and increment unread counts
       const conversations = this.getConversations();
       const conv = conversations.find((c) => c.id === targetConvId);
       if (conv) {
@@ -4416,6 +4426,11 @@ class DataService {
         }
         conv.lastMessageTimestamp = msg.createdAt;
         conv.updatedAt = msg.createdAt;
+        if (msg.senderRole === 'customer') {
+          conv.unreadCountStaff = (conv.unreadCountStaff || 0) + 1;
+        } else if (!msg.isInternalNote) {
+          conv.unreadCountCustomer = (conv.unreadCountCustomer || 0) + 1;
+        }
         this.save(STORAGE_KEYS.CONVERSATIONS, conversations);
       }
 
@@ -4485,6 +4500,11 @@ class DataService {
       if (role === 'customer') conv.unreadCountCustomer = 0;
       else conv.unreadCountStaff = 0;
       this.save(STORAGE_KEYS.CONVERSATIONS, conversations);
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'chat_read', conversationId: targetConvId, role },
+        })
+      );
     }
   }
 

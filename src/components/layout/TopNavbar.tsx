@@ -45,14 +45,30 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   activeTab,
   onNavigateTab,
 }) => {
-  const [showNotifications, setShowNotifications] = useState(false);
-  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+  const [stateTick, setStateTick] = useState(0);
+
+  React.useEffect(() => {
+    const handleSync = () => setStateTick((prev) => prev + 1);
+    window.addEventListener('aetherpay_state_changed', handleSync);
+    window.addEventListener('storage', handleSync);
+    return () => {
+      window.removeEventListener('aetherpay_state_changed', handleSync);
+      window.removeEventListener('storage', handleSync);
+    };
+  }, []);
+
   const notifications = dataService.getNotifications(currentUser.id);
   const unreadCount = notifications.filter((n) => !n.isRead).length;
 
   const isCustomer = currentUser.role === 'customer';
   const isAgent = currentUser.role === 'agent';
   const isAdmin = currentUser.role === 'admin';
+
+  // Customer unread chat messages
+  const customerConv = isCustomer
+    ? dataService.getConversations().find((c) => c.customerId === currentUser.id)
+    : null;
+  const unreadCustomerMessages = customerConv?.unreadCountCustomer || 0;
 
   // Real-time badge indicators for operations
   const unreadStaffMessages = !isCustomer
@@ -161,9 +177,14 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
               </button>
               <button
                 onClick={() => onNavigateTab('chat')}
-                className={`transition-colors whitespace-nowrap ${activeTab === 'chat' ? 'text-amber-400 font-bold' : 'hover:text-slate-200'}`}
+                className={`transition-colors whitespace-nowrap flex items-center gap-1.5 ${activeTab === 'chat' ? 'text-amber-400 font-bold' : 'hover:text-slate-200'}`}
               >
-                Support Chat
+                <span>Support Chat</span>
+                {unreadCustomerMessages > 0 && (
+                  <span className="min-w-4 h-4 px-1 rounded-full bg-rose-500 text-white text-[10px] font-extrabold flex items-center justify-center animate-pulse">
+                    {unreadCustomerMessages}
+                  </span>
+                )}
               </button>
             </>
           )}
@@ -742,12 +763,19 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
 
                   <button
                     onClick={() => handleDrawerNavigate('chat')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
                       activeTab === 'chat' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
                     }`}
                   >
-                    <Headphones className="w-4 h-4 text-cyan-400" />
-                    <span>Live Support Chat</span>
+                    <div className="flex items-center gap-2.5">
+                      <Headphones className="w-4 h-4 text-cyan-400" />
+                      <span>Live Support Chat</span>
+                    </div>
+                    {unreadCustomerMessages > 0 && (
+                      <span className="min-w-4 h-4 px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-extrabold flex items-center justify-center animate-pulse">
+                        {unreadCustomerMessages}
+                      </span>
+                    )}
                   </button>
 
                   <button

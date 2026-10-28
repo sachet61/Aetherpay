@@ -21,9 +21,25 @@ export const CustomerMobileNav: React.FC<CustomerMobileNavProps> = ({
   onNavigateTab,
   currentUser,
 }) => {
-  // Check unread support messages for current customer
-  const conv = dataService.getConversations().find((c) => c.customerId === currentUser.id);
-  const unreadChatCount = conv?.unreadCountCustomer || 0;
+  const [unreadChatCount, setUnreadChatCount] = React.useState<number>(() => {
+    const conv = dataService.getConversations().find((c) => c.customerId === currentUser.id);
+    return conv?.unreadCountCustomer || 0;
+  });
+
+  // Dynamically sync unread count on real-time events
+  React.useEffect(() => {
+    const handleSync = () => {
+      const conv = dataService.getConversations().find((c) => c.customerId === currentUser.id);
+      setUnreadChatCount(conv?.unreadCountCustomer || 0);
+    };
+
+    window.addEventListener('aetherpay_state_changed', handleSync);
+    window.addEventListener('storage', handleSync);
+    return () => {
+      window.removeEventListener('aetherpay_state_changed', handleSync);
+      window.removeEventListener('storage', handleSync);
+    };
+  }, [currentUser.id]);
 
   return (
     <div className="fixed bottom-0 left-0 right-0 z-40 pointer-events-none pb-safe">
@@ -86,8 +102,20 @@ export const CustomerMobileNav: React.FC<CustomerMobileNavProps> = ({
               </span>
             </button>
 
-            {/* Slot 3: CENTER Elevated Support Chat (Floating Android Action Button) */}
+            {/* Slot 3: CENTER Elevated Support Chat (Floating Action Button with Toast Bubble) */}
             <div className="relative flex flex-col items-center justify-center select-none">
+              {/* Animated Toast Bubble over Support Icon */}
+              {unreadChatCount > 0 && activeTab !== 'chat' && (
+                <div
+                  onClick={() => onNavigateTab('chat')}
+                  className="absolute -top-14 z-50 whitespace-nowrap px-3 py-1.5 rounded-full bg-gradient-to-r from-rose-600 via-rose-500 to-amber-500 text-white font-extrabold text-[11px] shadow-2xl shadow-rose-950 border border-rose-300/80 flex items-center gap-1.5 animate-bounce cursor-pointer hover:brightness-110 active:scale-95 transition-transform"
+                >
+                  <span className="w-2 h-2 rounded-full bg-white animate-ping shrink-0" />
+                  <span>{unreadChatCount} new {unreadChatCount === 1 ? 'message' : 'messages'}</span>
+                  <div className="absolute left-1/2 -bottom-1 -translate-x-1/2 w-2 h-2 rotate-45 bg-rose-600 border-r border-b border-rose-300/80" />
+                </div>
+              )}
+
               <button
                 onClick={() => onNavigateTab('chat')}
                 className={`relative -top-5 w-14 h-14 rounded-full flex items-center justify-center text-slate-950 shadow-xl transition-all active:scale-95 border-[3.5px] border-[#0A0F1D] sm:border-[#0E1726] ${
@@ -101,7 +129,7 @@ export const CustomerMobileNav: React.FC<CustomerMobileNavProps> = ({
                 <div className="relative flex items-center justify-center">
                   <Headphones className="w-6 h-6 transition-transform hover:scale-105 text-slate-950 font-bold" />
 
-                  {/* Unread badge count or indicator */}
+                  {/* Unread badge count indicator */}
                   {unreadChatCount > 0 && (
                     <span className="absolute -top-2.5 -right-3 min-w-5 h-5 px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-extrabold flex items-center justify-center border-2 border-slate-950 shadow-md animate-pulse">
                       {unreadChatCount}

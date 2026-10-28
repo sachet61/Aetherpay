@@ -12,6 +12,7 @@ import { AuthPage } from './pages/auth/AuthPage';
 import { SessionTimeoutWarningModal } from './components/common/SessionTimeoutWarningModal';
 import { StartupSplash } from './components/common/StartupSplash';
 import { LiveCashoutTicker } from './components/common/LiveCashoutTicker';
+import { GlobalChatNotificationManager } from './components/common/GlobalChatNotificationManager';
 
 
 // Customer Pages
@@ -190,6 +191,13 @@ export default function App() {
       >
         {/* Session Inactivity Timeout Guard & Live Countdown Warning */}
         <SessionTimeoutWarningModal onLogout={handleLogout} />
+
+        {/* Global Real-time Background Chat Notification, Audio Chime & Browser Push Manager */}
+        <GlobalChatNotificationManager
+          currentUser={currentUser}
+          activeTab={activeTab}
+          onNavigateTab={handleNavigateTab}
+        />
 
         {/* Top Navbar with strict role-based views (No staff/customer mode toggle) */}
         <div className="sticky top-0 z-40">
