@@ -30,6 +30,17 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
     return () => clearInterval(interval);
   }, [cooldown]);
 
+  // Automatic background reconciliation: verify if user was already confirmed in Supabase
+  useEffect(() => {
+    if (currentUser && !currentUser.emailVerified) {
+      dataService.reloadAndCheckEmailVerification().then((res) => {
+        if (res.verified && onStatusChanged) {
+          onStatusChanged(true);
+        }
+      }).catch(() => {});
+    }
+  }, [currentUser?.id, currentUser?.emailVerified]);
+
   // If already verified or dismissed, don't show
   if (currentUser.emailVerified || isDismissed) {
     return null;

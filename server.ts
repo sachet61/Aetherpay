@@ -558,39 +558,67 @@ app.post('/api/auth/register', async (req, res) => {
       if (!email) return res.status(400).json({ error: 'Email is required' });
       const cleanEmail = email.trim().toLowerCase();
 
-      const { data: userList, error } = await supabaseAdmin.auth.admin.listUsers();
-      if (error) {
-        return res.status(400).json({ error: error.message });
+      // 1. Check PostgreSQL public.users directory
+      let dbUser: any = null;
+      try {
+        const { data: directMatch } = await supabaseAdmin
+          .from('users')
+          .select('id, email, email_verified, role')
+          .ilike('email', cleanEmail)
+          .maybeSingle();
+        dbUser = directMatch;
+      } catch (dbErr) {
+        console.warn('[Check Verification DB Query Notice]:', dbErr);
       }
 
-      const targetUser = (userList?.users as any[])?.find(
-        (u: any) => u.email?.toLowerCase() === cleanEmail
-      );
+      // 2. Check Supabase Auth user directory with pagination
+      let targetUser: any = null;
+      try {
+        const { data: userList } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+        targetUser = (userList?.users as any[])?.find(
+          (u: any) => u.email?.toLowerCase() === cleanEmail
+        );
+      } catch (authErr) {
+        console.warn('[Check Verification Auth Query Notice]:', authErr);
+      }
 
-      if (!targetUser) {
+      if (!targetUser && !dbUser) {
         return res.json({
           exists: false,
           verified: false,
-          message: 'User not found in Supabase Auth.',
+          message: 'User not found in Supabase Auth or database directory.',
         });
       }
 
-      const isVerified = Boolean(targetUser.email_confirmed_at);
+      const isAuthVerified = Boolean(targetUser?.email_confirmed_at);
+      const isDbVerified = Boolean(dbUser?.email_verified);
+      const isVerified = isAuthVerified || isDbVerified;
       const isParentAdminEmail = cleanEmail === 'sachet61@gmail.com';
-      await supabaseAdmin
-        .from('users')
-        .update({
-          email_verified: isVerified,
-          ...(isParentAdminEmail ? { role: 'admin' } : {}),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', targetUser.id);
+      const userId = targetUser?.id || dbUser?.id;
+
+      if (userId && isVerified) {
+        await supabaseAdmin
+          .from('users')
+          .update({
+            email_verified: true,
+            ...(isParentAdminEmail ? { role: 'admin' } : {}),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', userId);
+
+        // Ensure auth.users reflects confirmed state if confirmed in public.users
+        if (targetUser && !isAuthVerified) {
+          await supabaseAdmin.auth.admin.updateUserById(targetUser.id, {
+            email_confirm: true,
+          }).catch(() => {});
+        }
+      }
 
       return res.json({
         exists: true,
         verified: isVerified,
-        emailConfirmedAt: targetUser.email_confirmed_at,
-        userId: targetUser.id,
+        emailConfirmedAt: targetUser?.email_confirmed_at || (isDbVerified ? new Date().toISOString() : null),
+        userId,
         message: isVerified
           ? 'Email address is verified.'
           : 'Email address is unverified.',

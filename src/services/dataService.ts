@@ -414,11 +414,12 @@ class DataService {
         if (convsRes.data) this.applyConversationRows(convsRes.data, true);
       } else if (currentUserId) {
         // Customer session: strictly scoped to CURRENT user only (no global table downloads)
-        const [appConfigRes, cashoutsRes, catRes, walletRes, topupsRes, withdrawalsRes, gameAccsRes, convRes] =
+        const [appConfigRes, cashoutsRes, catRes, userRes, walletRes, topupsRes, withdrawalsRes, gameAccsRes, convRes] =
           await Promise.all([
             appConfigPromise,
             cashoutsPromise,
             catPromise,
+            supabase.from('users').select('*').eq('id', currentUserId).maybeSingle(),
             supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
             supabase.from('topups').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20),
             supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20),
@@ -429,6 +430,37 @@ class DataService {
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
         if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
         if (catRes?.data && catRes.data.length > 0) this.applyCatalogRows(catRes.data);
+        if (userRes?.data) {
+          const dbUser = userRes.data;
+          const isConfirmed = Boolean(dbUser.email_verified);
+          const users = this.getUsers();
+          let local = users.find((u) => u.id === dbUser.id || u.email.toLowerCase() === dbUser.email?.toLowerCase());
+          if (local) {
+            local.emailVerified = isConfirmed;
+            if (dbUser.display_name) local.displayName = dbUser.display_name;
+            if (dbUser.role) local.role = dbUser.role;
+            if (dbUser.phone) local.phone = dbUser.phone;
+          } else {
+            local = {
+              id: dbUser.id,
+              email: dbUser.email,
+              displayName: dbUser.display_name || dbUser.email?.split('@')[0] || 'Player',
+              role: dbUser.role || 'customer',
+              phone: dbUser.phone,
+              avatarUrl: dbUser.avatar_url,
+              status: dbUser.status || 'active',
+              emailVerified: isConfirmed,
+              referralCode: dbUser.referral_code || `REF_${dbUser.id.slice(-5).toUpperCase()}`,
+              referredBy: dbUser.referred_by,
+              createdAt: dbUser.created_at || new Date().toISOString(),
+              lastLoginAt: new Date().toISOString(),
+            };
+            users.push(local);
+          }
+          this.cache[STORAGE_KEYS.USERS] = users;
+          authSessionService.updateUserProfile(local);
+          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_profile_synced', user: local } }));
+        }
         if (walletRes.data) this.applyWalletRows([walletRes.data]);
         if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
         if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
@@ -1588,10 +1620,13 @@ class DataService {
         role: session.role,
         referralCode: `REF_${session.userId.slice(-5)}`,
         status: 'active',
+        emailVerified: Boolean(session.emailVerified),
         createdAt: new Date(session.createdAt).toISOString(),
         lastLoginAt: new Date(session.lastActiveAt).toISOString(),
       };
       this.registerUser(user);
+    } else if (session.emailVerified && !user.emailVerified) {
+      user.emailVerified = true;
     }
     return user;
   }
@@ -1777,21 +1812,27 @@ class DataService {
       console.warn('Check verification network notice:', err);
     }
 
-    // 2. Client-side Supabase session check fallback
+    // 2. Client-side Supabase session & database check fallback
     if (supabase && isSupabaseConfigured()) {
       try {
-        const { data: { user: supaUser } } = await supabase.auth.getUser();
-        if (supaUser && supaUser.email?.toLowerCase() === user.email.toLowerCase()) {
-          const isConfirmed = Boolean(supaUser.email_confirmed_at);
-          user.emailVerified = isConfirmed;
+        const [{ data: authData }, { data: dbUser }] = await Promise.all([
+          supabase.auth.getUser(),
+          supabase.from('users').select('id, email_verified').eq('id', user.id).maybeSingle(),
+        ]);
+
+        const supaUser = authData?.user;
+        const isAuthConfirmed = supaUser && supaUser.email?.toLowerCase() === user.email.toLowerCase() && Boolean(supaUser.email_confirmed_at);
+        const isDbConfirmed = Boolean(dbUser?.email_verified);
+        const isConfirmed = isAuthConfirmed || isDbConfirmed;
+
+        if (isConfirmed) {
+          user.emailVerified = true;
           this.registerUser(user);
           authSessionService.updateUserProfile(user);
           window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
           return {
-            verified: isConfirmed,
-            message: isConfirmed
-              ? 'Email address confirmed and verified! Cashouts and referral bonuses are now unlocked.'
-              : 'Email address is not yet confirmed. Please check your inbox for the verification link.',
+            verified: true,
+            message: 'Email address confirmed and verified! Cashouts and referral bonuses are now unlocked.',
             user,
           };
         }
@@ -2523,13 +2564,21 @@ class DataService {
     phone?: string;
     role?: 'customer' | 'agent' | 'admin';
     referralCode?: string;
+    emailVerified?: boolean;
+    status?: string;
   }): { success: boolean; user?: UserProfile; message?: string } {
     const users = this.getUsers();
     const existing = users.find(
       (u) => (params.id && u.id === params.id) || u.email.toLowerCase() === params.email.toLowerCase() || (params.phone && u.phone === params.phone)
     );
     if (existing) {
-      return { success: false, message: 'An account with this email or phone already exists.' };
+      if (params.emailVerified !== undefined) {
+        existing.emailVerified = params.emailVerified;
+      }
+      if (params.displayName) existing.displayName = params.displayName;
+      if (params.role) existing.role = params.role;
+      if (params.phone) existing.phone = params.phone;
+      return { success: true, user: existing, message: 'User already exists, profile synchronized.' };
     }
 
     let referredBy: string | undefined = undefined;
@@ -2550,9 +2599,10 @@ class DataService {
       displayName: params.displayName,
       phone: params.phone,
       role: params.role || 'customer',
+      emailVerified: Boolean(params.emailVerified),
       referralCode: generatedRefCode,
       referredBy,
-      status: 'active',
+      status: (params.status as any) || 'active',
       createdAt: new Date().toISOString(),
       lastLoginAt: new Date().toISOString(),
     };

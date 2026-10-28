@@ -1,151 +1,117 @@
-# Production Request Synchronization & Modal Viewport Hardening Plan
+# Production Fix: Permanent Email Verification Synchronization & Session State Integrity
 
-Complete the real-time request lifecycle synchronization between Customer Support Chat and the Requests tab, ensure production PostgreSQL durability across all request types, and eliminate viewport clipping and z-index collisions on all action modals.
+Comprehensive architectural resolution for the intermittent "Email Verification Required" banner appearing for verified accounts (specifically confirmed for `rashilbasukala@gmail.com` in both `auth.users` and `public.users`) across testing and live production environments.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> - **Zero Stale Banners Across Views**: When an agent approves or declines a request in the Requests tab, the amber action banner in Chat for that customer will disappear immediately. Conversely, when approved in Chat, the request will vanish from the Requests queue in real time without a page refresh.
-> - **Authoritative PostgreSQL Durability**: In `dataService.ts`, `rejectTopUp`, `provisionGameAccount`, and `assignOrUpdateGameCredentials` will write directly to Supabase (`.update()` / `.upsert()`) targeting the exact record ID. This matches the existing `approveTopUp` and `updateWithdrawalStatus` implementations, preventing stale rows in PostgreSQL from reviving old statuses on delta syncs.
-> - **Reactive Chat State Versioning**: In `AdminChat.tsx`, add a reactive `requestsVersion` state counter that triggers re-evaluation of `customerWithdrawals`, `customerGameAccounts`, and `customerTopUps` whenever an `aetherpay_state_changed` event fires.
-> - **Modal Polish & Mobile Accessibility**: Elevate all modals in `AdminChat.tsx` (`showGameIdModal`, `showTopUpModal`, `showCashoutModal`, `showNewChatModal`) to `z-[100]` with `max-h-[90vh] overflow-y-auto`, backdrop click dismissal, and prominent `X` buttons.
+> Both `auth.users` (Supabase Auth `email_confirmed_at`) and `public.users` (`email_verified: true`) are confirmed active in PostgreSQL. The intermittent unverified state is caused by a client-side session hydration race condition: on browser refresh or initial navigation to tabs like `/topup`, the in-memory user cache is empty, `authSessionService.activeSession` omits `emailVerified`, and `initialCompactLoad()` does not fetch the authenticated customer's own row from `public.users`.
+
+- **Confirmed Decision 1**: Store `emailVerified` directly in `UserSession` (`authSessionService`) so page reloads immediately restore the verified state from the local session cookie/storage before any network roundtrip occurs.
+- **Confirmed Decision 2**: In `dataService.initialCompactLoad()`, include an authoritative single-row query for `supabase.from('users').select('*').eq('id', currentUserId).maybeSingle()`, updating the local user profile and session with the true database `email_verified` column.
+- **Confirmed Decision 3**: In `dataService.getCurrentUser()`, populate `emailVerified` from `session.emailVerified` when reconstructing the user stub from an active session, eliminating the transient `undefined` (falsy) state.
+- **Confirmed Decision 4**: Enhance `/api/auth/check-verification` and client-side status checks to check both `public.users` and `auth.users`, ensuring instant bidirectional sync with zero egress waste.
 
 ---
 
-### 1. Diagnosis & Remaining Gaps
+## 1. Overview & Core Concept
 
-1. **Missing Supabase Writes & State Dispatch in Specific Operations**:
-   - `rejectTopUp()`: Modifies local memory and updates the transaction card in chat, but never writes the `'rejected'` status to the `topups` table in Supabase and never dispatches `aetherpay_state_changed`. As a result, the Requests queue and subsequent delta syncs still see the top-up as `'submitted'`.
-   - `provisionGameAccount()` & `assignOrUpdateGameCredentials()`: Modifies local cache and dispatches chat messages, but lacks direct Supabase writes to the `game_accounts` table. If the page is refreshed or a delta sync occurs, the status may revert to `'pending_assignment'`, keeping the amber banner visible in Chat.
-   - `persistToSupabase()`: For `TOPUPS`, `WITHDRAWALS`, and `GAME_ACCOUNTS`, it only upserted `value[0]`. If an item at index > 0 was updated, the database was bypassed.
-
-2. **Missing Reactive State Hook in `AdminChat.tsx`**:
-   - `AdminChat.tsx` derives `customerWithdrawals`, `customerGameAccounts`, and `customerTopUps` as plain variables outside of component state:
-     ```tsx
-     const customerGameAccounts = canonicalCustomerId ? dataService.getGameAccounts(canonicalCustomerId) : [];
-     const customerTopUps = canonicalCustomerId ? dataService.getTopUpRequests(canonicalCustomerId) : [];
-     const customerWithdrawals = canonicalCustomerId ? dataService.getWithdrawalRequests(canonicalCustomerId) : [];
-     ```
-   - When an event fired from `AdminRequests.tsx`, `syncFromMemory()` only updated `conversations` and `messages`. If the active conversation list did not produce a new array reference, React skipped re-rendering, leaving the amber action banner visible at the top of the chat view.
-
-3. **`AdminChat.tsx` Modals Layering & Height Overflow**:
-   - `showGameIdModal`, `showTopUpModal`, `showCashoutModal`, and `showNewChatModal` in `AdminChat.tsx` still use `z-50` and lack `max-h-[90vh] overflow-y-auto`. On smaller laptop screens or mobile devices, action buttons (such as "Authorize & Complete Payout" and "Provision & Send to Chat") can be clipped by the viewport boundaries.
+- **What It Does**: Ensures that once a user's email is verified (either via OTP confirmation, link verification, admin confirmation, or Google OAuth), their verified status remains persistently recognized across all browser refreshes, tab navigations, and live production server environments. The "Email Verification Required" banner will never mistakenly display for verified players.
+- **Target Audience / Persona**: Registered players (`customer` role) accessing their portal, depositing funds (`/topup`), requesting cashouts (`/withdrawal`), and redeeming referral bonuses.
+- **Key Value**: Eliminates false "Action Required" alarms, unblocks cashouts and referral bonus claims, and guarantees 100% synchronization between Supabase PostgreSQL (`public.users`), Supabase Auth (`auth.users`), the Express server (`server.ts`), and the React SPA client.
 
 ---
 
-### 2. Proposed Architecture & Fix Strategy
+## 2. User Experience & Visual Design
+
+- **Zero False-Alarm Banners**: For verified players like `rashilbasukala@gmail.com`, the page loads cleanly into `/topup` or `/dashboard` without any flashing or momentary appearance of the amber `Email Verification Required` warning box.
+- **Instant Local & Server Verification**:
+  - If a player clicks "Check Status" in the banner, the client performs a fast check against `/api/auth/check-verification` and the local Supabase client, immediately updates the session and cache, dispatches `aetherpay_state_changed`, and cleanly dismisses the banner with a green confirmation toast.
+  - When verified, features gated by verification (cashouts, promotional bonuses) are instantly unlocked without requiring manual logout/login.
+- **Unverified Players**: Genuinely unverified players continue to see the prominent amber banner with clear OTP entry and resend options.
+
+---
+
+## 3. Key Product Decisions & Trade-Offs
+
+- **Decision 1: Session-Level Verification Persistence**
+  - *Chosen Approach*: Add `emailVerified?: boolean` to `UserSession` in `src/services/authSessionService.ts`, persist it in `localStorage` under `aetherpay_active_session`, and update it whenever `authSessionService.updateUserProfile()` or `createSessionForUser()` is invoked.
+  - *Why*: While the full user directory (`STORAGE_KEYS.USERS`) is deliberately excluded from `localStorage` for privacy and egress security, the *active user's own session* is already stored in `aetherpay_active_session`. Preserving `emailVerified` on that session object guarantees synchronous zero-latency access on the very first React render.
+  - *Alternatives Considered*: Storing the entire `users` table in localStorage (rejected: violates zero-mock/security invariants).
+
+- **Decision 2: Authoritative Hydration in `initialCompactLoad()`**
+  - *Chosen Approach*: When a customer session exists, add `supabase.from('users').select('*').eq('id', currentUserId).maybeSingle()` to the `Promise.all` batch in `initialCompactLoad()`.
+  - *Why*: Ensures the client runtime directly reconciles with PostgreSQL on startup with a single, indexed, foreign-key-filtered query (`eq('id', currentUserId)`), maintaining our strict bounded-egress architecture.
+  - *Alternatives Considered*: Querying the entire `users` table (rejected: unbounded query, violates architectural guidelines).
+
+- **Decision 3: Server Endpoint Verification Dual-Check**
+  - *Chosen Approach*: In `server.ts` `/api/auth/check-verification`, check `public.users` table as well as `supabaseAdmin.auth.admin.listUsers()`, and update `public.users.email_verified = true` if `auth.users` confirms verification.
+  - *Why*: Prevents divergence between Supabase Auth and the application database.
+
+---
+
+## 4. Technical Architecture & Data Strategy
+
+### System Flow & Verification Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                  Action Triggered                                       │
-│         (ChatTransactionCard / AdminChat Modal / AdminRequests Modal)                  │
-└───────────────────────────────────────────┬─────────────────────────────────────────────┘
-                                            │
-                                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                dataService.ts Engine                                    │
-│  - approveTopUp() / rejectTopUp()           ──> Supabase: supabase.from('topups')       │
-│  - updateWithdrawalStatus()                  ──> Supabase: supabase.from('withdrawals')  │
-│  - provisionGameAccount() / assignCreds()    ──> Supabase: supabase.from('game_accounts')│
-│  - Dispatches 'aetherpay_state_changed' with entity key & timestamp                     │
-└───────────────────────────────────────────┬─────────────────────────────────────────────┘
-                                            │
-                    ┌───────────────────────┴───────────────────────┐
-                    ▼                                               ▼
-┌───────────────────────────────────────┐       ┌───────────────────────────────────────┐
-│            AdminChat.tsx              │       │          AdminRequests.tsx            │
-│ - requestsVersion counter increments  │       │ - syncVersion counter increments      │
-│ - Re-evaluates pendingGameRequests    │       │ - Re-evaluates unifiedList queue      │
-│ - Re-evaluates pendingWithdrawal      │       │ - Processed items drop out immediately│
-│ - Amber Banner clears IMMEDIATELY     │       │ - Zero manual refresh required        │
-└───────────────────────────────────────┘       └───────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        React SPA Client (Mount)                        │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                   authSessionService.getActiveSession()                │
+│    Now contains: { userId, email, role, token, emailVerified: true }   │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                      dataService.getCurrentUser()                      │
+│   Constructs user profile with: emailVerified = session.emailVerified   │
+│                 (Never returns undefined on page reload)               │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│             EmailVerificationBanner: currentUser.emailVerified         │
+│          Evaluates TRUE immediately ──> Component Returns NULL         │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼ (Concurrent in Background)
+┌────────────────────────────────────────────────────────────────────────┐
+│                  dataService.initialCompactLoad()                      │
+│     Fetches: supabase.from('users').select('*').eq('id', currentUserId) │
+│     Syncs: userProfile.emailVerified = dbUser.email_verified           │
+│     Updates: authSessionService.activeSession.emailVerified            │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### A. Database Durability & Event Dispatch (`src/services/dataService.ts`)
-- **`rejectTopUp()`**:
-  - Add direct Supabase write:
-    ```ts
-    if (supabase && isSupabaseConfigured()) {
-      supabase.from('topups').update({
-        status: 'rejected',
-        reviewer_id: params.reviewerId,
-        reviewer_name: params.reviewerName,
-        review_notes: params.reason,
-        updated_at: req.updatedAt,
-      }).eq('id', req.id).then(() => {}, (err) => console.warn('Supabase topup reject error:', err));
-    }
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'topup_rejected', requestId: req.id } }));
-    ```
-- **`provisionGameAccount()`**:
-  - Add direct Supabase upsert:
-    ```ts
-    if (supabase && isSupabaseConfigured()) {
-      supabase.from('game_accounts').upsert({
-        id: targetAccount.id,
-        customer_id: targetAccount.customerId,
-        game_id: targetAccount.gameCatalogId,
-        game_title: targetAccount.gameName,
-        username: targetAccount.username,
-        password: targetAccount.password || '',
-        pin: targetAccount.notes || null,
-        status: targetAccount.status,
-        created_at: targetAccount.createdAt,
-        updated_at: targetAccount.updatedAt,
-      }).then(() => {}, (err) => console.warn('Supabase game account upsert error:', err));
-    }
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'game_account_provisioned', accountId: targetAccount.id } }));
-    ```
-- **`assignOrUpdateGameCredentials()`**:
-  - Add direct Supabase update:
-    ```ts
-    if (supabase && isSupabaseConfigured()) {
-      supabase.from('game_accounts').update({
-        username: acc.username,
-        password: acc.password,
-        status: acc.status,
-        pin: acc.notes || null,
-        updated_at: acc.updatedAt,
-      }).eq('id', acc.id).then(() => {}, (err) => console.warn('Supabase game account update error:', err));
-    }
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'game_credentials_assigned', accountId: acc.id } }));
-    ```
-- **`persistToSupabase()`**:
-  - Update `TOPUPS`, `WITHDRAWALS`, and `GAME_ACCOUNTS` handlers to iterate or safely upsert all modified items rather than strictly `value[0]`.
+### Component & File Modifications
 
-#### B. Reactive Banner Synchronization (`src/pages/admin/AdminChat.tsx`)
-- Add `const [requestsVersion, setRequestsVersion] = useState(0);`
-- In `handleSync` (listening to `aetherpay_state_changed` and `storage`), call `setRequestsVersion((v) => v + 1);`
-- In `handleApprovePendingCashoutInChat` and `handleConfirmProvisionGameId`, immediately call `setRequestsVersion((v) => v + 1);`
-- Ensure derived values (`customerWithdrawals`, `customerGameAccounts`, `customerTopUps`, `pendingWithdrawalForCustomer`, and `pendingGameRequestsForCustomer`) recompute with `requestsVersion` as a reactive dependency.
+1. `src/services/authSessionService.ts`:
+   - Add `emailVerified?: boolean` to `UserSession` interface.
+   - Update `createSessionForUser(userId, email, displayName, role, emailVerified?)` to accept and persist `emailVerified`.
+   - In `updateUserProfile(profile: UserProfile)`, sync `this.activeSession.emailVerified = profile.emailVerified`.
 
-#### C. Modal Viewports & Accessibility in `AdminChat.tsx`
-- **`showGameIdModal`**: Upgrade to `fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto` with modal card `max-w-md w-full max-h-[90vh] overflow-y-auto overscroll-contain my-auto`.
-- **`showTopUpModal`**: Upgrade to `z-[100]` with `max-h-[90vh] overflow-y-auto` and backdrop click dismissal.
-- **`showCashoutModal`**: Upgrade to `z-[100]` with `max-h-[90vh] overflow-y-auto` and backdrop click dismissal.
-- **`showNewChatModal`**: Upgrade to `z-[100]` with `max-h-[90vh] overflow-y-auto` and backdrop click dismissal.
+2. `src/services/dataService.ts`:
+   - In `getCurrentUser()`: When reconstructing user stub from `activeSession`, set `emailVerified: Boolean(session.emailVerified)`.
+   - In `initialCompactLoad()`: In the customer branch, add `supabase.from('users').select('id, email, display_name, role, status, email_verified, avatar_url').eq('id', currentUserId).maybeSingle()`. When received, update local user cache and active session.
+   - In `reloadAndCheckEmailVerification()` and `confirmEmailNow()`: Ensure `authSessionService.updateUserProfile` is called with `emailVerified: true` and dispatches `aetherpay_state_changed`.
+
+3. `src/services/supabaseAuthService.ts`:
+   - In `initAuthListener` (both `onAuthStateChange` and `getSession`): Pass `isConfirmed` into `authSessionService.createSessionForUser(..., isConfirmed)`.
+   - In `loginWithEmail`: Pass `isConfirmed` when creating/updating the session.
+   - In `registerWithEmail`: Ensure initial confirmation state is passed accurately.
+
+4. `server.ts`:
+   - In `/api/auth/check-verification`: Query both `supabaseAdmin.from('users')` and `auth.admin.listUsers()`, sync `email_verified` to `true` in `public.users` if confirmed in auth, and return `{ verified: true }`.
 
 ---
 
-### 3. Files to Modify
+## Verification Plan
 
-1. **`src/services/dataService.ts`**:
-   - Add Supabase writes and `aetherpay_state_changed` event dispatches to `rejectTopUp`, `provisionGameAccount`, and `assignOrUpdateGameCredentials`.
-   - Update `persistToSupabase()` to ensure all updated items are persisted.
-
-2. **`src/pages/admin/AdminChat.tsx`**:
-   - Add reactive `requestsVersion` state to guarantee immediate dismissal of the amber action banner upon request approval/rejection.
-   - Upgrade all 4 modal dialogs to `z-[100]`, `max-h-[90vh] overflow-y-auto`, and backdrop dismissal.
-
----
-
-### 4. Verification & Testing Plan
-
-1. **Compilation Check**:
-   - Run `compile_applet` to verify clean build without TypeScript errors.
-2. **Synchronization Testing**:
-   - Approve/reject a cashout in `AdminRequests` -> observe Chat view: the amber banner must vanish instantly.
-   - Approve/reject a cashout or credit a top-up in `AdminChat` -> observe `AdminRequests` queue: the item must be removed from the pending list instantly.
-   - Provision game credentials in `AdminChat` -> verify both Chat banner and Requests tab queue clear immediately.
-3. **Modal Usability on Mobile**:
-   - Test opening Top-Up, Cashout, and Game ID modals in `AdminChat.tsx` on narrow viewports: all action buttons ("Authorize & Complete Payout", "Confirm & Credit Game", "Assign Credentials") must be fully visible and scrollable.
-   - Verify modal backdrop clicks and `X` buttons cleanly dismiss each modal.
+1. **Build & Type Check**: Execute `compile_applet` to ensure zero TypeScript or Vite build errors.
+2. **Session Persistence Test**: Verify that simulating a refresh with active session preserves `emailVerified: true` immediately without falling back to `undefined`.
+3. **Database Reconciliation Test**: Verify `initialCompactLoad()` correctly receives `email_verified` from PostgreSQL and keeps `authSessionService` synchronized.
+4. **UI Validation**: Verify that the banner is not displayed for verified users on `/topup`, `/dashboard`, or any other customer route.

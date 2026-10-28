@@ -109,7 +109,8 @@ class SupabaseAuthService {
             userProfile.id,
             userProfile.email,
             userProfile.displayName,
-            userProfile.role
+            userProfile.role,
+            userProfile.emailVerified
           );
         }
       });
@@ -142,7 +143,8 @@ class SupabaseAuthService {
                   userProfile.id,
                   userProfile.email,
                   userProfile.displayName,
-                  userProfile.role
+                  userProfile.role,
+                  userProfile.emailVerified
                 );
               }
             }
@@ -252,7 +254,8 @@ class SupabaseAuthService {
         newProfile.id,
         newProfile.email,
         newProfile.displayName,
-        newProfile.role
+        newProfile.role,
+        newProfile.emailVerified
       );
 
       const requiresConfirmation = data.user && !isConfirmed && !data.session;
@@ -348,7 +351,8 @@ class SupabaseAuthService {
         userProfile.id,
         userProfile.email,
         userProfile.displayName,
-        userProfile.role
+        userProfile.role,
+        userProfile.emailVerified
       );
 
       return { success: true, user: userProfile };

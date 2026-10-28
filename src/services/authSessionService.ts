@@ -17,6 +17,7 @@ export interface UserSession {
   createdAt: number;
   expiresAt: number;
   lastActiveAt: number;
+  emailVerified?: boolean;
 }
 
 export interface StoredCredential {
@@ -353,7 +354,8 @@ class AuthSessionService {
     userId: string,
     email: string,
     displayName: string,
-    role: UserRole
+    role: UserRole,
+    emailVerified?: boolean
   ): UserSession {
     const now = Date.now();
     const token = `tok_${sha256Hex(`${email}:${now}:${Math.random()}`)}`;
@@ -370,6 +372,7 @@ class AuthSessionService {
       createdAt: now,
       expiresAt: now + SESSION_MAX_AGE_MS,
       lastActiveAt: now,
+      emailVerified: emailVerified !== undefined ? Boolean(emailVerified) : this.activeSession?.emailVerified,
     };
 
     this.activeSession = session;
@@ -406,6 +409,9 @@ class AuthSessionService {
     if (this.activeSession && (this.activeSession.userId === profile.id || this.activeSession.email.toLowerCase() === profile.email.toLowerCase())) {
       this.activeSession.displayName = profile.displayName;
       this.activeSession.role = profile.role;
+      if (profile.emailVerified !== undefined) {
+        this.activeSession.emailVerified = Boolean(profile.emailVerified);
+      }
       this.saveActiveSession();
     }
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
