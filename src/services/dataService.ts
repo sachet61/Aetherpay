@@ -1191,50 +1191,46 @@ class DataService {
           });
         }
       } else if (key === STORAGE_KEYS.TOPUPS && Array.isArray(value) && value.length > 0) {
-        const top = value[0];
-        if (top && top.id) {
-          await supabase.from('topups').upsert({
-            id: top.id,
-            customer_id: top.customerId,
-            customer_name: top.customerName,
-            amount: top.amount,
-            bonus_amount: top.bonusAmount || 0,
-            payment_method_id: top.method || 'payment_link',
-            payment_method_name: top.methodName || 'Payment Link',
-            status: top.status,
-            proof_url: top.receiptUrl || null,
-            target_game_name: top.targetGameName || null,
-            target_game_account_id: top.targetGameCatalogId || null,
-            customer_notes: null,
-            reviewer_id: top.reviewerId || null,
-            reviewer_name: top.reviewerName || null,
-            review_notes: top.reviewNotes || null,
-            created_at: top.createdAt,
-            updated_at: top.updatedAt,
-          });
-        }
+        const topupsToUpsert = (value as TopUpRequest[]).slice(0, 10).map((top) => ({
+          id: top.id,
+          customer_id: top.customerId,
+          customer_name: top.customerName,
+          amount: top.amount,
+          bonus_amount: top.bonusAmount || 0,
+          payment_method_id: top.method || 'payment_link',
+          payment_method_name: top.methodName || 'Payment Link',
+          status: top.status,
+          proof_url: top.receiptUrl || null,
+          target_game_name: top.targetGameName || null,
+          target_game_account_id: top.targetGameCatalogId || null,
+          customer_notes: null,
+          reviewer_id: top.reviewerId || null,
+          reviewer_name: top.reviewerName || null,
+          review_notes: top.reviewNotes || null,
+          created_at: top.createdAt,
+          updated_at: top.updatedAt,
+        }));
+        await supabase.from('topups').upsert(topupsToUpsert);
       } else if (key === STORAGE_KEYS.WITHDRAWALS && Array.isArray(value) && value.length > 0) {
-        const w = value[0];
-        if (w && w.id) {
-          await supabase.from('withdrawals').upsert({
-            id: w.id,
-            customer_id: w.customerId,
-            customer_name: w.customerName,
-            amount: w.amount,
-            fee: w.feeAmount || 0,
-            net_amount: w.netPayout,
-            payout_method_id: w.method || 'bank_transfer',
-            payout_method_name: w.methodName || 'Bank Transfer',
-            payout_details: w.payoutDetails || {},
-            status: w.status,
-            reviewer_id: w.reviewerId || null,
-            reviewer_name: w.reviewerName || null,
-            review_notes: w.reviewNotes || null,
-            transaction_hash: w.payoutReference || null,
-            created_at: w.createdAt,
-            updated_at: w.updatedAt,
-          });
-        }
+        const withdrawalsToUpsert = (value as WithdrawalRequest[]).slice(0, 10).map((w) => ({
+          id: w.id,
+          customer_id: w.customerId,
+          customer_name: w.customerName,
+          amount: w.amount,
+          fee: w.feeAmount || 0,
+          net_amount: w.netPayout,
+          payout_method_id: w.method || 'bank_transfer',
+          payout_method_name: w.methodName || 'Bank Transfer',
+          payout_details: w.payoutDetails || {},
+          status: w.status,
+          reviewer_id: w.reviewerId || null,
+          reviewer_name: w.reviewerName || null,
+          review_notes: w.reviewNotes || null,
+          transaction_hash: w.payoutReference || null,
+          created_at: w.createdAt,
+          updated_at: w.updatedAt,
+        }));
+        await supabase.from('withdrawals').upsert(withdrawalsToUpsert);
       } else if (key === STORAGE_KEYS.GAME_CATALOG && Array.isArray(value) && value.length > 0) {
         const g = value[0];
         if (g && g.id) {
@@ -1252,21 +1248,19 @@ class DataService {
           });
         }
       } else if (key === STORAGE_KEYS.GAME_ACCOUNTS && Array.isArray(value) && value.length > 0) {
-        const a = value[0];
-        if (a && a.id) {
-          await supabase.from('game_accounts').upsert({
-            id: a.id,
-            customer_id: a.customerId,
-            game_id: a.gameCatalogId,
-            game_title: a.gameName,
-            username: a.username,
-            password: a.password || '',
-            pin: null,
-            status: a.status,
-            created_at: a.createdAt,
-            updated_at: a.updatedAt,
-          });
-        }
+        const accountsToUpsert = (value as GameAccount[]).slice(0, 15).map((a) => ({
+          id: a.id,
+          customer_id: a.customerId,
+          game_id: a.gameCatalogId,
+          game_title: a.gameName,
+          username: a.username,
+          password: a.password || '',
+          pin: a.notes || null,
+          status: a.status,
+          created_at: a.createdAt,
+          updated_at: a.updatedAt,
+        }));
+        await supabase.from('game_accounts').upsert(accountsToUpsert);
       } else if (key === STORAGE_KEYS.CONVERSATIONS && Array.isArray(value) && value.length > 0) {
         const currentUserId = this.getCurrentUser()?.id;
         const c = currentUserId
@@ -3001,6 +2995,19 @@ class DataService {
       console.warn('Top-up approval chat dispatch warning:', chatErr);
     }
 
+    if (supabase && isSupabaseConfigured()) {
+      supabase.from('topups').update({
+        status: 'completed',
+        amount: req.amount,
+        bonus_amount: req.bonusAmount,
+        reviewer_id: params.reviewerId,
+        reviewer_name: params.reviewerName,
+        review_notes: req.reviewNotes,
+        updated_at: req.updatedAt,
+      }).eq('id', req.id).then(() => {}, (err) => console.warn('Supabase topup approve sync error:', err));
+    }
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'topup_approved', requestId: req.id } }));
+
     return { success: true, message: 'Deposit successfully approved and credited.' };
   }
 
@@ -3051,6 +3058,17 @@ class DataService {
 
     // Update transaction card in chat thread
     this.updateChatTransactionStatus(req.id, 'rejected', params.reviewerName, params.reason);
+
+    if (supabase && isSupabaseConfigured()) {
+      supabase.from('topups').update({
+        status: 'rejected',
+        reviewer_id: params.reviewerId,
+        reviewer_name: params.reviewerName,
+        review_notes: params.reason,
+        updated_at: req.updatedAt,
+      }).eq('id', req.id).then(() => {}, (err) => console.warn('Supabase topup reject sync error:', err));
+    }
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'topup_rejected', requestId: req.id } }));
 
     return { success: true, message: 'Deposit rejected.' };
   }
@@ -3336,6 +3354,18 @@ class DataService {
     } else if (params.newStatus === 'rejected' || params.newStatus === 'cancelled') {
       this.updateChatTransactionStatus(req.id, 'rejected', params.reviewerName, params.note);
     }
+
+    if (supabase && isSupabaseConfigured()) {
+      supabase.from('withdrawals').update({
+        status: params.newStatus,
+        reviewer_id: params.reviewerId,
+        reviewer_name: params.reviewerName,
+        review_notes: req.reviewNotes,
+        transaction_hash: req.payoutReference,
+        updated_at: req.updatedAt,
+      }).eq('id', req.id).then(() => {}, (err) => console.warn('Supabase withdrawal status sync error:', err));
+    }
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'withdrawal_updated', requestId: req.id } }));
 
     return { success: true, message: `Withdrawal status updated to ${params.newStatus}.` };
   }
@@ -3790,6 +3820,22 @@ class DataService {
       details: `${existing ? 'Updated' : 'Assigned'} credentials for ${gameTitle} (User: ${params.username.trim()}) for player ${params.customerId}. Enforced 1 ID per game rule.`,
     });
 
+    if (supabase && isSupabaseConfigured()) {
+      supabase.from('game_accounts').upsert({
+        id: targetAccount.id,
+        customer_id: targetAccount.customerId,
+        game_id: targetAccount.gameCatalogId,
+        game_title: targetAccount.gameName,
+        username: targetAccount.username,
+        password: targetAccount.password || '',
+        pin: targetAccount.notes || null,
+        status: targetAccount.status,
+        created_at: targetAccount.createdAt,
+        updated_at: targetAccount.updatedAt,
+      }).then(() => {}, (err) => console.warn('Supabase game account upsert sync error:', err));
+    }
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'game_account_provisioned', accountId: targetAccount.id } }));
+
     return {
       success: true,
       message: existing
@@ -3852,6 +3898,17 @@ class DataService {
       entityId: acc.id,
       details: `Support specialist ${params.reviewerName} configured credentials for ${acc.gameName} (User: ${acc.username}). Single ID per game enforced.`,
     });
+
+    if (supabase && isSupabaseConfigured()) {
+      supabase.from('game_accounts').update({
+        username: acc.username,
+        password: acc.password,
+        status: acc.status,
+        pin: acc.notes || null,
+        updated_at: acc.updatedAt,
+      }).eq('id', acc.id).then(() => {}, (err) => console.warn('Supabase game account assign sync error:', err));
+    }
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'game_credentials_assigned', accountId: acc.id } }));
 
     return { success: true, message: `Successfully assigned credentials for ${acc.gameName}. Player notified.` };
   }

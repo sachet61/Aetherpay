@@ -58,11 +58,17 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
   const [assignedUsername, setAssignedUsername] = useState('');
   const [assignedPassword, setAssignedPassword] = useState('');
 
-  const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  const [syncVersion, setSyncVersion] = useState(0);
 
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMoreTopups, setHasMoreTopups] = useState(true);
-  const [hasMoreWithdrawals, setHasMoreWithdrawals] = useState(true);
+  useEffect(() => {
+    const handleStateChange = () => setSyncVersion((v) => v + 1);
+    window.addEventListener('aetherpay_state_changed', handleStateChange);
+    window.addEventListener('storage', handleStateChange);
+    return () => {
+      window.removeEventListener('aetherpay_state_changed', handleStateChange);
+      window.removeEventListener('storage', handleStateChange);
+    };
+  }, []);
 
   const allTopUps = dataService.getTopUpRequests();
   const allWithdrawals = dataService.getWithdrawalRequests();
@@ -592,11 +598,15 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
 
       {/* Game Credentials Assignment Modal (For Customer Support) */}
       {actionGameAccount && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setActionGameAccount(null)} />
+        <div 
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setActionGameAccount(null);
+          }}
+        >
           <form
             onSubmit={handleSaveGameCredentials}
-            className="relative w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+            className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 sm:p-6 shadow-2xl z-10 space-y-4 my-auto overscroll-contain animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
@@ -606,9 +616,10 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
               <button
                 type="button"
                 onClick={() => setActionGameAccount(null)}
-                className="text-xs text-slate-400 hover:text-white"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700 transition-colors"
+                aria-label="Close modal"
               >
-                Close
+                <X className="w-4 h-4" />
               </button>
             </div>
 
@@ -705,16 +716,25 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
 
       {/* Top-Up Action Modal */}
       {actionTopUp && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setActionTopUp(null)} />
-          <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
+        <div 
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setActionTopUp(null);
+          }}
+        >
+          <div className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 sm:p-6 shadow-2xl z-10 space-y-4 my-auto overscroll-contain animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <ArrowDownToLine className="w-4 h-4 text-indigo-400" />
                 <span>Verify Deposit #{actionTopUp.id}</span>
               </h3>
-              <button onClick={() => setActionTopUp(null)} className="text-xs text-slate-400 hover:text-white">
-                Close
+              <button
+                type="button"
+                onClick={() => setActionTopUp(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700 transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
               </button>
             </div>
 
@@ -915,16 +935,25 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
 
       {/* Withdrawal Action Modal */}
       {actionWithdrawal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setActionWithdrawal(null)} />
-          <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
+        <div 
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setActionWithdrawal(null);
+          }}
+        >
+          <div className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 sm:p-6 shadow-2xl z-10 space-y-4 my-auto overscroll-contain animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <ArrowUpFromLine className="w-4 h-4 text-amber-400" />
                 <span>Process Cashout #{actionWithdrawal.id}</span>
               </h3>
-              <button onClick={() => setActionWithdrawal(null)} className="text-xs text-slate-400 hover:text-white">
-                Close
+              <button
+                type="button"
+                onClick={() => setActionWithdrawal(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700 transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
               </button>
             </div>
 
@@ -1034,12 +1063,22 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
 
       {/* Receipt Preview Lightbox */}
       {viewReceiptUrl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85">
-          <div className="relative max-w-2xl w-full bg-slate-900 rounded-2xl overflow-hidden border border-slate-700">
+        <div 
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setViewReceiptUrl(null);
+          }}
+        >
+          <div className="relative max-w-2xl w-full max-h-[90vh] overflow-y-auto bg-slate-900 rounded-2xl overflow-hidden border border-slate-700 my-auto overscroll-contain shadow-2xl">
             <div className="p-3 bg-slate-950 flex items-center justify-between border-b border-slate-800">
               <span className="text-xs font-semibold text-white">Payment Receipt Inspection</span>
-              <button onClick={() => setViewReceiptUrl(null)} className="text-xs text-slate-400 hover:text-white">
-                Close
+              <button
+                type="button"
+                onClick={() => setViewReceiptUrl(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700 transition-colors"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
               </button>
             </div>
             <div className="p-4 flex items-center justify-center">

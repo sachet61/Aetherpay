@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   UserProfile,
   SupportConversation,
@@ -105,6 +105,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   const [cashoutActionNote, setCashoutActionNote] = useState('');
 
   const [feedbackToast, setFeedbackToast] = useState<{ text: string; type: 'success' | 'info' } | null>(null);
+  const [requestsVersion, setRequestsVersion] = useState(0);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const allUsers = dataService.getUsers().filter((u) => u.role === 'customer');
@@ -170,6 +171,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     // 3. Reactive updates from Realtime events: purely read from memory cache, ZERO REST calls!
     const handleSync = () => {
       syncFromMemory();
+      setRequestsVersion((v) => v + 1);
       if (selectedConvId) {
         setMessages(dataService.getMessages(selectedConvId));
       }
@@ -332,45 +334,62 @@ export const AdminChat: React.FC<AdminChatProps> = ({
         : undefined)
     : undefined;
   const canonicalCustomerId = customerProfile?.id || activeConv?.customerId || '';
-  const customerWallet = canonicalCustomerId ? dataService.getWallet(canonicalCustomerId) : undefined;
-  const customerGameAccounts = canonicalCustomerId ? dataService.getGameAccounts(canonicalCustomerId) : [];
-  const customerTopUps = canonicalCustomerId ? dataService.getTopUpRequests(canonicalCustomerId) : [];
-  const customerWithdrawals = canonicalCustomerId ? dataService.getWithdrawalRequests(canonicalCustomerId) : [];
+  const customerWallet = useMemo(() => {
+    return canonicalCustomerId ? dataService.getWallet(canonicalCustomerId) : undefined;
+  }, [canonicalCustomerId, requestsVersion]);
 
-  const pendingWithdrawalForCustomer = customerWithdrawals.find(
-    (w) => w.status === 'submitted' || w.status === 'processing'
-  );
+  const customerGameAccounts = useMemo(() => {
+    return canonicalCustomerId ? dataService.getGameAccounts(canonicalCustomerId) : [];
+  }, [canonicalCustomerId, requestsVersion]);
 
-  const pendingGameRequestsForCustomer = customerGameAccounts.filter(
-    (g) => g.status === 'pending_assignment' || g.status === 'pending_reset'
-  );
+  const customerTopUps = useMemo(() => {
+    return canonicalCustomerId ? dataService.getTopUpRequests(canonicalCustomerId) : [];
+  }, [canonicalCustomerId, requestsVersion]);
+
+  const customerWithdrawals = useMemo(() => {
+    return canonicalCustomerId ? dataService.getWithdrawalRequests(canonicalCustomerId) : [];
+  }, [canonicalCustomerId, requestsVersion]);
+
+  const pendingWithdrawalForCustomer = useMemo(() => {
+    return customerWithdrawals.find(
+      (w) => w.status === 'submitted' || w.status === 'processing'
+    );
+  }, [customerWithdrawals]);
+
+  const pendingGameRequestsForCustomer = useMemo(() => {
+    return customerGameAccounts.filter(
+      (g) => g.status === 'pending_assignment' || g.status === 'pending_reset'
+    );
+  }, [customerGameAccounts]);
 
   // Filter conversations Messenger-style
-  const filteredConversations = conversations.filter((c) => {
-    if (statusFilter === 'unread' && c.unreadCountStaff === 0) return false;
-    if (statusFilter === 'pending') {
-      const hasPendingGame = dataService
-        .getGameAccounts(c.customerId)
-        .some((g) => g.status === 'pending_assignment' || g.status === 'pending_reset');
-      const hasPendingCashout = dataService
-        .getWithdrawalRequests(c.customerId)
-        .some((w) => w.status === 'submitted' || w.status === 'processing');
-      const hasPendingTopUp = dataService
-        .getTopUpRequests(c.customerId)
-        .some((t) => t.status === 'submitted' || t.status === 'verifying');
-      if (!hasPendingGame && !hasPendingCashout && !hasPendingTopUp) return false;
-    }
+  const filteredConversations = useMemo(() => {
+    return conversations.filter((c) => {
+      if (statusFilter === 'unread' && c.unreadCountStaff === 0) return false;
+      if (statusFilter === 'pending') {
+        const hasPendingGame = dataService
+          .getGameAccounts(c.customerId)
+          .some((g) => g.status === 'pending_assignment' || g.status === 'pending_reset');
+        const hasPendingCashout = dataService
+          .getWithdrawalRequests(c.customerId)
+          .some((w) => w.status === 'submitted' || w.status === 'processing');
+        const hasPendingTopUp = dataService
+          .getTopUpRequests(c.customerId)
+          .some((t) => t.status === 'submitted' || t.status === 'verifying');
+        if (!hasPendingGame && !hasPendingCashout && !hasPendingTopUp) return false;
+      }
 
-    if (searchTerm.trim()) {
-      const q = searchTerm.toLowerCase();
-      return (
-        c.customerName.toLowerCase().includes(q) ||
-        c.customerEmail.toLowerCase().includes(q) ||
-        c.lastMessageText.toLowerCase().includes(q)
-      );
-    }
-    return true;
-  });
+      if (searchTerm.trim()) {
+        const q = searchTerm.toLowerCase();
+        return (
+          c.customerName.toLowerCase().includes(q) ||
+          c.customerEmail.toLowerCase().includes(q) ||
+          c.lastMessageText.toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [conversations, statusFilter, searchTerm, requestsVersion]);
 
   const handleSelectConversation = (convId: string) => {
     const canonicalId = dataService.resolveCanonicalConvId(convId);
@@ -485,6 +504,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     });
 
     if (res.success) {
+      setRequestsVersion((v) => v + 1);
       setShowGameIdModal(false);
       setFeedbackToast({
         text: res.message,
@@ -551,6 +571,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       }
     }
 
+    setRequestsVersion((v) => v + 1);
     setShowTopUpModal(false);
     setFeedbackToast({
       text: `Top-Up action of $${amountNum.toFixed(2)} executed successfully!`,
@@ -576,6 +597,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     });
 
     if (res.success) {
+      setRequestsVersion((v) => v + 1);
       dataService.sendChatMessage({
         conversationId: activeConv!.id,
         senderId: currentUser.id,
@@ -1064,25 +1086,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                 <div ref={messagesEndRef} />
               </div>
 
-              {/* QUICK REPLY CHIPS STRIP */}
-              <div className="px-3 py-1.5 bg-slate-950 border-t border-slate-800 flex items-center gap-1.5 overflow-x-auto text-[11px]">
-                <span className="text-slate-500 shrink-0 font-medium">Quick Replies:</span>
-                {[
-                  'Your deposit is verified and credited!',
-                  'Your cashout wire has been processed.',
-                  'Your game credentials are now active in your Gaming IDs portal.',
-                  'Please provide your deposit transaction reference.',
-                ].map((tmpl, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => setInputText(tmpl)}
-                    className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white whitespace-nowrap border border-slate-800 text-xs transition-colors"
-                  >
-                    {tmpl.substring(0, 28)}...
-                  </button>
-                ))}
-              </div>
+
 
               {/* COMPOSER BAR */}
               <form
@@ -1258,14 +1262,15 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       {/* MODAL 1: PROVISION GAME ID DIRECTLY FROM CHAT */}
       {/* ======================================================== */}
       {showGameIdModal && activeConv && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => setShowGameIdModal(false)}
-          />
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowGameIdModal(false);
+          }}
+        >
           <form
             onSubmit={handleConfirmProvisionGameId}
-            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto max-h-[90vh] overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
@@ -1278,9 +1283,10 @@ export const AdminChat: React.FC<AdminChatProps> = ({
               <button
                 type="button"
                 onClick={() => setShowGameIdModal(false)}
-                className="text-xs text-slate-400 hover:text-white"
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                aria-label="Close modal"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
 
@@ -1400,14 +1406,15 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       {/* MODAL 2: TOP-UP ASSIST DIRECTLY FROM CHAT */}
       {/* ======================================================== */}
       {showTopUpModal && activeConv && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => setShowTopUpModal(false)}
-          />
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowTopUpModal(false);
+          }}
+        >
           <form
             onSubmit={handleConfirmTopUpAction}
-            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto max-h-[90vh] overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
@@ -1420,9 +1427,10 @@ export const AdminChat: React.FC<AdminChatProps> = ({
               <button
                 type="button"
                 onClick={() => setShowTopUpModal(false)}
-                className="text-xs text-slate-400 hover:text-white"
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                aria-label="Close modal"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
 
@@ -1502,12 +1510,13 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       {/* MODAL 3: CASHOUT ASSIST DIRECTLY FROM CHAT */}
       {/* ======================================================== */}
       {showCashoutModal && activeConv && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => setShowCashoutModal(false)}
-          />
-          <div className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowCashoutModal(false);
+          }}
+        >
+          <div className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto max-h-[90vh] overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <ArrowUpFromLine className="w-5 h-5 text-amber-400" />
@@ -1518,9 +1527,10 @@ export const AdminChat: React.FC<AdminChatProps> = ({
               </div>
               <button
                 onClick={() => setShowCashoutModal(false)}
-                className="text-xs text-slate-400 hover:text-white"
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                aria-label="Close modal"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
 
@@ -1622,12 +1632,13 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       {/* MODAL 4: START NEW CHAT WITH ANY REGISTERED CUSTOMER */}
       {/* ======================================================== */}
       {showNewChatModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => setShowNewChatModal(false)}
-          />
-          <div className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowNewChatModal(false);
+          }}
+        >
+          <div className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto max-h-[90vh] overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <MessageSquare className="w-5 h-5 text-indigo-400" />
@@ -1635,9 +1646,10 @@ export const AdminChat: React.FC<AdminChatProps> = ({
               </h3>
               <button
                 onClick={() => setShowNewChatModal(false)}
-                className="text-xs text-slate-400 hover:text-white"
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                aria-label="Close modal"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
 

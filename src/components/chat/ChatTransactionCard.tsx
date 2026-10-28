@@ -457,8 +457,13 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
 
       {/* Interactive Review Proof & Credit Game Modal */}
       {showReviewModal && isTopUp && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto">
-          <div className="relative max-w-lg w-full bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-2xl flex flex-col space-y-4 my-8">
+        <div 
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowReviewModal(false);
+          }}
+        >
+          <div className="relative max-w-lg w-full max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-2xl flex flex-col space-y-4 my-auto overscroll-contain">
             {/* Modal Header */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
@@ -705,8 +710,13 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
 
       {/* Full-size proof screenshot modal */}
       {showScreenshotModal && transaction.proofUrl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
-          <div className="relative max-w-xl w-full bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-2xl flex flex-col space-y-3">
+        <div 
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowScreenshotModal(false);
+          }}
+        >
+          <div className="relative max-w-xl w-full max-h-[90vh] overflow-y-auto bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-2xl flex flex-col space-y-3 my-auto overscroll-contain">
             <div className="flex items-center justify-between pb-2 border-b border-slate-800">
               <div className="text-xs font-bold text-white flex items-center gap-2">
                 <CreditCard className="w-4 h-4 text-amber-400" />
