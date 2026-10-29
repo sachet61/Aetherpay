@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { VAPID_PUBLIC_KEY, savePushSubscription, sendPushNotification } from '../src/server/webPushEngine.ts';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://fsykihwprqdptrqapxxg.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY =
@@ -316,7 +317,48 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  // 5. Health & Status
+  // 5. Web Push Endpoints for PWA Background Notifications on Vercel
+  if (url.includes('/api/push/vapid-public-key') && req.method === 'GET') {
+    return res.status(200).json({ publicKey: VAPID_PUBLIC_KEY });
+  }
+
+  if (url.includes('/api/push/subscribe') && req.method === 'POST') {
+    try {
+      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+      const { subscription, userId, userRole } = body || {};
+      if (!subscription || !subscription.endpoint) {
+        return res.status(400).json({ error: 'Subscription data required' });
+      }
+      const success = await savePushSubscription(subscription, userId || 'anonymous', userRole || 'customer', supabaseAdmin);
+      return res.status(200).json({ success });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message || 'Failed to save subscription' });
+    }
+  }
+
+  if (url.includes('/api/push/notify') && req.method === 'POST') {
+    try {
+      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+      const { recipientId, recipientRole, title, body: msgBody, url: targetUrl, tag, conversationId } = body || {};
+      const result = await sendPushNotification(
+        recipientId,
+        recipientRole,
+        {
+          title: title || 'New Message',
+          body: msgBody || 'You have received a new message.',
+          url: targetUrl || '/#chat',
+          tag: tag || `chat_${conversationId || Date.now()}`,
+          data: { conversationId },
+        },
+        supabaseAdmin
+      );
+      return res.status(200).json({ success: true, ...result });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message || 'Failed to dispatch push' });
+    }
+  }
+
+  // 6. Health & Status
   if (url.includes('/api/status') || url.includes('/api/telegram/status') || url === '/api' || url === '/api/') {
     return res.status(200).json({
       online: true,

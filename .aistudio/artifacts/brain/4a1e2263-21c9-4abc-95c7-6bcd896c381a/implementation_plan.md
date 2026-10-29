@@ -1,77 +1,88 @@
-# Plan: Separate Support Staff from Customer Inboxes & Clean Up Redundant Messages
+# Dual-Environment Implementation Plan: Express (Dev) & Vercel (Production) Parity
 
-## Root Cause Analysis
-1. **Initial Registration as Customer**:
-   Every new user (including staff members like `haudemaxe@gmail.com`) is created as a `customer` during sign-up.
-2. **Automated Welcome Greeting Dispatch**:
-   Upon first login or visit, `getOrCreateConversationForCustomer()` automatically creates a support conversation record (`conv_<userId>`) and sends the automated greeting: *"Welcome to Swift Sweeps Support! How can our treasury and gaming care specialists assist you today?"* from Sarah Lin (`usr_agent_1`). This conversation is persisted to PostgreSQL (`public.conversations` and `public.messages`) and local cache.
-3. **Role Promotion Without Conversation Cleanup**:
-   When an administrator promotes the user to `agent` or `admin`, only their role in `public.users` and `auth.users` was modified. Their legacy customer support ticket was never removed from `conversations`.
-4. **Missing Customer-Only Filter in Support Inbox (`AdminChat.tsx`)**:
-   `AdminChat.tsx` fetched all rows from `conversations` without verifying `user.role === 'customer'`. Consequently, staff members appeared in the Support Inbox as customers, showing their own legacy customer greeting message while logged in as support.
-5. **Lack of Role Guard on Conversation Creation**:
-   `getOrCreateConversationForCustomer()` did not verify whether the target user was an agent or admin, allowing support conversations to be spawned for staff.
+## 1. Architectural Strategy: Dual-Environment Parity
 
----
-
-## Key Decisions & Architecture
+To ensure the application behaves identically in the **testing environment (Express running on port 3000)** and the **live production server (Vercel)**, all functionality is architected for dual-environment symmetry:
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                          User Authentication                           │
-│                     (Role: 'agent' or 'admin')                         │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-           ┌────────────────────────┴────────────────────────┐
-           ▼                                                 ▼
-┌───────────────────────────────────────┐   ┌────────────────────────────────────┐
-│      Server & Startup Self-Healing    │   │        Client Filtering & Guards   │
-│ - server.ts startup reconciliation    │   │ - dataService: block staff from    │
-│ - Purge lingering staff rows from     │   │   getOrCreateConversation()        │
-│   'conversations' & 'messages'        │   │ - AdminChat: strictly filter       │
-│ - /api/admin/users/:userId/role auto- │   │   conversations by customer role   │
-│   cleans conversation upon promotion  │   │ - De-select staff conversations    │
-└───────────────────────────────────────┘   └────────────────────────────────────┘
+                                  ┌───────────────────────────┐
+                                  │   Client PWA (React SPA)  │
+                                  └─────────────┬─────────────┘
+                                                │
+                 ┌──────────────────────────────┴──────────────────────────────┐
+                 ▼ (Testing / Local: dev script)                               ▼ (Live Production: Vercel)
+┌───────────────────────────────────────────────┐             ┌───────────────────────────────────────────────┐
+│         Express Server (server.ts)            │             │   Vercel Serverless Function (/api/index.ts)  │
+│  - Port 3000 Node process                     │             │  - Ephemeral Serverless Handler               │
+│  - Vite dev middleware                        │             │  - Static asset CDN (/public/sw.js & manifest)│
+│  - Routes: /api/push/*, /api/admin/*          │             │  - Routes: /api/push/*, /api/admin/*          │
+└───────────────────────┬───────────────────────┘             └───────────────────────┬───────────────────────┘
+                        │                                                             │
+                        └──────────────────────────────┬──────────────────────────────┘
+                                                       │
+                                                       ▼
+                        ┌─────────────────────────────────────────────────────────────┐
+                        │             Supabase Cloud (External Infrastructure)        │
+                        │  - Native Realtime WebSockets for In-App Live Chat          │
+                        │  - PostgreSQL 'messages', 'conversations', 'users'          │
+                        │  - 'push_subscriptions' table (negligible size impact)      │
+                        └─────────────────────────────────────────────────────────────┘
 ```
 
-> [!IMPORTANT]
-> **Production Server Compatibility**:
-> The cleanup handles both live PostgreSQL rows in Supabase and in-memory/localStorage caches. When the server or app initializes, it automatically queries for any conversation records where `customer_id` belongs to an `agent` or `admin` in `public.users` and cleans them up, fixing existing dirty records like `haudemaxe@gmail.com` immediately in live production without requiring manual database intervention.
+---
+
+## 2. Environment Parity Matrix
+
+| Component | Express (Testing / Dev) | Vercel (Live Production) | Implementation Strategy |
+|---|---|---|---|
+| **In-App Live Chat** | Direct client ↔ Supabase Realtime | Direct client ↔ Supabase Realtime | **100% Identical**. Browser connects directly to `wss://<id>.supabase.co`. Zero dependency on Express or Vercel compute. Zero polling egress. |
+| **PWA Manifest & Service Worker** | Served from `/public` via Express static | Served from `/public` via Vercel Edge CDN | **100% Identical**. `/manifest.webmanifest` and `/sw.js` are static assets handled seamlessly by both web servers. |
+| **Web Push Dispatcher** | `/api/push/notify` in `server.ts` | `/api/push/notify` in `/api/index.ts` | **Mirrored API Handlers**. Both environments share the exact same `web-push` VAPID signing logic and payload format. |
+| **Push Subscriptions Storage** | Supabase `public.push_subscriptions` | Supabase `public.push_subscriptions` | **Single Source of Truth**. Both environments read and write subscriptions to PostgreSQL (with resilient memory fallback). |
+| **Admin Chat Back Navigation** | React SPA component state | React SPA component state | **100% Identical**. Pure client-side component logic in `AdminChat.tsx`. |
 
 ---
 
-## Affected Files & Proposed Solution
+## 3. Step-by-Step Implementation Plan
 
-### 1. `server.ts`
-- **Startup Reconciliation**:
-  On Express server initialization, query `public.conversations` joined with `public.users` (or check users with `role IN ('agent', 'admin')`). Delete any lingering customer support conversation and automated greeting messages belonging to staff accounts.
-- **Atomic Cleanup on Role Update (`PATCH /api/admin/users/:userId/role`)**:
-  When a user's role is updated to `agent` or `admin`:
-  - Delete any matching conversation (`customer_id = targetUser.id` or `customer_email = targetUser.email`) from `public.conversations` and related messages.
+### Step 1: Fix Admin Chat Back Navigation (`src/pages/admin/AdminChat.tsx`)
+- In `syncFromMemory()`, remove the aggressive fallback that auto-selected `validList[0].id` when `selectedConvId` was empty (`''`).
+- Confine auto-selection exclusively to the **first mount on desktop** (`innerWidth >= 768`).
+- When a user clicks `< Chats` on mobile or deselects on desktop, `selectedConvId` remains `''`:
+  - **Mobile**: Shows the customer list screen (`Chats`).
+  - **Desktop**: Shows a clean Messenger/WhatsApp-style placeholder (*"Select a player conversation from the list to start messaging"*).
+- Use `selectedConvIdRef` to eliminate stale closure bugs in realtime message handlers.
 
-### 2. `src/services/dataService.ts`
-- **Role Guard in `getOrCreateConversationForCustomer`**:
-  If the user's role is `'agent'` or `'admin'`, do not create a conversation or send the automated welcome message; return `null` or existing conversation if in read-only audit mode.
-- **Filter in `getConversations()` & `deduplicateAndMergeConversations()`**:
-  Filter out any conversations where the associated user has `role === 'agent'` or `role === 'admin'`.
-- **Promotion Cleanup in `updateUserRole`**:
-  When updating a user to staff, purge their conversation from memory, `localStorage`, and trigger Supabase deletion.
-- **Client Cache Self-Healing in `initPersistence()`**:
-  Remove any conversation where `customerId` matches an agent or admin.
+### Step 2: Native Supabase Realtime WebSocket Optimization (Zero-Egress)
+- Ensure all components (`AdminChat.tsx`, `CustomerChat.tsx`, `GlobalChatNotificationManager.tsx`) use canonical ID matching (`dataService.resolveCanonicalConvId()`) for incoming `postgres_changes` events on `public.messages`.
+- Maintain a single persistent `postgres_changes` channel per session instead of tearing down and recreating WebSocket channels on selection changes.
+- **Strictly zero polling**: No `setInterval` or periodic HTTP fetch loops.
 
-### 3. `src/pages/admin/AdminChat.tsx`
-- **Filter Customer Chats**:
-  Ensure `filteredConversations` strictly includes users who are actual customers (`role === 'customer'`).
-- **Auto-Deselect**:
-  If `selectedConvId` currently points to a staff user, reset `selectedConvId` to the first valid customer conversation.
+### Step 3: PWA Manifest & Service Worker Setup
+- **Web App Manifest (`public/manifest.webmanifest`)**:
+  - `id: '/'`, `name: 'Swift Sweeps'`, `short_name: 'SwiftSweeps'`, `display: 'standalone'`, `theme_color: '#0A0F1D'`, `background_color: '#0A0F1D'`.
+- **Service Worker (`public/sw.js`)**:
+  - `push` event: receives encrypted payload from server and invokes `self.registration.showNotification(title, options)` to display a native OS notification on mobile/desktop.
+  - `notificationclick` event: focuses or opens the browser window directly to the target conversation.
+- **In-App Install Component (`src/components/common/PWAInstallButton.tsx`)**:
+  - Handles `beforeinstallprompt` on Android/Chrome/Edge.
+  - Provides guided modal instructions for iOS Safari (*Share -> Add to Home Screen*).
 
-### 4. `src/components/common/GlobalChatNotificationManager.tsx` & `src/pages/customer/CustomerChat.tsx`
-- Verify that customer chat rooms and subscriptions are strictly restricted to `currentUser.role === 'customer'`.
+### Step 4: Mirrored Web Push Endpoints in `server.ts` & `/api/index.ts`
+Implement identical request/response endpoints in both environments:
+1. `GET /api/push/vapid-public-key`: Returns the VAPID public key.
+2. `POST /api/push/subscribe`: Persists the browser's `PushSubscription` in Supabase `push_subscriptions`.
+3. `POST /api/push/notify`: Dispatches an encrypted Web Push notification via `web-push` to recipient device endpoints when messages arrive.
 
 ---
 
-## Verification Plan
-1. Check that `haudemaxe@gmail.com` (and all other agent/admin accounts) no longer appear in the Support Inbox customer chat list (`Chats`).
-2. Verify that legitimate customers (`Rashil Basukala`, `Saral Basukala`, `Blithe Sweeps`, `Ndu Phase`) remain in the Support Inbox with their requests and messages intact.
-3. Test promoting a test user to `agent` in the User Directory and verify their customer conversation is immediately decommissioned.
-4. Run `compile_applet` to ensure zero compilation or build errors.
+## 4. Verification & Testing Across Both Environments
+
+1. **Express Testing Environment Verification**:
+   - Run `compile_applet` (`npm run build`) to ensure build and TypeScript pass.
+   - Test dev server (`server.ts` on port 3000): verify `/api/push/vapid-public-key` returns 200 OK with valid key.
+   - Verify Admin Chat back button on mobile returns to the customer list.
+   - Verify instant live chat delivery over Supabase Realtime WebSockets without page reload.
+2. **Vercel Production Compatibility Check**:
+   - Verify `/api/index.ts` exports standard Vercel serverless handler with CORS headers and matches `vercel.json` rewrite rules.
+   - Confirm all PWA assets in `/public` match static serving expectations on Vercel CDN.

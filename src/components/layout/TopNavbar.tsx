@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { SwiftSweepsLogo } from '../common/SwiftSweepsLogo';
 import { RealtimeSyncBadge } from '../common/RealtimeSyncBadge';
+import { PWAInstallButton } from '../common/PWAInstallButton';
 
 interface TopNavbarProps {
   currentUser: UserProfile;
@@ -374,6 +375,9 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
               </div>
             </div>
           )}
+
+          {/* PWA App Install & Background Alerts */}
+          <PWAInstallButton currentUser={currentUser} />
 
           {/* Notifications button */}
           <div className="relative">

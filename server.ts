@@ -6,6 +6,7 @@ import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import { createClient } from '@supabase/supabase-js';
 import { telegramEngine } from './src/server/telegramEngine.ts';
+import { VAPID_PUBLIC_KEY, savePushSubscription, sendPushNotification } from './src/server/webPushEngine.ts';
 
 dotenv.config();
 
@@ -1068,6 +1069,47 @@ app.post('/api/auth/register', async (req, res) => {
     const event = req.body;
     console.log('[Keyhub Webhook Received]:', event);
     return res.json({ received: true });
+  });
+
+  // Web Push VAPID Public Key Endpoint
+  app.get('/api/push/vapid-public-key', (req, res) => {
+    return res.json({ publicKey: VAPID_PUBLIC_KEY });
+  });
+
+  // Web Push Register Device Subscription Endpoint
+  app.post('/api/push/subscribe', async (req, res) => {
+    try {
+      const { subscription, userId, userRole } = req.body;
+      if (!subscription || !subscription.endpoint) {
+        return res.status(400).json({ error: 'Subscription data required' });
+      }
+      const success = await savePushSubscription(subscription, userId || 'anonymous', userRole || 'customer', supabaseAdmin);
+      return res.json({ success });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message || 'Failed to save subscription' });
+    }
+  });
+
+  // Web Push Dispatch Notification Endpoint
+  app.post('/api/push/notify', async (req, res) => {
+    try {
+      const { recipientId, recipientRole, title, body, url, tag, conversationId } = req.body;
+      const result = await sendPushNotification(
+        recipientId,
+        recipientRole,
+        {
+          title: title || 'New Message',
+          body: body || 'You have received a new message.',
+          url: url || '/#chat',
+          tag: tag || `chat_${conversationId || Date.now()}`,
+          data: { conversationId },
+        },
+        supabaseAdmin
+      );
+      return res.json({ success: true, ...result });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message || 'Failed to dispatch push' });
+    }
   });
 
   // Create Vite server in middleware mode

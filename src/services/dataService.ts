@@ -39,6 +39,7 @@ import { resolveGameImageUrl } from '../utils/imageUtils';
 import { authSessionService, PREDEFINED_ADMINS } from './authSessionService';
 import { supabase, isSupabaseConfigured, testSupabaseConnection } from './supabaseClient';
 import { supabaseAuthService } from './supabaseAuthService';
+import { webPushClient } from './webPushClient';
 
 export type RealtimeSyncStatus = 'connected' | 'syncing' | 'sleeping' | 'disconnected' | 'reconnecting';
 
@@ -4743,6 +4744,31 @@ class DataService {
         }).catch((err) => console.warn('Telegram notify-message notice:', err));
       } catch (err) {
         console.warn('Telegram notify dispatch notice:', err);
+      }
+    }
+
+    // Instant Web Push Notification: delivers alerts even when browser is minimized or app is closed
+    if (!params.isInternalNote && typeof window !== 'undefined') {
+      try {
+        const recipientRole = params.senderRole === 'customer' ? 'agent' : 'customer';
+        const recipientId =
+          params.senderRole === 'customer'
+            ? conv?.assignedAgentId || 'staff'
+            : conv?.customerId || '';
+
+        if (recipientId) {
+          webPushClient
+            .notifyRecipientViaPush({
+              recipientId,
+              recipientRole,
+              senderName: params.senderName,
+              messageText: params.text,
+              conversationId: targetConvId,
+            })
+            .catch((err) => console.warn('Background push dispatch notice:', err));
+        }
+      } catch (err) {
+        console.warn('Push notify dispatch notice:', err);
       }
     }
 

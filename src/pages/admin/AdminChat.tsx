@@ -108,6 +108,12 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   const [requestsVersion, setRequestsVersion] = useState(0);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const initialDesktopMountRef = useRef(false);
+  const selectedConvIdRef = useRef(selectedConvId);
+  useEffect(() => {
+    selectedConvIdRef.current = selectedConvId;
+  }, [selectedConvId]);
+
   const allUsers = dataService.getUsers().filter((u) => u.role === 'customer');
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
 
@@ -125,15 +131,18 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     });
     setConversations(validList);
 
-    let activeId = selectedConvId;
-    if ((!activeId || !validList.some((c) => c.id === activeId || dataService.resolveCanonicalConvId(activeId) === c.id)) && validList.length > 0 && typeof window !== 'undefined' && window.innerWidth >= 768) {
-      activeId = validList[0].id;
-      setSelectedConvId(activeId);
-    } else if (validList.length === 0 || !validList.some((c) => c.id === activeId || dataService.resolveCanonicalConvId(activeId) === c.id)) {
-      activeId = validList[0]?.id || '';
-      setSelectedConvId(activeId);
+    let activeId = selectedConvIdRef.current;
+
+    // Only on initial desktop mount: if no conversation was requested and desktop width, auto-select first conversation
+    if (!initialDesktopMountRef.current && typeof window !== 'undefined' && window.innerWidth >= 768) {
+      initialDesktopMountRef.current = true;
+      if (!activeId && validList.length > 0) {
+        activeId = validList[0].id;
+        setSelectedConvId(activeId);
+      }
     }
 
+    // If an active conversation was selected, verify it still exists or resolve canonical alias
     if (activeId) {
       let active = validList.find((c) => c.id === activeId);
       if (!active) {
@@ -142,6 +151,10 @@ export const AdminChat: React.FC<AdminChatProps> = ({
         if (active && active.id !== activeId) {
           setSelectedConvId(active.id);
           activeId = active.id;
+        } else if (!active) {
+          // If conversation is deleted or purged, clear selection
+          setSelectedConvId('');
+          activeId = '';
         }
       }
       if (active) {
@@ -264,7 +277,8 @@ export const AdminChat: React.FC<AdminChatProps> = ({
         if (payload && payload.id) {
           dataService.appendIncomingMessage(payload);
           syncFromMemory();
-          if (payload.conversationId === selectedConvId) {
+          const currentActive = selectedConvIdRef.current;
+          if (currentActive && (payload.conversationId === currentActive || dataService.resolveCanonicalConvId(payload.conversationId) === dataService.resolveCanonicalConvId(currentActive))) {
             setMessages((prev) => {
               if (prev.some((m) => m.id === payload.id)) return prev;
               return [...prev, payload];
@@ -277,7 +291,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       })
       .subscribe();
 
-    // Persistent Supabase Database Changes stream across all player messages
+    // Persistent Supabase Database Changes stream across all player messages (Zero-Polling WebSocket)
     const dbAllMessagesChannel = supabase.channel('db_admin_live_messages')
       .on(
         'postgres_changes',
@@ -307,7 +321,8 @@ export const AdminChat: React.FC<AdminChatProps> = ({
             dataService.appendIncomingMessage(incoming);
             syncFromMemory();
 
-            if (incoming.conversationId === selectedConvId) {
+            const currentActive = selectedConvIdRef.current;
+            if (currentActive && (incoming.conversationId === currentActive || dataService.resolveCanonicalConvId(incoming.conversationId) === dataService.resolveCanonicalConvId(currentActive))) {
               setMessages((prev) => {
                 if (prev.some((m) => m.id === incoming.id)) return prev;
                 return [...prev, incoming];
@@ -332,7 +347,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       supabase.removeChannel(staffChannel);
       supabase.removeChannel(dbAllMessagesChannel);
     };
-  }, [selectedConvId]);
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });

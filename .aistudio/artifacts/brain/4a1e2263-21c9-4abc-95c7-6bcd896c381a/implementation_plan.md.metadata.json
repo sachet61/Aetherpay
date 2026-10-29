@@ -1,6 +1,6 @@
 {
-  "summary":  "Detailed architectural plan to eliminate duplicate support-customer personas and redundant welcome messages for staff users (such as haudemaxe@gmail.com). Covers role-based conversation filtering in AdminChat, auto-purging customer conversations upon promotion to agent/admin, self-healing database reconciliation on server.ts startup, and preventing customer support channel initialization for staff members.",
-  "updatedAt":  "2026-10-28T16:05:55.334418366Z",
+  "summary":  "Updated implementation plan detailing dual-environment parity between Express (local development / testing environment on port 3000) and Vercel (serverless production via /api/index.ts). Guarantees identical API contracts, shared VAPID Web Push logic, direct Supabase Realtime WebSocket chat, and client-side PWA / back navigation fixes.",
+  "updatedAt":  "2026-10-29T01:37:36.487882753Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
