@@ -824,11 +824,11 @@ app.post('/api/auth/register', async (req, res) => {
             walletsMap[w.customer_id] = {
               customerId: w.customer_id,
               currency: w.currency || 'USD',
-              availableBalance: Number(w.available_balance || 0),
-              referralBonusBalance: Number(w.referral_bonus_balance || 0),
-              reservedBalance: Number(w.reserved_balance || 0),
-              pendingDepositBalance: Number(w.pending_deposit_balance || 0),
-              lastUpdatedAt: w.last_updated_at || w.updated_at,
+              availableBalance: Number(w.balance ?? w.available_balance ?? 0),
+              referralBonusBalance: Number(w.referral_bonus_balance ?? 0),
+              reservedBalance: Number(w.pending_withdrawal ?? w.reserved_balance ?? 0),
+              pendingDepositBalance: Number(w.pending_deposit ?? w.pending_deposit_balance ?? 0),
+              lastUpdatedAt: w.updated_at || w.last_updated_at || new Date().toISOString(),
             };
           }
         }
@@ -850,12 +850,12 @@ app.post('/api/auth/register', async (req, res) => {
             gameAccountsMap[g.customer_id].push({
               id: g.id,
               customerId: g.customer_id,
-              gameCatalogId: g.game_catalog_id,
-              gameName: g.game_name,
-              username: g.game_username,
-              password: g.game_password,
+              gameCatalogId: g.game_id || g.game_catalog_id,
+              gameName: g.game_title || g.game_name,
+              username: g.username || g.game_username,
+              password: g.password || g.game_password,
               status: g.status || 'active',
-              notes: g.notes || '',
+              notes: g.pin || g.notes || '',
               createdAt: g.created_at,
             });
           }

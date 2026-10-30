@@ -1,6 +1,6 @@
 {
-  "summary":  "Updated implementation plan detailing dual-environment parity between Express (local development / testing environment on port 3000) and Vercel (serverless production via /api/index.ts). Guarantees identical API contracts, shared VAPID Web Push logic, direct Supabase Realtime WebSocket chat, and client-side PWA / back navigation fixes.",
-  "updatedAt":  "2026-10-29T01:37:36.487882753Z",
+  "summary":  "Plan to fix the production server HTTP 500 error on the users list endpoint and resolve the empty conversation list in admin chat by hydrating conversations from Supabase and providing resilient direct-query fallbacks.",
+  "updatedAt":  "2026-10-30T03:21:00.854345662Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -1,5 +1,4 @@
 import { createClient } from '@supabase/supabase-js';
-import { VAPID_PUBLIC_KEY, savePushSubscription, sendPushNotification } from '../src/server/webPushEngine.ts';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://fsykihwprqdptrqapxxg.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY =
@@ -10,6 +9,124 @@ const SUPABASE_SERVICE_ROLE_KEY =
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false },
 });
+
+export const VAPID_PUBLIC_KEY =
+  process.env.VAPID_PUBLIC_KEY ||
+  'BMTMQBhNAp_fMCWzCNh0HlPv3BHdT4ykDgCMqckNfdq7qh1eXTpiIeSA28wMGTDD4hv3-iU7J9XJ16ZbS6qHKe0';
+export const VAPID_PRIVATE_KEY =
+  process.env.VAPID_PRIVATE_KEY ||
+  'KHVqz-Bc2gEC03akwJu1FI54aev2AiEEL4u02zmO_nU';
+export const VAPID_SUBJECT =
+  process.env.VAPID_SUBJECT || 'mailto:support@swiftsweeps.com';
+
+let webpushInstance: any = null;
+async function getWebPushClient() {
+  if (webpushInstance) return webpushInstance;
+  try {
+    const wp = await import('web-push');
+    const mod = wp.default || wp;
+    if (mod && typeof mod.setVapidDetails === 'function') {
+      mod.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+    }
+    webpushInstance = mod;
+    return webpushInstance;
+  } catch (err) {
+    console.warn('[Vercel WebPush Init Notice]:', err);
+    return null;
+  }
+}
+
+async function saveVercelPushSubscription(
+  sub: any,
+  userId: string,
+  userRole: string,
+  supabase: any
+): Promise<boolean> {
+  if (!sub || !sub.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) return false;
+  const now = new Date().toISOString();
+  const record = {
+    id: `push_${userId}_${sub.endpoint.slice(-32)}`,
+    userId,
+    userRole: userRole || 'customer',
+    subscription: sub,
+    createdAt: now,
+    updatedAt: now,
+  };
+  try {
+    const { data: existing } = await supabase
+      .from('app_config')
+      .select('data')
+      .eq('id', 'push_subscriptions')
+      .maybeSingle();
+
+    const list = Array.isArray(existing?.data)
+      ? existing.data.filter((x: any) => x.subscription?.endpoint !== sub.endpoint)
+      : [];
+    list.push(record);
+
+    await supabase.from('app_config').upsert({
+      id: 'push_subscriptions',
+      data: list.slice(-100),
+      updated_at: now,
+    });
+    return true;
+  } catch (e) {
+    console.warn('[Vercel Push Save Notice]:', e);
+    return false;
+  }
+}
+
+async function sendVercelPushNotification(
+  targetUserId: string,
+  targetRole: string | undefined,
+  payload: any,
+  supabase: any
+): Promise<{ sent: number; failed: number }> {
+  try {
+    const wp = await getWebPushClient();
+    if (!wp) return { sent: 0, failed: 0 };
+
+    const { data: configRow } = await supabase
+      .from('app_config')
+      .select('data')
+      .eq('id', 'push_subscriptions')
+      .maybeSingle();
+
+    const subs: any[] = Array.isArray(configRow?.data) ? configRow.data : [];
+    const targets = subs.filter((s: any) =>
+      (targetUserId && s.userId === targetUserId) ||
+      (targetRole && s.userRole === targetRole)
+    );
+
+    if (targets.length === 0) return { sent: 0, failed: 0 };
+
+    const pushPayload = JSON.stringify({
+      title: payload.title || 'Swift Sweeps Support',
+      body: payload.body || 'You have a new message.',
+      icon: payload.icon || '/favicon.png',
+      badge: payload.badge || '/favicon.png',
+      tag: payload.tag || `chat_${Date.now()}`,
+      data: payload.data || {},
+    });
+
+    let sent = 0;
+    let failed = 0;
+    await Promise.all(
+      targets.map(async (t) => {
+        try {
+          await wp.sendNotification(t.subscription, pushPayload, { TTL: 86400 });
+          sent++;
+        } catch {
+          failed++;
+        }
+      })
+    );
+    return { sent, failed };
+  } catch (e) {
+    console.warn('[Vercel Push Send Notice]:', e);
+    return { sent: 0, failed: 0 };
+  }
+}
 
 export default async function handler(req: any, res: any) {
   // CORS Headers
@@ -26,7 +143,10 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  const url = req.url || '';
+  const rawUrl = req.url || '';
+  const xForwardedUri = (req.headers['x-forwarded-uri'] as string) || '';
+  const xMatchedPath = (req.headers['x-matched-path'] as string) || '';
+  const url = (xForwardedUri || rawUrl || xMatchedPath || '').split('?')[0];
 
   // 1. User Directory Endpoint
   if (url.includes('/api/admin/users') && req.method === 'GET') {
@@ -80,11 +200,11 @@ export default async function handler(req: any, res: any) {
             walletsMap[w.customer_id] = {
               customerId: w.customer_id,
               currency: w.currency || 'USD',
-              availableBalance: Number(w.available_balance || 0),
-              referralBonusBalance: Number(w.referral_bonus_balance || 0),
-              reservedBalance: Number(w.reserved_balance || 0),
-              pendingDepositBalance: Number(w.pending_deposit_balance || 0),
-              lastUpdatedAt: w.last_updated_at || w.updated_at,
+              availableBalance: Number(w.balance ?? w.available_balance ?? 0),
+              referralBonusBalance: Number(w.referral_bonus_balance ?? 0),
+              reservedBalance: Number(w.pending_withdrawal ?? w.reserved_balance ?? 0),
+              pendingDepositBalance: Number(w.pending_deposit ?? w.pending_deposit_balance ?? 0),
+              lastUpdatedAt: w.updated_at || w.last_updated_at || new Date().toISOString(),
             };
           }
         }
@@ -103,12 +223,12 @@ export default async function handler(req: any, res: any) {
             gameAccountsMap[g.customer_id].push({
               id: g.id,
               customerId: g.customer_id,
-              gameCatalogId: g.game_catalog_id,
-              gameName: g.game_name,
-              username: g.game_username,
-              password: g.game_password,
+              gameCatalogId: g.game_id || g.game_catalog_id,
+              gameName: g.game_title || g.game_name,
+              username: g.username || g.game_username,
+              password: g.password || g.game_password,
               status: g.status || 'active',
-              notes: g.notes || '',
+              notes: g.pin || g.notes || '',
               createdAt: g.created_at,
             });
           }
@@ -329,7 +449,7 @@ export default async function handler(req: any, res: any) {
       if (!subscription || !subscription.endpoint) {
         return res.status(400).json({ error: 'Subscription data required' });
       }
-      const success = await savePushSubscription(subscription, userId || 'anonymous', userRole || 'customer', supabaseAdmin);
+      const success = await saveVercelPushSubscription(subscription, userId || 'anonymous', userRole || 'customer', supabaseAdmin);
       return res.status(200).json({ success });
     } catch (e: any) {
       return res.status(500).json({ error: e?.message || 'Failed to save subscription' });
@@ -340,7 +460,7 @@ export default async function handler(req: any, res: any) {
     try {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
       const { recipientId, recipientRole, title, body: msgBody, url: targetUrl, tag, conversationId } = body || {};
-      const result = await sendPushNotification(
+      const result = await sendVercelPushNotification(
         recipientId,
         recipientRole,
         {

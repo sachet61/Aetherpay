@@ -178,6 +178,16 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   };
 
   useEffect(() => {
+    // Proactively hydrate latest conversations from Supabase if not yet in memory
+    dataService.fetchConversations().then(() => {
+      syncFromMemory();
+    });
+
+    // Proactively ensure registered users are loaded for Start New Chat modal
+    dataService.fetchLiveUsersDirectory(currentUser);
+  }, []);
+
+  useEffect(() => {
     setHasMoreOlder(true);
     // 1. Initial in-memory render
     syncFromMemory();
@@ -438,6 +448,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   };
 
   const handleBackToCustomerList = () => {
+    initialDesktopMountRef.current = true;
     setSelectedConvId('');
   };
 

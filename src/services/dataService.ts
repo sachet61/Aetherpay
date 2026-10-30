@@ -394,7 +394,7 @@ class DataService {
     window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
 
     try {
-      const user = this.getCurrentUser();
+      const user = this.getCurrentUser() || authSessionService.getCurrentUser();
       const isAdmin = user?.role === 'admin' || user?.role === 'agent';
       const currentUserId = user?.id;
 
@@ -2161,9 +2161,9 @@ class DataService {
       });
 
       if (!resp.ok) {
-        // If HTTP 404 is encountered (e.g., when hosted on a static Vercel build where the Express proxy route is not deployed),
-        // query live Supabase PostgreSQL directly if configured
-        if (resp.status === 404 && isSupabaseConfigured() && supabase) {
+        // If API route fails or is unavailable on Vercel (e.g. 500, 404, or serverless cold-start timeout),
+        // query live Supabase PostgreSQL directly to ensure the user directory is always available
+        if (isSupabaseConfigured() && supabase) {
           try {
             const { data: dbUsers, error: dbErr } = await supabase
               .from('users')
@@ -2181,11 +2181,11 @@ class DataService {
                 walletsMap[w.customer_id] = {
                   customerId: w.customer_id,
                   currency: w.currency || 'USD',
-                  availableBalance: Number(w.available_balance || 0),
-                  referralBonusBalance: Number(w.referral_bonus_balance || 0),
-                  reservedBalance: Number(w.reserved_balance || 0),
-                  pendingDepositBalance: Number(w.pending_deposit_balance || 0),
-                  lastUpdatedAt: w.last_updated_at || w.updated_at,
+                  availableBalance: Number(w.balance ?? w.available_balance ?? 0),
+                  referralBonusBalance: Number(w.referral_bonus_balance ?? 0),
+                  reservedBalance: Number(w.pending_withdrawal ?? w.reserved_balance ?? 0),
+                  pendingDepositBalance: Number(w.pending_deposit ?? w.pending_deposit_balance ?? 0),
+                  lastUpdatedAt: w.updated_at || w.last_updated_at || new Date().toISOString(),
                 };
               });
 
@@ -2195,12 +2195,12 @@ class DataService {
                 gameAccountsMap[g.customer_id].push({
                   id: g.id,
                   customerId: g.customer_id,
-                  gameCatalogId: g.game_catalog_id,
-                  gameName: g.game_name,
-                  username: g.game_username,
-                  password: g.game_password,
+                  gameCatalogId: g.game_id || g.game_catalog_id,
+                  gameName: g.game_title || g.game_name,
+                  username: g.username || g.game_username,
+                  password: g.password || g.game_password,
                   status: g.status || 'active',
-                  notes: g.notes || '',
+                  notes: g.pin || g.notes || '',
                   createdAt: g.created_at,
                 });
               });
@@ -4385,6 +4385,39 @@ class DataService {
     }
 
     return deduplicated;
+  }
+
+  public hydrateForSession(user?: UserProfile): void {
+    const target = user || this.getCurrentUser() || authSessionService.getCurrentUser();
+    if (target?.role === 'admin' || target?.role === 'agent') {
+      this.initialCompactLoad();
+    }
+  }
+
+  public async fetchConversations(): Promise<SupportConversation[]> {
+    if (!supabase || !isSupabaseConfigured()) {
+      return this.getConversations();
+    }
+    try {
+      const { data, error } = await supabase
+        .from('conversations')
+        .select('*')
+        .order('last_message_at', { ascending: false })
+        .limit(50);
+
+      if (!error && data && data.length > 0) {
+        this.applyConversationRows(data, false);
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'conversations_fetched', count: data.length },
+          })
+        );
+      }
+      return this.getConversations();
+    } catch (err) {
+      console.warn('[DataService] fetchConversations notice:', err);
+      return this.getConversations();
+    }
   }
 
   public getConversations(): SupportConversation[] {
