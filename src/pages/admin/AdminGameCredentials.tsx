@@ -20,6 +20,8 @@ import {
   Send,
   Lock,
   Trash2,
+  Plus,
+  UserCheck,
 } from 'lucide-react';
 
 interface AdminGameCredentialsProps {
@@ -43,9 +45,40 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
   const [supportNote, setSupportNote] = useState('');
   const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
-  const gameCatalog = dataService.getGameCatalog();
-  const allAccounts = dataService.getGameAccounts();
-  const users = dataService.getUsers();
+  // Direct Staff Provisioning Modal state
+  const [showDirectModal, setShowDirectModal] = useState(false);
+  const [targetCustomerId, setTargetCustomerId] = useState('');
+  const [targetGameId, setTargetGameId] = useState('');
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newNote, setNewNote] = useState('');
+  const [isProvisioning, setIsProvisioning] = useState(false);
+
+  const [gameCatalog, setGameCatalog] = useState<GameCatalogItem[]>(() => dataService.getGameCatalog());
+  const [allAccounts, setAllAccounts] = useState<GameAccount[]>(() => dataService.getGameAccounts());
+  const [users, setUsers] = useState<UserProfile[]>(() => dataService.getUsers());
+
+  React.useEffect(() => {
+    // 1. Force on-demand hydration from live Supabase PostgreSQL database
+    dataService.fetchGameAccountsFromDb().then((accs) => {
+      if (accs && accs.length > 0) setAllAccounts(accs);
+    });
+
+    // 2. Realtime state listeners
+    const handleSync = (e?: any) => {
+      setAllAccounts(dataService.getGameAccounts());
+      setUsers(dataService.getUsers());
+      setGameCatalog(dataService.getGameCatalog());
+    };
+
+    window.addEventListener('aetherpay_state_changed', handleSync);
+    window.addEventListener('storage', handleSync);
+
+    return () => {
+      window.removeEventListener('aetherpay_state_changed', handleSync);
+      window.removeEventListener('storage', handleSync);
+    };
+  }, []);
 
   const pendingRequests = allAccounts.filter(
     (a) => a.status === 'pending_assignment' || a.status === 'pending_reset'
@@ -93,6 +126,77 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
     const symbols = ['#', '!', '$', '&'];
     const randomSym = symbols[Math.floor(Math.random() * symbols.length)];
     setAssignedPassword(`${randomPrefix}${randomSym}${randomNum}`);
+  };
+
+  const handleOpenDirectModal = () => {
+    setShowDirectModal(true);
+    const customers = users.filter((u) => u.role === 'customer');
+    const firstCust = customers[0];
+    const firstGame = gameCatalog[0];
+    if (firstCust) setTargetCustomerId(firstCust.id);
+    if (firstGame) setTargetGameId(firstGame.id);
+
+    if (firstCust) {
+      const cleanHandle = firstCust.displayName.replace(/\s+/g, '').toLowerCase();
+      setNewUsername(`${cleanHandle}_${Math.floor(100 + Math.random() * 900)}`);
+    } else {
+      setNewUsername('');
+    }
+    const prefixes = ['Vault', 'Apex', 'Cyber', 'Shadow', 'Strike', 'Nova', 'Titan'];
+    const randomPrefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    const symbols = ['#', '!', '$', '&'];
+    const randomSym = symbols[Math.floor(Math.random() * symbols.length)];
+    setNewPassword(`${randomPrefix}${randomSym}${randomNum}`);
+    setNewNote('Provisioned directly from Admin Desk');
+  };
+
+  const handleGenerateDirectPassword = () => {
+    const prefixes = ['Vault', 'Apex', 'Cyber', 'Shadow', 'Strike', 'Nova', 'Titan'];
+    const randomPrefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    const symbols = ['#', '!', '$', '&'];
+    const randomSym = symbols[Math.floor(Math.random() * symbols.length)];
+    setNewPassword(`${randomPrefix}${randomSym}${randomNum}`);
+  };
+
+  const handleSaveDirectProvision = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetCustomerId || !targetGameId || !newUsername.trim() || !newPassword.trim()) {
+      alert('Please select a player, game, and provide both a username and password.');
+      return;
+    }
+
+    const game = gameCatalog.find((g) => g.id === targetGameId);
+    setIsProvisioning(true);
+
+    const res = await dataService.provisionGameAccountDirectly({
+      customerId: targetCustomerId,
+      gameId: targetGameId,
+      gameTitle: game?.title || 'Game',
+      username: newUsername.trim(),
+      password: newPassword.trim(),
+      pin: newNote.trim() || undefined,
+      reviewerId: currentUser.id,
+      reviewerName: currentUser.displayName,
+    });
+
+    setIsProvisioning(false);
+
+    if (res.success) {
+      setFeedbackMsg({
+        text: `Provisioned credentials for ${game?.title || 'Game'}! Player alerted and synced.`,
+        type: 'success',
+      });
+      setShowDirectModal(false);
+      setNewUsername('');
+      setNewPassword('');
+      setNewNote('');
+      setAllAccounts(dataService.getGameAccounts());
+      setTimeout(() => setFeedbackMsg(null), 5000);
+    } else {
+      setFeedbackMsg({ text: res.message, type: 'error' });
+    }
   };
 
   const handleSaveCredentials = (e: React.FormEvent) => {
@@ -191,12 +295,21 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
           </p>
         </div>
 
-        {pendingRequests.length > 0 && (
-          <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-amber-950/60 border border-amber-800/60 text-amber-300 text-xs font-semibold animate-pulse">
-            <Clock className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>{pendingRequests.length} Pending Player Request{pendingRequests.length > 1 ? 's' : ''}</span>
-          </div>
-        )}
+        <div className="flex items-center gap-3">
+          {pendingRequests.length > 0 && (
+            <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-amber-950/60 border border-amber-800/60 text-amber-300 text-xs font-semibold animate-pulse">
+              <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>{pendingRequests.length} Pending Player Request{pendingRequests.length > 1 ? 's' : ''}</span>
+            </div>
+          )}
+          <button
+            onClick={handleOpenDirectModal}
+            className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-all shadow-md shadow-amber-500/20 active:scale-95 shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Create Gaming ID for Player</span>
+          </button>
+        </div>
       </div>
 
       {feedbackMsg && (
@@ -568,6 +681,192 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
                 className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition-colors shadow-lg shadow-indigo-600/20"
               >
                 Save &amp; Notify Player
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Direct Staff Provisioning Modal */}
+      {showDirectModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div
+            className="fixed inset-0"
+            onClick={() => !isProvisioning && setShowDirectModal(false)}
+          />
+          <form
+            onSubmit={handleSaveDirectProvision}
+            className="relative w-full max-w-lg bg-slate-900 border border-amber-500/40 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                  <Plus className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Create Gaming ID for Player</h3>
+                  <div className="text-[11px] text-slate-400">
+                    Direct assignment with instant Supabase sync &amp; in-app alert
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={isProvisioning}
+                onClick={() => setShowDirectModal(false)}
+                className="text-xs text-slate-400 hover:text-white disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              {/* Select Customer */}
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold flex items-center gap-1.5">
+                  <UserCheck className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Target Player Account</span>
+                </label>
+                <select
+                  value={targetCustomerId}
+                  onChange={(e) => {
+                    const custId = e.target.value;
+                    setTargetCustomerId(custId);
+                    const selUser = users.find((u) => u.id === custId);
+                    if (selUser) {
+                      const cleanHandle = (selUser.displayName || 'player').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+                      setNewUsername(`${cleanHandle}_${Math.floor(100 + Math.random() * 900)}`);
+                    }
+                  }}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-amber-500"
+                  required
+                >
+                  <option value="">-- Choose a Player --</option>
+                  {users
+                    .filter((u) => u.role === 'customer')
+                    .map((cust) => (
+                      <option key={cust.id} value={cust.id}>
+                        {cust.displayName || 'Anonymous'} ({cust.email})
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              {/* Select Game */}
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold flex items-center gap-1.5">
+                  <Gamepad2 className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Target Game Platform</span>
+                </label>
+                <select
+                  value={targetGameId}
+                  onChange={(e) => setTargetGameId(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-cyan-500"
+                  required
+                >
+                  <option value="">-- Select Game Platform --</option>
+                  {gameCatalog.map((game) => (
+                    <option key={game.id} value={game.id}>
+                      {game.title} ({game.platform})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Username Input */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-slate-300 font-semibold">Assigned Username / Game ID</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const selUser = users.find((u) => u.id === targetCustomerId);
+                      const base = selUser
+                        ? selUser.displayName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
+                        : 'player';
+                      setNewUsername(`${base}_${Math.floor(100 + Math.random() * 900)}`);
+                    }}
+                    className="text-[10px] text-amber-400 hover:underline flex items-center gap-1"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    <span>Auto-Suggest Handle</span>
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                  placeholder="e.g. saral_77"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono focus:outline-none focus:border-amber-500"
+                  required
+                />
+              </div>
+
+              {/* Password Input */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-slate-300 font-semibold">Assigned Password</label>
+                  <button
+                    type="button"
+                    onClick={handleGenerateDirectPassword}
+                    className="text-[10px] text-amber-400 hover:underline flex items-center gap-1"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    <span>Auto-Generate</span>
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="e.g. ApexPass#2026"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-emerald-400 font-mono font-bold focus:outline-none focus:border-amber-500"
+                  required
+                />
+              </div>
+
+              {/* Staff Notes / PIN */}
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold">Staff Notes / PIN (Optional)</label>
+                <input
+                  type="text"
+                  value={newNote}
+                  onChange={(e) => setNewNote(e.target.value)}
+                  placeholder="e.g. Assigned by desk, PIN: 1234"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-300 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+            </div>
+
+            <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-800/40 text-[11px] text-amber-200/90 leading-relaxed">
+              <strong>Live PostgreSQL Persistence:</strong> Submitting immediately stores this account in Supabase PostgreSQL, pushes it to the player's Gaming IDs page in real time, and logs an audit trail entry.
+            </div>
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                disabled={isProvisioning}
+                onClick={() => setShowDirectModal(false)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isProvisioning}
+                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-bold text-xs transition-all shadow-lg shadow-amber-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isProvisioning ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Provisioning...</span>
+                  </>
+                ) : (
+                  <>
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Create &amp; Sync Player</span>
+                  </>
+                )}
               </button>
             </div>
           </form>

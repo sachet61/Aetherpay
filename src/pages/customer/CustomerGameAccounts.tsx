@@ -35,7 +35,31 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
 }) => {
   const wallet = propWallet || dataService.getWallet(currentUser.id);
   const catalog = dataService.getGameCatalog().filter((g) => g.enabled);
-  const playerAccounts = dataService.getGameAccounts(currentUser.id);
+  const [playerAccounts, setPlayerAccounts] = useState<GameAccount[]>(() =>
+    dataService.getGameAccounts(currentUser.id)
+  );
+
+  React.useEffect(() => {
+    // 1. Initial on-demand hydration from database
+    dataService.fetchGameAccountsFromDb(currentUser.id).then((accs) => {
+      if (accs) setPlayerAccounts(accs);
+    });
+
+    // 2. Realtime state listeners
+    const handleSync = (e?: any) => {
+      if (!e?.detail?.key || e.detail.key === 'aetherpay_game_accounts' || e.detail.key === 'game_credentials_assigned' || e.detail.key === 'delta_sync') {
+        setPlayerAccounts(dataService.getGameAccounts(currentUser.id));
+      }
+    };
+
+    window.addEventListener('aetherpay_state_changed', handleSync);
+    window.addEventListener('storage', handleSync);
+
+    return () => {
+      window.removeEventListener('aetherpay_state_changed', handleSync);
+      window.removeEventListener('storage', handleSync);
+    };
+  }, [currentUser.id]);
 
   const [revealedPasswords, setRevealedPasswords] = useState<Record<string, boolean>>({});
   const [copiedField, setCopiedField] = useState<string | null>(null);

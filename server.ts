@@ -1137,7 +1137,74 @@ app.post('/api/auth/register', async (req, res) => {
     }
   });
 
-  // Create Vite server in middleware mode
+  // Game Accounts Retrieval Endpoint (Service Role Guaranteed)
+  app.get('/api/game-accounts', async (req, res) => {
+    try {
+      const customerId = req.query.customerId as string | undefined;
+      let query = supabaseAdmin.from('game_accounts').select('*').order('created_at', { ascending: false });
+      if (customerId) {
+        query = query.eq('customer_id', customerId);
+      }
+      const { data, error } = await query.limit(100);
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+      return res.json({ accounts: data || [] });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to query game accounts' });
+    }
+  });
+
+  // Game Account Direct Provisioning Endpoint
+  app.post('/api/game-accounts/provision', async (req, res) => {
+    try {
+      const { customerId, gameId, gameTitle, username, password, pin, status, reviewerId, reviewerName } = req.body;
+      if (!customerId || !gameId || !username || !password) {
+        return res.status(400).json({ error: 'customerId, gameId, username, and password are required' });
+      }
+
+      const now = new Date().toISOString();
+      const accountId = `ga_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+      const { data, error } = await supabaseAdmin
+        .from('game_accounts')
+        .upsert({
+          id: accountId,
+          customer_id: customerId,
+          game_id: gameId,
+          game_title: gameTitle || 'Game',
+          username: username.trim(),
+          password: password.trim(),
+          pin: pin || null,
+          status: status || 'active',
+          created_at: now,
+          updated_at: now,
+        })
+        .select()
+        .single();
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      // Log to audit table
+      await supabaseAdmin.from('audit_logs').insert({
+        id: `audit_${Date.now()}`,
+        actor_id: reviewerId || 'staff',
+        actor_name: reviewerName || 'Staff Operator',
+        actor_role: 'agent',
+        action: 'GAME_CREDENTIALS_PROVISIONED',
+        entity_type: 'game_account',
+        entity_id: accountId,
+        details: `Provisioned credentials for ${gameTitle || gameId} (Username: ${username}) via Admin Desk.`,
+        created_at: now,
+      }).then(() => {}, () => {});
+
+      return res.json({ success: true, account: data });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to provision game account' });
+    }
+  });
   const vite = await createViteServer({
     server: { middlewareMode: true },
     appType: 'spa',

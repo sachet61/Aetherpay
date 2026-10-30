@@ -1,195 +1,69 @@
-# Background Push Notifications for Android & iOS (Facebook Messenger Style)
+# Implementation Plan: Complete Eradication of Automated Greeting Messages & Synthetic Bot Personas
 
-Delivers real-time, heads-up system push notifications with sound, custom vibration patterns, and action buttons to Android and iOS devices—functioning even when the browser or PWA is minimized or closed in the background—compatible with the live production server and Supabase database.
-
----
-
-## User Review & Critical Decisions
-
-> [!IMPORTANT]
-> The following technical and UX choices were confirmed during requirement clarification:
-> - **Visual & Alert Style**: High-priority heads-up banner with sound, vibration, and reply action buttons (mirroring Facebook Messenger and Facebook Lite behavior).
-> - **Event Scope**: All critical player and staff events: live chat messages, cashout payout approvals, deposit credits, and game login credential issuances.
-> - **Platform Onboarding**: Guided "Add to Home Screen" visual walkthrough for iOS Safari (required by Apple WebKit for Web Push) plus 1-tap activation for Android and desktop devices.
+## User Directive
+> "COMPLETELY REMOVE THIS TYPE OF MESSAGING. Come up with a plan first and prompt me to proceed or not. Make sure that fix is compatible with live production server too."
+> Attachment: Screenshot displaying automated message: `"Welcome to Swift Sweeps Support! How can our treasury and gaming care specialists assist you today?"` sent by `Sarah Lin`.
 
 ---
 
-## 1. Overview & Core Concept
-
-### What It Does
-When a player or support agent receives a message, payout approval, top-up credit, or gaming credentials, their physical phone (Android or iPhone) alerts them immediately with:
-1. A **system-level heads-up banner** at the top of the screen (or lock screen) displaying the sender's avatar, name, and message summary.
-2. A **distinct tactile vibration rhythm** (`[200ms, 100ms, 200ms, 100ms, 250ms]`) and audible chime.
-3. An **interactive action button** (`Open Chat`, `Reply`) allowing the user to jump directly into the active conversation or dismiss the alert.
-4. Continuous background delivery powered by the **W3C Web Push Protocol** and Service Worker (`/public/sw.js`), remaining active when the browser is minimized, screen is locked, or app is swiped away.
-
-### Target Audience & Platforms
-- **Android Users (Chrome, Samsung Internet, Edge, Firefox)**: Supported both inside the browser and as an installed PWA.
-- **iOS Users (iPhone / iPad on iOS 16.4+)**: Apple WebKit requires PWAs to be added to the Home Screen to access the Web Push API (`PushManager`). We provide a frictionless 2-step visual guide for iOS users.
-- **Operations Staff & Agents**: Receive instant customer chat alerts and pending cashout requests even while multitasking in other applications.
-
----
-
-## 2. User Experience & Visual Design
-
-### Key User Flows
-
-```
-[ ANDROID / DESKTOP FLOW ]
-User visits app ──► Top notification banner shows "Enable Messenger-style Alerts" 
-                  ──► Taps "Turn On Notifications" 
-                  ──► Browser native permission granted 
-                  ──► Device token saved to Supabase 
-                  ──► Background alerts active 24/7!
-
-[ iOS / SAFARI FLOW ]
-User visits app on iPhone ──► iOS Banner: "Add to Home Screen for Background Alerts" 
-                         ──► Taps banner to view illustrated 2-step sheet 
-                         ──► Taps Safari Share Icon [↑] ──► "Add to Home Screen" 
-                         ──► Launches app from Home Screen 
-                         ──► 1-tap "Allow Notifications" 
-                         ──► Background alerts active 24/7!
-```
-
-### Visual Components
-- **Notification Opt-In Banner (`BackgroundNotificationPrompt.tsx`)**:
-  - Mounted discretely below the TopNavbar.
-  - Deep financial dark slate backdrop (`#0E1726`) with amber glow accents (`border-amber-500/30`), bell icon, and a single high-contrast CTA button.
-  - Auto-dismisses once permission is granted or if user snoozes it.
-- **iOS Home Screen Installation Modal (`IOSPwaInstallModal.tsx`)**:
-  - Clean bottom drawer with tactile handle, animated iOS Share icon `[↑]`, and bold numbered instructions tailored specifically for Safari on iOS 16.4+.
-- **In-App Toast Sync**:
-  - When the user is actively viewing the chat, intrusive system banners are suppressed in favor of sleek in-app toasts with immediate Web Audio chime.
+## 1. Root Cause Diagnosis
+1. **Automated Greeting Injection in `src/services/dataService.ts`**:
+   - `getOrCreateConversationForCustomer()` (lines 4737–4762) runs an automated routine that dispatches `this.sendChatMessage()` with the exact payload:
+     `"Welcome to Swift Sweeps Support! How can our treasury and gaming care specialists assist you today?"` attributed to `Sarah Lin` (`usr_agent_1`).
+   - This message gets pushed into local memory, `localStorage`, and synced directly to Supabase's `public.messages` table.
+2. **Permissive Greeting Filter in `src/services/dataService.ts`**:
+   - Lines 711–723 (in `fetchMessagesForConversation`) and lines 4793–4807 (in `getMessages`) contain legacy deduplication logic that only dropped secondary duplicates while explicitly retaining the first greeting instance:
+     ```ts
+     // Filter duplicate Sarah Lin greeting messages
+     let greetingSeen = false;
+     const merged = sorted.filter((m) => {
+       const isGreeting = (m.senderRole === 'agent' || m.senderId === 'usr_agent_1') &&
+         m.text && m.text.includes('Welcome to Swift Sweeps Support!');
+       if (isGreeting) {
+         if (greetingSeen) return false;
+         greetingSeen = true;
+       }
+       return true;
+     });
+     ```
+3. **Hardcoded Fallback Persona**:
+   - `src/pages/customer/CustomerChat.tsx` (line 300) defaults unassigned tickets to `Sarah Lin (Treasury Desk)`.
+   - `src/services/dataService.ts` (lines 4651, 4725) defaults `assignedAgentName: 'Sarah Lin'`.
+4. **Persisted Records in Supabase PostgreSQL**:
+   - Historical records inserted by this routine reside in the live `public.messages` table and will continue to hydrate onto screens unless sanitized at both the egress/filter level and via backend cleanup.
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
+## 2. Proposed Architectural Strategy
 
-- **Decision 1: Native Web Push Protocol (VAPID RFC 8292) over Third-Party Paid Push Services**
-  - *Chosen Approach*: Pure standard VAPID Web Push handled directly by Node.js `web-push` on `server.ts` and `/api/push/*` routes.
-  - *Why*: Zero third-party fees, no external vendor lock-in (e.g., OneSignal or Pusher SDKs that introduce bloat and tracking), works natively across Google Cloud Messaging (Android FCM) and Apple Push Notification service (APNs).
-  - *Alternatives Considered*: Firebase Cloud Messaging client SDK was considered, but requires Google Cloud project credentials not configured in this applet; VAPID works out of the box with existing keys.
+### Step 1: Total Elimination of Bot Message Dispatch
+- Remove the automated greeting dispatch block in `src/services/dataService.ts` (`getOrCreateConversationForCustomer`).
+- Remove the `swiftsweeps_greeting_sent_*` localStorage keys and automated creation triggers.
+- For newly initialized conversations, leave `lastMessageText: ''` until an actual user or support operator sends a message.
 
-- **Decision 2: Dual-Layer Persistence in PostgreSQL**
-  - *Chosen Approach*: Write device push subscriptions directly to PostgreSQL `push_subscriptions` table with an atomic fallback to `app_config.push_subscriptions` JSONB row.
-  - *Why*: In case migrations have not yet executed on production Supabase, the `app_config` key guarantees zero subscription loss, while `push_subscriptions` provides high-speed indexed lookups.
+### Step 2: Unconditional Filtering of Legacy Bot Messages
+- In `src/services/dataService.ts` (`getMessages`, `fetchMessagesForConversation`, and `subscribeToMessages`):
+  - Replace the deduplication logic with an absolute filter that rejects ANY message matching the automated greeting signature (`Welcome to Swift Sweeps Support!` / `treasury and gaming care specialists assist you today`).
+  - Purge cached instances of this message from `localStorage` (`aetherpay_chat_messages`) during data service boot.
 
-- **Decision 3: Multi-Event Push Dispatching in `dataService.ts` & `server.ts`**
-  - *Chosen Approach*: Trigger push notifications across all critical business events:
-    1. Chat messages (Player <-> Staff)
-    2. Cashout approvals & processing notices
-    3. Top-up deposit credits & bonus grants
-    4. Game credential assignment & password reveals
-  - *Why*: Keeps users informed in real-time about their money and games without requiring active browser polling.
+### Step 3: Neutral Support Desk Assignment
+- Change default fallback agent name in `src/services/dataService.ts` and `src/pages/customer/CustomerChat.tsx` from `Sarah Lin` to `Swift Sweeps Support Desk` or leave unassigned until an actual agent takes ownership of the ticket.
+
+### Step 4: Live Production Parity & Database Cleanup (`server.ts` & `api/index.ts`)
+- Add an administrative sanitization endpoint and automatic cleanup query on both Express (`server.ts`) and Vercel serverless (`api/index.ts`):
+  - Executes a targeted Supabase Service Role query:
+    ```sql
+    DELETE FROM public.messages 
+    WHERE content ILIKE '%Welcome to Swift Sweeps Support%' 
+       OR content ILIKE '%treasury and gaming care specialists assist you today%';
+    ```
+  - Ensures live PostgreSQL records are permanently scrubbed so no stale bot greetings linger in database backups or Realtime hydration feeds.
 
 ---
 
-## 4. Technical Architecture & Data Strategy
-
-### System Architecture Diagram
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        CLIENT LAYER (PWA / Browser)                    │
-│                                                                        │
-│   [BackgroundNotificationPrompt]          [IOSPwaInstallModal]         │
-│                 │                                   │                  │
-│                 ▼                                   ▼                  │
-│        [webPushClient.ts] ──────► [PushManager.subscribe(VAPID)]       │
-│                 │                                   │                  │
-│                 │ POST /api/push/subscribe          │ PushSubscription │
-└─────────────────┼───────────────────────────────────┼──────────────────┘
-                  │                                   │
-                  ▼                                   │
-┌───────────────────────────────────────────────┐     │
-│             SERVER LAYER (server.ts)          │     │
-│                                               │     │
-│   POST /api/push/subscribe                    │     │
-│   POST /api/push/notify ──► [webPushEngine]   │     │
-│   POST /api/push/test                         │     │
-└──────────────────┬────────────────────────────┘     │
-                   │                                  │
-                   ▼                                  ▼
-┌──────────────────────────────────────┐    ┌───────────────────────────┐
-│        SUPABASE POSTGRESQL           │    │    PUSH GATEWAYS          │
-│                                      │    │                           │
-│   • push_subscriptions table         │    │  • FCM (Android Chrome)   │
-│   • app_config (fallback JSONB)      │    │  • Apple APNs (iOS PWA)   │
-│   • messages / topups / withdrawals  │    │  • Mozilla Push Service   │
-└──────────────────────────────────────┘    └─────────────┬─────────────┘
-                                                          │
-                                                          ▼
-                                            ┌───────────────────────────┐
-                                            │      DEVICE HARDWARE      │
-                                            │                           │
-                                            │  [Service Worker: sw.js]  │
-                                            │  • Heads-up Alert Banner  │
-                                            │  • Custom Vibration       │
-                                            │  • Messenger Tone Audio   │
-                                            │  • Quick Reply / Open CTA │
-                                            └───────────────────────────┘
-```
-
-### Data Schema & Types
-
-#### 1. Push Subscription Model
-```typescript
-interface StoredPushSubscription {
-  id: string;
-  userId: string;
-  userRole: 'customer' | 'agent' | 'admin';
-  endpoint: string;
-  p256dh: string;
-  auth: string;
-  devicePlatform: 'android' | 'ios' | 'desktop';
-  createdAt: string;
-  updatedAt: string;
-}
-```
-
-#### 2. Service Worker (`public/sw.js`) High-Priority Payload
-```javascript
-{
-  title: "Swift Sweeps Support (Sarah Lin)",
-  body: "Your cashout request for $250.00 has been approved!",
-  icon: "/pwa-192x192.png",
-  badge: "/favicon.png",
-  vibrate: [200, 100, 200, 100, 250],
-  tag: "swiftsweeps_cashout_123",
-  renotify: true,
-  requireInteraction: true,
-  data: {
-    url: "/#wallet",
-    type: "withdrawal_approved"
-  },
-  actions: [
-    { action: "open_view", title: "View Wallet" },
-    { action: "dismiss", title: "Dismiss" }
-  ]
-}
-```
-
-### Planned File Edits
-1. `/public/sw.js`:
-   - Upgrade push listener with high-priority `vibrate`, `requireInteraction: true`, `renotify: true`, and multi-action buttons.
-   - Upgrade notification click handler to focus existing tabs or open standalone PWA window directly to the relevant view.
-2. `/src/services/webPushClient.ts`:
-   - Enhance browser and iOS standalone detection.
-   - Add platform detection (`android`, `ios`, `desktop`) and send it to server.
-   - Add automated renewal of expired subscriptions.
-3. `/src/server/webPushEngine.ts` & `/server.ts`:
-   - Optimize multi-recipient push delivery for all staff when customers send messages or requests.
-   - Support `requireInteraction`, `vibrate`, and rich action payloads.
-   - Add `/api/push/test` diagnostic endpoint for instant device verification.
-4. `/src/components/common/BackgroundNotificationPrompt.tsx`:
-   - Create responsive opt-in banner with 1-tap activation on Android and step-by-step modal guide for iOS.
-5. `/src/components/common/IOSPwaInstallModal.tsx`:
-   - Create Apple-styled visual sheet with clear icons explaining Safari Share -> Add to Home Screen.
-6. `/src/services/dataService.ts`:
-   - Wire push alerts into:
-     - `sendChatMessage` (player <-> staff chat)
-     - `approveWithdrawal` / `markWithdrawalCompleted` (payout cashouts)
-     - `approveTopUp` (deposit balance credited)
-     - `assignGameCredentials` (game account ready)
-7. `/src/App.tsx`:
-   - Mount `BackgroundNotificationPrompt` globally for both customer and staff portals.
+## 3. Verification & Acceptance Criteria
+1. **Zero Bot Greetings**: Creating a new customer conversation or refreshing existing chats never produces or displays any canned greeting.
+2. **Clean Chat Feed**: Existing historical chats display strictly real human messages (customer messages, transaction receipts, human agent replies).
+3. **Database Cleared**: The `public.messages` table in Supabase contains 0 automated greeting records.
+4. **Full-Stack Parity**: Both `server.ts` (local dev port 3000) and `api/index.ts` (Vercel production) run the exact same sanitization and support chat protocol.
+5. **Compilation Verification**: `compile_applet` and `tsc --noEmit` pass with zero errors.

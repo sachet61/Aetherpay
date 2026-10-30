@@ -486,6 +486,75 @@ export default async function handler(req: any, res: any) {
     }
   }
 
+  // 6. Game Accounts Retrieval & Direct Provisioning for Live Supabase
+  if (url.includes('/api/game-accounts/provision') && req.method === 'POST') {
+    try {
+      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+      const { customerId, gameId, gameTitle, username, password, pin, status, reviewerId, reviewerName } = body || {};
+      if (!customerId || !gameId || !username || !password) {
+        return res.status(400).json({ error: 'customerId, gameId, username, and password are required' });
+      }
+
+      const now = new Date().toISOString();
+      const accountId = `ga_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+      const { data, error } = await supabaseAdmin
+        .from('game_accounts')
+        .upsert({
+          id: accountId,
+          customer_id: customerId,
+          game_id: gameId,
+          game_title: gameTitle || 'Game',
+          username: username.trim(),
+          password: password.trim(),
+          pin: pin || null,
+          status: status || 'active',
+          created_at: now,
+          updated_at: now,
+        })
+        .select()
+        .single();
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      // Log to audit trail
+      await supabaseAdmin.from('audit_logs').insert({
+        id: `aud_${Date.now()}`,
+        user_id: reviewerId || 'staff',
+        user_email: reviewerName || 'Support Staff',
+        action: 'GAME_CREDENTIALS_DIRECT_PROVISION',
+        entity_type: 'game_account',
+        entity_id: accountId,
+        details: `Provisioned credentials for ${gameTitle || gameId} (Username: ${username}) via Admin Desk.`,
+        created_at: now,
+      }).then(() => {}, () => {});
+
+      return res.status(200).json({ success: true, account: data });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to provision game account' });
+    }
+  }
+
+  if (url.includes('/api/game-accounts') && req.method === 'GET') {
+    try {
+      const parsedUrl = new URL(url, 'https://localhost');
+      const customerId = parsedUrl.searchParams.get('customerId');
+      let query = supabaseAdmin.from('game_accounts').select('*').order('created_at', { ascending: false });
+      if (customerId) {
+        query = query.eq('customer_id', customerId);
+      }
+      const { data, error } = await query.limit(100);
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+      return res.status(200).json({ accounts: data || [] });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to query game accounts' });
+    }
+  }
+
   // 6. Health & Status
   if (url.includes('/api/status') || url.includes('/api/telegram/status') || url === '/api' || url === '/api/') {
     return res.status(200).json({

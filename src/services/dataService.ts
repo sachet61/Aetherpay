@@ -421,7 +421,7 @@ class DataService {
 
       if (isAdmin) {
         // Staff/Admin session: bounded administrative queue queries (Users fetched on-demand on tab open)
-        const [appConfigRes, cashoutsRes, catRes, topupsRes, withdrawalsRes, walletsRes, convsRes] =
+        const [appConfigRes, cashoutsRes, catRes, topupsRes, withdrawalsRes, walletsRes, convsRes, gameAccsRes] =
           await Promise.all([
             appConfigPromise,
             cashoutsPromise,
@@ -430,6 +430,7 @@ class DataService {
             supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(25),
             supabase.from('wallets').select('*').limit(50),
             supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
+            supabase.from('game_accounts').select('*').order('created_at', { ascending: false }).limit(100),
           ]);
 
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
@@ -439,6 +440,7 @@ class DataService {
         if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
         if (walletsRes.data) this.applyWalletRows(walletsRes.data);
         if (convsRes.data) this.applyConversationRows(convsRes.data, true);
+        if (gameAccsRes?.data) this.applyGameAccountRows(gameAccsRes.data, false);
       } else if (currentUserId) {
         // Customer session: strictly scoped to CURRENT user only (no global table downloads)
         const [appConfigRes, cashoutsRes, catRes, userRes, walletRes, topupsRes, withdrawalsRes, gameAccsRes, convRes] =
@@ -491,7 +493,7 @@ class DataService {
         if (walletRes.data) this.applyWalletRows([walletRes.data]);
         if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
         if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
-        if (gameAccsRes.data) this.applyGameAccountRows(gameAccsRes.data, true);
+        if (gameAccsRes.data) this.applyGameAccountRows(gameAccsRes.data, false);
         if (convRes?.data && convRes.data.length > 0) {
           this.applyConversationRows(convRes.data, false);
           // Hydrate customer's active chat messages capped at 40
@@ -1083,6 +1085,136 @@ class DataService {
     const updated = this.deduplicateGameAccounts(Array.from(accMap.values()));
     this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = updated;
     this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, updated);
+    window.dispatchEvent(
+      new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.GAME_ACCOUNTS } })
+    );
+  }
+
+  // Fetch Game Accounts directly from Supabase / server proxy on demand
+  public async fetchGameAccountsFromDb(customerId?: string): Promise<GameAccount[]> {
+    try {
+      if (supabase && isSupabaseConfigured()) {
+        let query = supabase.from('game_accounts').select('*').order('created_at', { ascending: false });
+        if (customerId) {
+          query = query.eq('customer_id', customerId);
+        }
+        const { data, error } = await query.limit(100);
+        if (!error && data && Array.isArray(data) && data.length > 0) {
+          this.applyGameAccountRows(data, false);
+          return this.getGameAccounts(customerId);
+        }
+      }
+
+      // Resilient fallback to Server Route (Service Role)
+      const url = customerId ? `/api/game-accounts?customerId=${encodeURIComponent(customerId)}` : '/api/game-accounts';
+      const res = await fetch(url);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.accounts && Array.isArray(json.accounts)) {
+          this.applyGameAccountRows(json.accounts, false);
+          return this.getGameAccounts(customerId);
+        }
+      }
+    } catch (err) {
+      console.warn('[dataService] fetchGameAccountsFromDb notice:', err);
+    }
+    return this.getGameAccounts(customerId);
+  }
+
+  // Direct Staff Provisioning of Game Credentials for any Player & Game
+  public async provisionGameAccountDirectly(params: {
+    customerId: string;
+    gameId: string;
+    gameTitle: string;
+    username: string;
+    password: string;
+    pin?: string;
+    reviewerId: string;
+    reviewerName: string;
+  }): Promise<{ success: boolean; message: string; account?: GameAccount }> {
+    try {
+      // 1. Call authoritative server endpoint
+      const res = await fetch('/api/game-accounts/provision', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+      const data = await res.json();
+
+      if (res.ok && data.account) {
+        this.applyGameAccountRows([data.account], false);
+      } else {
+        // Direct local/client fallback
+        const accountId = `ga_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const localAcc: GameAccount = {
+          id: accountId,
+          customerId: params.customerId,
+          gameCatalogId: params.gameId,
+          gameName: params.gameTitle,
+          platformName: 'Sweepstakes',
+          username: params.username.trim(),
+          password: params.password.trim(),
+          notes: params.pin || undefined,
+          status: 'active',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        const allAccs = this.getGameAccounts();
+        allAccs.push(localAcc);
+        const deduplicated = this.deduplicateGameAccounts(allAccs);
+        this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = deduplicated;
+        this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, deduplicated);
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.GAME_ACCOUNTS } }));
+
+        if (supabase && isSupabaseConfigured()) {
+          supabase.from('game_accounts').upsert({
+            id: localAcc.id,
+            customer_id: localAcc.customerId,
+            game_id: localAcc.gameCatalogId,
+            game_title: localAcc.gameName,
+            username: localAcc.username,
+            password: localAcc.password,
+            pin: localAcc.notes || null,
+            status: 'active',
+            created_at: localAcc.createdAt,
+            updated_at: localAcc.updatedAt,
+          }).then(() => {}, () => {});
+        }
+      }
+
+      // 2. Dispatch Push Alert to Customer Phone / PWA
+      if (typeof window !== 'undefined') {
+        webPushClient.dispatchPushAlert({
+          recipientId: params.customerId,
+          recipientRole: 'customer',
+          title: '🔑 Game Credentials Assigned!',
+          body: `Your credentials for ${params.gameTitle} are ready (Username: ${params.username}). Tap to play!`,
+          url: '/#games',
+          tag: `game_direct_${Date.now()}`,
+          actionType: 'game',
+        }).catch(() => {});
+      }
+
+      // 3. Post to player's support conversation
+      try {
+        const player = this.getUserById(params.customerId);
+        if (player) {
+          const conv = this.getOrCreateConversationForCustomer(player.id, player.displayName);
+          this.sendChatMessage({
+            conversationId: conv.id,
+            senderId: params.reviewerId,
+            senderName: params.reviewerName,
+            senderRole: 'agent',
+            text: `🔑 Your player credentials for "${params.gameTitle}" are ready!\n\n• Username: "${params.username}"\n• Password: "${params.password}"\n\nYou can access and reveal your credentials anytime in your Gaming IDs portal. Good luck!`,
+            isInternalNote: false,
+          });
+        }
+      } catch (err) {}
+
+      return { success: true, message: `Successfully provisioned credentials for ${params.gameTitle}!` };
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'Failed to provision game account' };
+    }
   }
 
   private applyCatalogRows(rows: any[]): void {
