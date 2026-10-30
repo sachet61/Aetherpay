@@ -496,7 +496,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                       <td className="py-3.5 px-4">
                         <div className="flex items-center gap-3">
                           <div
-                            className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs uppercase shadow-inner ${
+                            className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs uppercase shadow-inner overflow-hidden shrink-0 ${
                               u.role === 'admin'
                                 ? 'bg-amber-950 text-amber-300 border border-amber-800/60'
                                 : u.role === 'agent'
@@ -504,7 +504,16 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                                 : 'bg-indigo-950 text-indigo-300 border border-indigo-800/60'
                             }`}
                           >
-                            {u.displayName.charAt(0)}
+                            {u.avatarUrl ? (
+                              <img
+                                src={u.avatarUrl}
+                                alt={u.displayName}
+                                className="w-full h-full object-cover"
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : (
+                              u.displayName.charAt(0)
+                            )}
                           </div>
                           <div className="min-w-0">
                             <div className="font-bold text-white flex items-center gap-1.5 truncate">
@@ -687,7 +696,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
               <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                 <div className="flex items-center gap-3 min-w-0">
                   <div
-                    className={`w-11 h-11 rounded-xl flex items-center justify-center font-bold text-sm uppercase shrink-0 shadow-inner ${
+                    className={`w-11 h-11 rounded-xl flex items-center justify-center font-bold text-sm uppercase shrink-0 shadow-inner overflow-hidden ${
                       selectedUser.role === 'admin'
                         ? 'bg-amber-950 text-amber-300 border border-amber-800/80'
                         : selectedUser.role === 'agent'
@@ -695,7 +704,16 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                         : 'bg-indigo-950 text-indigo-300 border border-indigo-800/80'
                     }`}
                   >
-                    {selectedUser.displayName.charAt(0)}
+                    {selectedUser.avatarUrl ? (
+                      <img
+                        src={selectedUser.avatarUrl}
+                        alt={selectedUser.displayName}
+                        className="w-full h-full object-cover"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      selectedUser.displayName.charAt(0)
+                    )}
                   </div>
                   <div className="min-w-0">
                     <h3 className="text-base font-bold text-white flex items-center gap-1.5 flex-wrap">

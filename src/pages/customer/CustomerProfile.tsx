@@ -55,25 +55,19 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
     try {
       setIsUploadingAvatar(true);
       const res = await storageService.uploadAvatar(file, currentUser.id);
-      setIsUploadingAvatar(false);
 
       if (res.success && res.url) {
-        const updatedUser: UserProfile = {
-          ...currentUser,
-          avatarUrl: res.url,
-        };
-        dataService.registerUser(updatedUser);
-        authSessionService.updateUserProfile(updatedUser);
-        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'avatar_updated' } }));
-        setSuccessNote('Profile picture uploaded and compressed via WebP transform!');
+        await dataService.updateUserAvatar(currentUser.id, res.url);
+        currentUser.avatarUrl = res.url;
+        setSuccessNote('Profile picture uploaded, compressed to WebP, and saved to database!');
         setTimeout(() => setSuccessNote(null), 5000);
       } else {
         alert(res.error || 'Failed to update profile picture.');
       }
     } catch (err: any) {
-      setIsUploadingAvatar(false);
       alert(err.message || 'Error uploading profile picture.');
     } finally {
+      setIsUploadingAvatar(false);
       if (avatarInputRef.current) avatarInputRef.current.value = '';
     }
   };

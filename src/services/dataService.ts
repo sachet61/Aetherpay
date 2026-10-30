@@ -507,6 +507,7 @@ class DataService {
             if (dbUser.display_name) local.displayName = dbUser.display_name;
             if (dbUser.role) local.role = dbUser.role;
             if (dbUser.phone) local.phone = dbUser.phone;
+            if (dbUser.avatar_url) local.avatarUrl = dbUser.avatar_url;
           } else {
             local = {
               id: dbUser.id,
@@ -2835,6 +2836,7 @@ class DataService {
     referralCode?: string;
     emailVerified?: boolean;
     status?: string;
+    avatarUrl?: string;
   }): { success: boolean; user?: UserProfile; message?: string } {
     const users = this.getUsers();
     const existing = users.find(
@@ -2847,6 +2849,7 @@ class DataService {
       if (params.displayName) existing.displayName = params.displayName;
       if (params.role) existing.role = params.role;
       if (params.phone) existing.phone = params.phone;
+      if (params.avatarUrl !== undefined) existing.avatarUrl = params.avatarUrl;
       return { success: true, user: existing, message: 'User already exists, profile synchronized.' };
     }
 
@@ -2869,6 +2872,7 @@ class DataService {
       phone: params.phone,
       role: params.role || 'customer',
       emailVerified: Boolean(params.emailVerified),
+      avatarUrl: params.avatarUrl,
       referralCode: generatedRefCode,
       referredBy,
       status: (params.status as any) || 'active',
@@ -2907,6 +2911,64 @@ class DataService {
 
     this.setCurrentUserId(newId);
     return { success: true, user: newUser };
+  }
+
+  public async updateUserAvatar(
+    userId: string,
+    avatarUrl: string
+  ): Promise<{ success: boolean; error?: string; user?: UserProfile }> {
+    try {
+      const users = this.getUsers();
+      const user = users.find((u) => u.id === userId);
+      if (user) {
+        user.avatarUrl = avatarUrl;
+        this.cache[STORAGE_KEYS.USERS] = users;
+      }
+
+      // Update active user in session if matches
+      const current = this.getCurrentUser();
+      if (current && current.id === userId) {
+        current.avatarUrl = avatarUrl;
+        authSessionService.updateUserProfile(current);
+      }
+
+      // 1. Persist directly to Supabase PostgreSQL public.users
+      if (supabase && isSupabaseConfigured()) {
+        try {
+          await supabase
+            .from('users')
+            .update({
+              avatar_url: avatarUrl,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', userId);
+        } catch (dbErr: any) {
+          console.warn('[Supabase Avatar Direct Update Notice]:', dbErr?.message);
+        }
+      }
+
+      // 2. Persist via server endpoint with service-role privileges
+      try {
+        await fetch('/api/user/avatar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId, avatarUrl }),
+        });
+      } catch (srvErr) {
+        console.warn('[Server Avatar Endpoint Sync Notice]:', srvErr);
+      }
+
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'avatar_updated', userId, avatarUrl },
+        })
+      );
+
+      return { success: true, user: user || current || undefined };
+    } catch (err: any) {
+      console.error('[Update User Avatar Error]:', err);
+      return { success: false, error: err.message || 'Failed to update avatar.' };
+    }
   }
 
   // Wallets & Authoritative Ledger

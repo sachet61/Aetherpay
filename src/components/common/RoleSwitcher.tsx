@@ -93,7 +93,16 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
               }`}
             ></span>
           </span>
-          {getRoleIcon(currentUser.role)}
+          {currentUser.avatarUrl ? (
+            <img
+              src={currentUser.avatarUrl}
+              alt={currentUser.displayName}
+              className="w-5 h-5 rounded-full object-cover border border-amber-500/30 shrink-0"
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            getRoleIcon(currentUser.role)
+          )}
           <span className="font-semibold text-slate-100">{currentUser.displayName.split(' ')[0]}</span>
         </span>
         <ChevronDown
@@ -114,9 +123,23 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
                 {getRoleBadge(currentUser.role)}
               </div>
 
-              <div>
-                <div className="font-bold text-sm text-white">{currentUser.displayName}</div>
-                <div className="text-xs font-mono text-slate-400 truncate">{currentUser.email}</div>
+              <div className="flex items-center gap-3">
+                {currentUser.avatarUrl ? (
+                  <img
+                    src={currentUser.avatarUrl}
+                    alt={currentUser.displayName}
+                    className="w-10 h-10 rounded-xl object-cover border border-amber-500/30 shrink-0 shadow"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <div className="w-10 h-10 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center font-bold text-sm text-white shrink-0">
+                    {currentUser.displayName.charAt(0)}
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <div className="font-bold text-sm text-white truncate">{currentUser.displayName}</div>
+                  <div className="text-xs font-mono text-slate-400 truncate">{currentUser.email}</div>
+                </div>
               </div>
 
               {/* Profile Details List */}

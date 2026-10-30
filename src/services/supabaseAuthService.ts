@@ -104,6 +104,7 @@ class SupabaseAuthService {
               role: authoritativeRole,
               status: dbUser?.status || 'active',
               emailVerified: isConfirmed || Boolean(dbUser?.email_verified),
+              avatarUrl: dbUser?.avatar_url || user.user_metadata?.avatar_url,
               referralCode: dbUser?.referral_code || `REF_${user.id.slice(-5).toUpperCase()}`,
               createdAt: dbUser?.created_at || user.created_at || nowIso,
               lastLoginAt: nowIso,
@@ -125,6 +126,10 @@ class SupabaseAuthService {
             userProfile.emailVerified = isConfirmed || Boolean(dbUser?.email_verified);
             userProfile.role = authoritativeRole;
             if (dbUser?.display_name) userProfile.displayName = dbUser.display_name;
+            if (dbUser?.avatar_url) userProfile.avatarUrl = dbUser.avatar_url;
+            else if (user.user_metadata?.avatar_url && !userProfile.avatarUrl) {
+              userProfile.avatarUrl = user.user_metadata.avatar_url;
+            }
             if (isParentAdminEmail && userProfile.role !== 'admin') {
               userProfile.role = 'admin';
               userProfile.isParentAdmin = true;
@@ -173,7 +178,26 @@ class SupabaseAuthService {
                 ? 'admin'
                 : (dbUser?.role || (session.user.user_metadata?.role as UserRole) || 'customer');
 
-              if (userProfile) {
+              if (!userProfile) {
+                userProfile = {
+                  id: dbUser?.id || session.user.id,
+                  email: cleanEmail,
+                  displayName:
+                    dbUser?.display_name ||
+                    session.user.user_metadata?.display_name ||
+                    session.user.user_metadata?.full_name ||
+                    cleanEmail.split('@')[0],
+                  role: authoritativeRole,
+                  status: dbUser?.status || 'active',
+                  emailVerified: isConfirmed || Boolean(dbUser?.email_verified),
+                  avatarUrl: dbUser?.avatar_url || session.user.user_metadata?.avatar_url,
+                  referralCode: dbUser?.referral_code || `REF_${session.user.id.slice(-5).toUpperCase()}`,
+                  createdAt: dbUser?.created_at || session.user.created_at || new Date().toISOString(),
+                  lastLoginAt: new Date().toISOString(),
+                  isParentAdmin: isParentAdminEmail ? true : undefined,
+                };
+                dataService.registerUser(userProfile);
+              } else {
                 if (userProfile.id !== session.user.id) {
                   const oldId = userProfile.id;
                   userProfile.id = session.user.id;
@@ -182,19 +206,23 @@ class SupabaseAuthService {
                 userProfile.emailVerified = isConfirmed || Boolean(dbUser?.email_verified);
                 userProfile.role = authoritativeRole;
                 if (dbUser?.display_name) userProfile.displayName = dbUser.display_name;
+                if (dbUser?.avatar_url) userProfile.avatarUrl = dbUser.avatar_url;
+                else if (session.user.user_metadata?.avatar_url && !userProfile.avatarUrl) {
+                  userProfile.avatarUrl = session.user.user_metadata.avatar_url;
+                }
                 if (isParentAdminEmail && userProfile.role !== 'admin') {
                   userProfile.role = 'admin';
                   userProfile.isParentAdmin = true;
                 }
                 dataService.registerUser(userProfile);
-                authSessionService.createSessionForUser(
-                  userProfile.id,
-                  userProfile.email,
-                  userProfile.displayName,
-                  userProfile.role,
-                  userProfile.emailVerified
-                );
               }
+              authSessionService.createSessionForUser(
+                userProfile.id,
+                userProfile.email,
+                userProfile.displayName,
+                userProfile.role,
+                userProfile.emailVerified
+              );
             }
           }
         })

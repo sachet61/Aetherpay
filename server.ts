@@ -1109,7 +1109,7 @@ app.post('/api/auth/register', async (req, res) => {
   // Secure Storage Fallback Upload Endpoint (Uses Service Role to guarantee bucket existence & persistence)
   app.post('/api/storage/upload', async (req, res) => {
     try {
-      const { bucket, path: filePath, fileBase64, contentType } = req.body;
+      const { bucket, path: filePath, fileBase64, contentType, userId } = req.body;
       if (!bucket || !filePath || !fileBase64) {
         return res.status(400).json({ error: 'bucket, path, and fileBase64 are required' });
       }
@@ -1133,13 +1133,77 @@ app.post('/api/auth/register', async (req, res) => {
         .from(bucket)
         .getPublicUrl(data?.path || filePath);
 
+      const publicUrl = urlData.publicUrl;
+
+      // If uploading an avatar and userId is provided, atomically update public.users and auth metadata
+      if (bucket === 'avatars' && userId) {
+        try {
+          await supabaseAdmin
+            .from('users')
+            .update({ avatar_url: publicUrl, updated_at: new Date().toISOString() })
+            .eq('id', userId);
+        } catch (e: any) {
+          console.warn('[Auto Avatar DB Update Notice]:', e?.message);
+        }
+
+        try {
+          await supabaseAdmin.auth.admin.updateUserById(userId, { user_metadata: { avatar_url: publicUrl } });
+        } catch (e: any) {
+          console.warn('[Auto Avatar Auth Update Notice]:', e?.message);
+        }
+      }
+
       return res.json({
         success: true,
-        url: urlData.publicUrl,
+        url: publicUrl,
         path: data?.path || filePath,
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Server storage upload failed' });
+    }
+  });
+
+  // Dedicated User Avatar & Profile Picture Persistence Endpoint
+  app.post('/api/user/avatar', async (req, res) => {
+    try {
+      const { userId, avatarUrl } = req.body;
+      if (!userId || !avatarUrl) {
+        return res.status(400).json({ error: 'userId and avatarUrl are required' });
+      }
+
+      // 1. Update public.users record
+      const { data: updatedUser, error: dbErr } = await supabaseAdmin
+        .from('users')
+        .update({
+          avatar_url: avatarUrl,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', userId)
+        .select()
+        .maybeSingle();
+
+      if (dbErr) {
+        console.warn('[Avatar Update DB Warning]:', dbErr.message);
+      }
+
+      // 2. Update Supabase Auth user metadata
+      await supabaseAdmin.auth.admin
+        .updateUserById(userId, {
+          user_metadata: { avatar_url: avatarUrl },
+        })
+        .catch((authErr: any) => {
+          console.warn('[Avatar Update Auth Warning]:', authErr?.message);
+        });
+
+      return res.json({
+        success: true,
+        avatarUrl,
+        user: updatedUser,
+        message: 'Profile picture successfully persisted to database.',
+      });
+    } catch (err: any) {
+      console.error('[Avatar Update Error]:', err);
+      return res.status(500).json({ error: err.message || 'Failed to update user avatar' });
     }
   });
 

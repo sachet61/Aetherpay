@@ -376,3 +376,43 @@ CREATE TRIGGER tr_prevent_verification_downgrade
   FOR EACH ROW
   EXECUTE FUNCTION public.prevent_verification_downgrade();
 
+-- ====================================================================
+-- 14. Supabase Storage Buckets & Policies (Avatars & Chat Attachments)
+-- Idempotent creation of public storage buckets and row-level policies
+-- Reference: https://supabase.com/docs/guides/storage
+-- ====================================================================
+
+-- 1. Insert storage buckets if not exists
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES 
+  ('avatars', 'avatars', true, 10485760, ARRAY['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']),
+  ('chat_attachments', 'chat_attachments', true, 15728640, ARRAY['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'])
+ON CONFLICT (id) DO UPDATE SET
+  public = true,
+  file_size_limit = EXCLUDED.file_size_limit,
+  allowed_mime_types = EXCLUDED.allowed_mime_types;
+
+-- 2. Storage Objects Access Policies (SELECT, INSERT, UPDATE, DELETE)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'Public Access for Avatars and Chat') THEN
+    CREATE POLICY "Public Access for Avatars and Chat" ON storage.objects
+      FOR SELECT USING (bucket_id IN ('avatars', 'chat_attachments'));
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'Allow Uploads to Avatars and Chat') THEN
+    CREATE POLICY "Allow Uploads to Avatars and Chat" ON storage.objects
+      FOR INSERT WITH CHECK (bucket_id IN ('avatars', 'chat_attachments'));
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'Allow Updates to Avatars and Chat') THEN
+    CREATE POLICY "Allow Updates to Avatars and Chat" ON storage.objects
+      FOR UPDATE USING (bucket_id IN ('avatars', 'chat_attachments'));
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'Allow Deletes on Avatars and Chat') THEN
+    CREATE POLICY "Allow Deletes on Avatars and Chat" ON storage.objects
+      FOR DELETE USING (bucket_id IN ('avatars', 'chat_attachments'));
+  END IF;
+END $$;
+

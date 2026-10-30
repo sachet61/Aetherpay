@@ -59,7 +59,8 @@ class StorageService {
     file: File | Blob,
     bucket: string,
     filePath: string,
-    contentType: string = 'image/webp'
+    contentType: string = 'image/webp',
+    userId?: string
   ): Promise<{ success: boolean; url?: string; error?: string }> {
     try {
       const base64Data = await fileToBase64(file);
@@ -73,6 +74,7 @@ class StorageService {
           path: filePath,
           fileBase64: base64Data,
           contentType,
+          userId,
         }),
       });
 
@@ -216,7 +218,8 @@ class StorageService {
         compressed.file,
         'chat_attachments',
         fileName,
-        'image/webp'
+        'image/webp',
+        customerId
       );
 
       if (fallbackResult.success && fallbackResult.url) {
@@ -276,7 +279,8 @@ class StorageService {
           compressed.file,
           'avatars',
           fileName,
-          'image/webp'
+          'image/webp',
+          userId
         );
 
         if (fallbackResult.success && fallbackResult.url) {
@@ -289,14 +293,9 @@ class StorageService {
         }
       }
 
-      // Attach Supabase on-the-fly CDN image transformation parameters
-      const transformedUrl = publicUrl.includes('?')
-        ? `${publicUrl}&width=160&height=160&format=webp&quality=80`
-        : `${publicUrl}?width=160&height=160&format=webp&quality=80`;
-
       return {
         success: true,
-        url: transformedUrl,
+        url: publicUrl,
         name: file.name,
         originalSize: compressed.originalSize,
         compressedSize: compressed.compressedSize,

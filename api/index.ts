@@ -500,7 +500,7 @@ export default async function handler(req: any, res: any) {
   if (url.includes('/api/storage/upload') && req.method === 'POST') {
     try {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      const { bucket, path: filePath, fileBase64, contentType } = body || {};
+      const { bucket, path: filePath, fileBase64, contentType, userId } = body || {};
       if (!bucket || !filePath || !fileBase64) {
         return res.status(400).json({ error: 'bucket, path, and fileBase64 are required' });
       }
@@ -524,13 +524,78 @@ export default async function handler(req: any, res: any) {
         .from(bucket)
         .getPublicUrl(data?.path || filePath);
 
+      const publicUrl = urlData.publicUrl;
+
+      // If uploading an avatar and userId is provided, atomically update public.users and auth metadata
+      if (bucket === 'avatars' && userId) {
+        try {
+          await supabaseAdmin
+            .from('users')
+            .update({ avatar_url: publicUrl, updated_at: new Date().toISOString() })
+            .eq('id', userId);
+        } catch (e: any) {
+          console.warn('[Vercel Auto Avatar DB Update Notice]:', e?.message);
+        }
+
+        try {
+          await supabaseAdmin.auth.admin.updateUserById(userId, { user_metadata: { avatar_url: publicUrl } });
+        } catch (e: any) {
+          console.warn('[Vercel Auto Avatar Auth Update Notice]:', e?.message);
+        }
+      }
+
       return res.status(200).json({
         success: true,
-        url: urlData.publicUrl,
+        url: publicUrl,
         path: data?.path || filePath,
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Server storage upload failed' });
+    }
+  }
+
+  // Dedicated User Avatar & Profile Picture Persistence Endpoint (Vercel Serverless)
+  if (url.includes('/api/user/avatar') && req.method === 'POST') {
+    try {
+      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+      const { userId, avatarUrl } = body || {};
+      if (!userId || !avatarUrl) {
+        return res.status(400).json({ error: 'userId and avatarUrl are required' });
+      }
+
+      // 1. Update public.users record
+      const { data: updatedUser, error: dbErr } = await supabaseAdmin
+        .from('users')
+        .update({
+          avatar_url: avatarUrl,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', userId)
+        .select()
+        .maybeSingle();
+
+      if (dbErr) {
+        console.warn('[Vercel Avatar Update DB Warning]:', dbErr.message);
+      }
+
+      // 2. Update Supabase Auth user metadata
+      await supabaseAdmin.auth.admin
+        .updateUserById(userId, {
+          user_metadata: { avatar_url: avatarUrl },
+        })
+        .catch((authErr: any) => {
+          console.warn('[Vercel Avatar Update Auth Warning]:', authErr?.message);
+        });
+
+      return res.status(200).json({
+        success: true,
+        avatarUrl,
+        user: updatedUser,
+        message: 'Profile picture successfully persisted to database.',
+      });
+    } catch (err: any) {
+      console.error('[Vercel Avatar Update Error]:', err);
+      return res.status(500).json({ error: err.message || 'Failed to update user avatar' });
     }
   }
 
