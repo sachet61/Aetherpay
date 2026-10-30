@@ -1205,6 +1205,34 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(500).json({ error: err.message || 'Failed to provision game account' });
     }
   });
+
+  // Support Guard: Purge automated bot greetings from PostgreSQL messages table
+  app.post('/api/support/purge-bot-greetings', async (_req, res) => {
+    try {
+      const { data: botMsgs, error: queryErr } = await supabaseAdmin
+        .from('messages')
+        .select('id, content')
+        .or('content.ilike.%Welcome to Swift Sweeps Support%,content.ilike.%treasury and gaming care specialists assist you today%');
+
+      if (queryErr) {
+        return res.status(500).json({ error: queryErr.message });
+      }
+
+      const count = botMsgs?.length || 0;
+      if (count > 0) {
+        const ids = botMsgs.map((m: any) => m.id);
+        const { error: delErr } = await supabaseAdmin.from('messages').delete().in('id', ids);
+        if (delErr) {
+          return res.status(500).json({ error: delErr.message });
+        }
+      }
+
+      return res.json({ success: true, purgedCount: count });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to purge bot greetings' });
+    }
+  });
+
   const vite = await createViteServer({
     server: { middlewareMode: true },
     appType: 'spa',
@@ -1286,6 +1314,24 @@ app.post('/api/auth/register', async (req, res) => {
         }
       } catch (err: any) {
         console.warn('[Staff Inbox Guard] Startup self-healing purge notice:', err?.message || err);
+      }
+    })();
+
+    // Authoritative Bot Greeting Purge Guard: Purge automated greetings from PostgreSQL messages table
+    (async () => {
+      try {
+        const { data: botMsgs, error: queryErr } = await supabaseAdmin
+          .from('messages')
+          .select('id, content')
+          .or('content.ilike.%Welcome to Swift Sweeps Support%,content.ilike.%treasury and gaming care specialists assist you today%');
+
+        if (!queryErr && botMsgs && botMsgs.length > 0) {
+          const idsToDelete = botMsgs.map((m: any) => m.id);
+          console.log(`[Support Desk Guard] Self-healing: purging ${idsToDelete.length} legacy bot greetings from messages table.`);
+          await supabaseAdmin.from('messages').delete().in('id', idsToDelete);
+        }
+      } catch (err: any) {
+        console.warn('[Support Desk Guard] Bot greeting purge notice:', err?.message || err);
       }
     })();
   });

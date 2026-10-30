@@ -172,6 +172,44 @@ class DataService {
         } catch {}
         localStorage.setItem(STAFF_CONV_CLEAN_FLAG, 'true');
       }
+
+      // Purge any legacy automated bot greetings from cached messages and greeting flags
+      const BOT_GREETINGS_PURGE_FLAG = 'swift_sweeps_bot_greeting_purged_v2';
+      if (!localStorage.getItem(BOT_GREETINGS_PURGE_FLAG)) {
+        try {
+          const rawMsgs = localStorage.getItem(STORAGE_KEYS.MESSAGES);
+          if (rawMsgs) {
+            const parsed = JSON.parse(rawMsgs);
+            if (parsed && typeof parsed === 'object') {
+              for (const [convId, msgList] of Object.entries(parsed)) {
+                if (Array.isArray(msgList)) {
+                  parsed[convId] = msgList.filter((m: any) => {
+                    const text = (m?.text || '').toLowerCase();
+                    const isBotGreeting =
+                      text.includes('welcome to swift sweeps support') ||
+                      text.includes('treasury and gaming care specialists assist you today') ||
+                      (m?.senderName === 'Sarah Lin' && text.includes('welcome'));
+                    return !isBotGreeting;
+                  });
+                }
+              }
+              localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(parsed));
+            }
+          }
+          // Remove all greeting flags
+          const keysToRemove: string[] = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith('swiftsweeps_greeting_sent_')) {
+              keysToRemove.push(k);
+            }
+          }
+          for (const k of keysToRemove) {
+            localStorage.removeItem(k);
+          }
+        } catch {}
+        localStorage.setItem(BOT_GREETINGS_PURGE_FLAG, 'true');
+      }
     } catch (e) {
       console.warn('Storage wipe notice:', e);
     }
@@ -708,18 +746,15 @@ class DataService {
           (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
         );
 
-        // Filter duplicate Sarah Lin greeting messages
-        let greetingSeen = false;
+        // Unconditionally filter out automated greetings and canned bot messages
         const merged = sorted.filter((m) => {
-          const isGreeting =
-            (m.senderRole === 'agent' || m.senderId === 'usr_agent_1') &&
-            m.text &&
-            m.text.includes('Welcome to Swift Sweeps Support!');
-          if (isGreeting) {
-            if (greetingSeen) return false;
-            greetingSeen = true;
-          }
-          return true;
+          if (!m.text) return true;
+          const text = m.text.toLowerCase();
+          const isBotGreeting =
+            text.includes('welcome to swift sweeps support') ||
+            text.includes('treasury and gaming care specialists assist you today') ||
+            (m.senderName === 'Sarah Lin' && text.includes('welcome'));
+          return !isBotGreeting;
         });
 
         for (const cid of queryIds) {
@@ -4647,8 +4682,8 @@ class DataService {
         customerId,
         customerName: user.displayName || customerName,
         customerEmail: user.email,
-        assignedAgentId: 'usr_agent_1',
-        assignedAgentName: 'Sarah Lin',
+        assignedAgentId: null,
+        assignedAgentName: 'Live Support Desk',
         status: 'closed',
         lastMessageText: '',
         lastMessageTimestamp: new Date().toISOString(),
@@ -4721,10 +4756,10 @@ class DataService {
         customerId,
         customerName: user?.displayName || customerName,
         customerEmail: user?.email || `${customerId}@user.com`,
-        assignedAgentId: 'usr_agent_1',
-        assignedAgentName: 'Sarah Lin',
+        assignedAgentId: null,
+        assignedAgentName: 'Live Support Desk',
         status: 'open',
-        lastMessageText: 'Support channel initialized.',
+        lastMessageText: '',
         lastMessageTimestamp: new Date().toISOString(),
         unreadCountCustomer: 0,
         unreadCountStaff: 0,
@@ -4733,32 +4768,6 @@ class DataService {
       };
       list.unshift(conv);
       this.save(STORAGE_KEYS.CONVERSATIONS, list);
-
-      // Automated greeting policy: Strictly for brand-new accounts on initial registration only
-      const greetingFlagKey = `swiftsweeps_greeting_sent_${customerId}`;
-      const isAlreadySent = typeof localStorage !== 'undefined' && localStorage.getItem(greetingFlagKey) === 'true';
-      const isNewAccount = user?.createdAt
-        ? Date.now() - new Date(user.createdAt).getTime() < 1000 * 60 * 15
-        : false;
-
-      const allMsgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-      const existingUserMsgs = allMsgs[canonicalId] || [];
-
-      if (!isAlreadySent && isNewAccount && existingUserMsgs.length === 0) {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem(greetingFlagKey, 'true');
-        }
-        this.sendChatMessage({
-          conversationId: conv.id,
-          senderId: 'usr_agent_1',
-          senderName: 'Sarah Lin',
-          senderRole: 'agent',
-          text: 'Welcome to Swift Sweeps Support! How can our treasury and gaming care specialists assist you today?',
-          isInternalNote: false,
-        });
-      } else if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(greetingFlagKey, 'true');
-      }
     }
 
     // Ensure conversation is immediately recorded in Supabase PostgreSQL
@@ -4790,20 +4799,15 @@ class DataService {
     const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
     const rawList = all[targetId] || all[conversationId] || [];
 
-    // Filter out duplicate greeting messages from chat history
-    let greetingSeen = false;
+    // Unconditionally filter out automated greetings and canned bot messages
     return rawList.filter((m) => {
-      const isGreeting =
-        (m.senderRole === 'agent' || m.senderId === 'usr_agent_1') &&
-        m.text &&
-        m.text.includes('Welcome to Swift Sweeps Support!');
-      if (isGreeting) {
-        if (greetingSeen) {
-          return false;
-        }
-        greetingSeen = true;
-      }
-      return true;
+      if (!m.text) return true;
+      const text = m.text.toLowerCase();
+      const isBotGreeting =
+        text.includes('welcome to swift sweeps support') ||
+        text.includes('treasury and gaming care specialists assist you today') ||
+        (m.senderName === 'Sarah Lin' && text.includes('welcome'));
+      return !isBotGreeting;
     });
   }
 

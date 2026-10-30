@@ -297,7 +297,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               <span className="text-[10px] text-emerald-400 font-mono hidden sm:inline">Operator Live</span>
             </div>
             <div className="text-[10px] sm:text-[11px] text-slate-400">
-              Specialist: {conversation?.assignedAgentName || 'Sarah Lin (Treasury Desk)'}
+              Specialist: {conversation?.assignedAgentName || 'Live Support Desk'}
             </div>
           </div>
         </div>

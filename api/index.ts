@@ -555,7 +555,34 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  // 6. Health & Status
+  // 6. Support Desk Bot Greeting Purge Endpoint (Vercel Serverless)
+  if (url.includes('/api/support/purge-bot-greetings') && (req.method === 'POST' || req.method === 'GET')) {
+    try {
+      const { data: botMsgs, error: queryErr } = await supabaseAdmin
+        .from('messages')
+        .select('id, content')
+        .or('content.ilike.%Welcome to Swift Sweeps Support%,content.ilike.%treasury and gaming care specialists assist you today%');
+
+      if (queryErr) {
+        return res.status(500).json({ error: queryErr.message });
+      }
+
+      const count = botMsgs?.length || 0;
+      if (count > 0) {
+        const ids = botMsgs.map((m: any) => m.id);
+        const { error: delErr } = await supabaseAdmin.from('messages').delete().in('id', ids);
+        if (delErr) {
+          return res.status(500).json({ error: delErr.message });
+        }
+      }
+
+      return res.status(200).json({ success: true, purgedCount: count });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to purge bot greetings' });
+    }
+  }
+
+  // 7. Health & Status
   if (url.includes('/api/status') || url.includes('/api/telegram/status') || url === '/api' || url === '/api/') {
     return res.status(200).json({
       online: true,
