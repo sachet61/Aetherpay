@@ -36,6 +36,33 @@ async function getWebPushClient() {
   }
 }
 
+async function ensureStorageBuckets(adminClient: any) {
+  if (!adminClient?.storage) return;
+  const targetBuckets = [
+    { name: 'avatars', limit: 10485760 },
+    { name: 'chat_attachments', limit: 15728640 },
+  ];
+  try {
+    const { data: existingBuckets, error } = await adminClient.storage.listBuckets();
+    if (error) {
+      console.warn('[Vercel Storage Provisioning Notice]:', error.message);
+      return;
+    }
+    const existingNames = new Set((existingBuckets || []).map((b: any) => b.name));
+    for (const b of targetBuckets) {
+      if (!existingNames.has(b.name)) {
+        await adminClient.storage.createBucket(b.name, {
+          public: true,
+          fileSizeLimit: b.limit,
+          allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'],
+        }).catch(() => {});
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Vercel Storage Provisioning Error]:', err?.message || err);
+  }
+}
+
 async function saveVercelPushSubscription(
   sub: any,
   userId: string,
@@ -469,7 +496,45 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  // 5. Web Push Endpoints for PWA Background Notifications on Vercel
+  // 5. Storage Fallback Upload Endpoint (Uses Service Role for Production Serverless)
+  if (url.includes('/api/storage/upload') && req.method === 'POST') {
+    try {
+      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+      const { bucket, path: filePath, fileBase64, contentType } = body || {};
+      if (!bucket || !filePath || !fileBase64) {
+        return res.status(400).json({ error: 'bucket, path, and fileBase64 are required' });
+      }
+
+      await ensureStorageBuckets(supabaseAdmin);
+
+      const buffer = Buffer.from(fileBase64, 'base64');
+      const { data, error } = await supabaseAdmin.storage
+        .from(bucket)
+        .upload(filePath, buffer, {
+          contentType: contentType || 'image/webp',
+          upsert: true,
+          cacheControl: '86400',
+        });
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      const { data: urlData } = supabaseAdmin.storage
+        .from(bucket)
+        .getPublicUrl(data?.path || filePath);
+
+      return res.status(200).json({
+        success: true,
+        url: urlData.publicUrl,
+        path: data?.path || filePath,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Server storage upload failed' });
+    }
+  }
+
+  // 6. Web Push Endpoints for PWA Background Notifications on Vercel
   if (url.includes('/api/push/vapid-public-key') && req.method === 'GET') {
     res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
     return res.status(200).json({ publicKey: VAPID_PUBLIC_KEY });

@@ -1,6 +1,6 @@
 {
-  "summary":  "Revised implementation plan removing KYC documents and webhook processing. Focuses exclusively on Supabase Storage for real chat image attachments and top-up screenshots, Profile Picture Avatar upload with WebP image transformations, and API Edge Caching for heavily queried endpoints, ensuring 100% compatibility with the live production server.",
-  "updatedAt":  "2026-10-30T08:09:33.883851332Z",
+  "summary":  "Detailed root cause analysis and architectural plan to resolve the 'Bucket not found' error during avatar and chat uploads. Includes automated service-role bucket provisioning, a secure server upload fallback route (/api/storage/upload) with auto-retry, and step-by-step manual Supabase Dashboard instructions for complete production readiness.",
+  "updatedAt":  "2026-10-30T08:39:21.358259654Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

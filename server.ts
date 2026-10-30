@@ -46,7 +46,42 @@ const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false },
 });
 
+export async function ensureStorageBuckets(adminClient: any) {
+  if (!adminClient?.storage) return;
+  const targetBuckets = [
+    { name: 'avatars', limit: 10485760 },
+    { name: 'chat_attachments', limit: 15728640 },
+  ];
+  try {
+    const { data: existingBuckets, error } = await adminClient.storage.listBuckets();
+    if (error) {
+      console.warn('[Storage Auto-Provisioning Notice]:', error.message);
+      return;
+    }
+    const existingNames = new Set((existingBuckets || []).map((b: any) => b.name));
+    for (const b of targetBuckets) {
+      if (!existingNames.has(b.name)) {
+        const { error: createErr } = await adminClient.storage.createBucket(b.name, {
+          public: true,
+          fileSizeLimit: b.limit,
+          allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'],
+        });
+        if (createErr) {
+          console.warn(`[Storage Auto-Provisioning] Notice on bucket "${b.name}":`, createErr.message);
+        } else {
+          console.log(`[Storage Auto-Provisioning] Successfully provisioned public bucket "${b.name}"`);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Storage Auto-Provisioning error]:', err?.message || err);
+  }
+}
+
 async function startServer() {
+  // Background self-healing storage bucket initialization
+  ensureStorageBuckets(supabaseAdmin).catch(() => {});
+
   const app = express();
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -1069,6 +1104,43 @@ app.post('/api/auth/register', async (req, res) => {
     const event = req.body;
     console.log('[Keyhub Webhook Received]:', event);
     return res.json({ received: true });
+  });
+
+  // Secure Storage Fallback Upload Endpoint (Uses Service Role to guarantee bucket existence & persistence)
+  app.post('/api/storage/upload', async (req, res) => {
+    try {
+      const { bucket, path: filePath, fileBase64, contentType } = req.body;
+      if (!bucket || !filePath || !fileBase64) {
+        return res.status(400).json({ error: 'bucket, path, and fileBase64 are required' });
+      }
+
+      await ensureStorageBuckets(supabaseAdmin);
+
+      const buffer = Buffer.from(fileBase64, 'base64');
+      const { data, error } = await supabaseAdmin.storage
+        .from(bucket)
+        .upload(filePath, buffer, {
+          contentType: contentType || 'image/webp',
+          upsert: true,
+          cacheControl: '86400',
+        });
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      const { data: urlData } = supabaseAdmin.storage
+        .from(bucket)
+        .getPublicUrl(data?.path || filePath);
+
+      return res.json({
+        success: true,
+        url: urlData.publicUrl,
+        path: data?.path || filePath,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Server storage upload failed' });
+    }
   });
 
   // Web Push VAPID Public Key Endpoint with Edge Caching

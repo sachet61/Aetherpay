@@ -1,121 +1,143 @@
-# Implementation Plan: Supabase Storage for Chat Image Attachments, Avatar Transformations & Edge Caching
+# Implementation Plan: Fix "Bucket Not Found" Error During Avatar & Chat Uploads
 
 ## User Directive
-> "I donot want to add ky documens, and webhook processing. Come up with a plan first and prompt me to proceed or not. Make sure that fix is compatible with live production server too."
+> "Bucket not found during avatar upload. Come up with a plan first and prompt me to proceed or not. Make sure that fix is compatible with live production server too."
+> User Confirmation:
+> 1. Provide step-by-step instructions on what to do to make bucket provisioning possible.
+> 2. Implement automated fallback to secure server storage endpoint with automatic retry.
 
 ---
 
-## 1. Overview & Scope Clarification
+## 1. Root Cause Diagnosis
 
-In accordance with your instructions, **KYC document uploading** and **payment webhook processing** have been completely excluded.
-
-The implementation strictly upgrades existing features across your app using Supabase:
-1. **Real Chat Image Attachments & Top-Up Proofs** (`CustomerChat.tsx`, `AdminChat.tsx`, `CustomerTopUp.tsx`):
-   - Replace the static demo receipt placeholder (`handleAttachDemoReceipt`) with a real file picker wired directly to **Supabase Storage** (`chat_attachments` bucket).
-   - In `CustomerTopUp.tsx`, replace raw base64 data URLs with direct uploads to Supabase Storage, saving real URLs in `receiptUrl`.
-2. **Profile Avatar with On-The-Fly WebP Transformations** (`CustomerProfile.tsx`, `types/index.ts`):
-   - Hook into the existing `currentUser.avatarUrl` field.
-   - Allow players to upload their profile photo directly to the `avatars` bucket in Supabase Storage.
-   - Apply on-the-fly Supabase Storage CDN transformations (`?width=160&height=160&format=webp&quality=80`) and client-side Canvas WebP pre-compression.
-3. **Supabase API Edge Caching for High-Traffic Endpoints**:
-   - Add Edge Cache HTTP headers (`Cache-Control: public, s-maxage=300, stale-while-revalidate=600`) to existing heavily queried endpoints in both `server.ts` and `api/index.ts`.
+### A. Client-Side Anon Key Limitations in Supabase Storage
+1. **Forbidden Bucket Creation on Client**:
+   - In `src/services/storageService.ts`, `ensureBucket()` called `supabase.storage.createBucket('avatars', { public: true })` directly from the browser using the public anonymous key (`VITE_SUPABASE_ANON_KEY`).
+   - In Supabase, **storage bucket creation is an administrative operation** restricted to users with `service_role` privileges or project owners. Calling `createBucket()` with the anon key fails with a 403 Forbidden error.
+2. **Missing Bucket in Storage Schema**:
+   - Because client-side creation failed silently, the `avatars` bucket was never created on the Supabase project.
+   - When `supabase.storage.from('avatars').upload(...)` was invoked, Supabase PostgREST returned: `Bucket not found` (HTTP 404).
 
 ---
 
-## 2. System Architecture & Flow Diagram
+## 2. Architectural Solution
+
+We implement a two-pronged solution ensuring 100% reliability in development and live production:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        Existing React SPA                              │
+│                        Vite + React Client (SPA)                       │
 │                                                                        │
-│  ┌───────────────────────┐  ┌────────────────────┐  ┌────────────────┐ │
-│  │ CustomerChat &        │  │ CustomerTopUp      │  │ CustomerProfile│ │
-│  │ AdminChat Paperclip   │  │ Screenshot Input   │  │ Avatar Picture │ │
-│  └───────────┬───────────┘  └──────────┬─────────┘  └────────┬───────┘ │
-└──────────────┼─────────────────────────┼─────────────────────┼─────────┘
-               │                         │                     │
-               ▼                         ▼                     ▼
+│  1. Attempt direct upload via Supabase Client                          │
+│  2. If "Bucket not found" (404) or RLS error (403):                    │
+│     Auto-fallback to: POST /api/storage/upload                         │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                 Client-Side WebP Canvas Pre-Compressor                 │
-│      (Scales photos and encodes to WebP before upload to save data)    │
-└────────────────────────────────────────┬───────────────────────────────┘
-                                         │
-                                         ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Live Supabase Storage                           │
+│         Backend Server with Service Role (server.ts & api/index.ts)    │
 │                                                                        │
-│  ┌─────────────────────────┐              ┌──────────────────────────┐ │
-│  │ chat_attachments        │              │ avatars                  │ │
-│  │ (Chat receipts, payment │              │ (Player profile photos   │ │
-│  │  proofs, image files)   │              │  with on-the-fly WebP)   │ │
-│  └─────────────────────────┘              └──────────────────────────┘ │
-└────────────────────────────────────────┬───────────────────────────────┘
-                                         │
-                                         ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│           Dual-Route Production Server (server.ts & api/index.ts)      │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ POST /api/storage/upload                                         │  │
+│  │ 1. Uses supabaseAdmin (SUPABASE_SERVICE_ROLE_KEY)                │  │
+│  │ 2. Checks if bucket exists; if not, creates bucket               │  │
+│  │    (avatars / chat_attachments) with public: true                │  │
+│  │ 3. Performs upload with service-role permissions                 │  │
+│  │ 4. Returns public CDN URL + WebP transformation parameters        │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
 │                                                                        │
-│  - Edge Caching HTTP Headers on public read endpoints:                 │
-│    Cache-Control: public, max-age=60, s-maxage=300,                    │
-│    stale-while-revalidate=600                                          │
-│  - Reduces direct database load and utilizes Cloudflare cached egress  │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ Automatic Startup Self-Healing:                                  │  │
+│  │ - Automatically runs initStorageBuckets() on server boot         │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Live Supabase PostgreSQL                        │
+│                                                                        │
+│  - storage.buckets: 'avatars', 'chat_attachments'                     │
+│  - storage.objects: public read policy enabled                         │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Implementation Steps
+## 3. Step-by-Step Instructions for Supabase Project Dashboard
 
-### Step 1: Storage Utility Service (`src/services/storageService.ts`)
-1. Create a dedicated storage service utilizing the existing Supabase client (`src/services/supabaseClient.ts`):
-   - `uploadChatAttachment(file: File, folderId: string)`:
-     - Pre-compresses image to WebP (max 1200px, quality 0.85).
-     - Uploads to `chat_attachments/${folderId}/${Date.now()}_${cleanFileName}.webp`.
-     - Returns public or signed URL for immediate rendering.
-   - `uploadAvatar(file: File, userId: string)`:
-     - Scales to 400x400 square and encodes to WebP (~35KB).
-     - Uploads to `avatars/${userId}/avatar.webp` with `upsert: true`.
-     - Returns transformed CDN URL:
-       `${publicUrl}?width=160&height=160&format=webp&quality=80`.
+If you prefer to configure the buckets directly in your Supabase Project Dashboard:
 
-### Step 2: Live Chat Image Attachments (`CustomerChat.tsx` & `AdminChat.tsx`)
-1. **In `CustomerChat.tsx`**:
-   - Replace `handleAttachDemoReceipt` with a hidden file input triggered by the paperclip button.
-   - When an image is selected, upload it via `storageService.uploadChatAttachment()`.
-   - Show an attachment preview chip above the input box with a remove (`X`) button.
-   - When sent, `attachmentUrl` and `attachmentName` are saved to the Supabase `messages` table and broadcasted in real time.
-   - Tapping an image in the chat stream opens a clean full-resolution preview lightbox.
-2. **In `AdminChat.tsx`**:
-   - Activate the paperclip button in the support agent reply box with the same storage upload flow, allowing staff to attach receipts, balance verification screenshots, or game account QR codes back to the player.
+### Step 1: Open Supabase Dashboard
+1. Go to [https://supabase.com/dashboard](https://supabase.com/dashboard) and select your project (`fsykihwprqdptrqapxxg`).
+2. Click on **Storage** in the left-hand navigation sidebar.
 
-### Step 3: Top-Up Screenshot Upload (`CustomerTopUp.tsx`)
-1. In `handleScreenshotChange`:
-   - Replace the large base64 DataURL (`FileReader.readAsDataURL`) with an immediate upload to `chat_attachments/${currentUser.id}/topup_${Date.now()}.webp`.
-   - Store the resulting Supabase Storage URL in `screenshotFile`.
-   - Reduces database payload size by 98% and prevents browser memory bloat on mobile devices.
+### Step 2: Create the `avatars` Bucket
+1. Click the **New bucket** button.
+2. Enter Name: `avatars`
+3. Toggle **Public bucket** to **ON** (so user avatars can be loaded by the web app and CDN).
+4. Click **Save bucket**.
 
-### Step 4: Profile Avatar with WebP Compression (`CustomerProfile.tsx`)
-1. On the user profile card (where the letter initial currently sits):
-   - Render `currentUser.avatarUrl` if present, falling back to the initial letter.
-   - Add a subtle camera/upload overlay on hover/tap.
-   - On selecting an image, compress to WebP, upload to `avatars`, and update `currentUser.avatarUrl` in Supabase `user_profiles` and local session state.
-   - Reflect the avatar instantly in the top navigation bar and user profile.
+### Step 3: Create the `chat_attachments` Bucket
+1. Click **New bucket**.
+2. Enter Name: `chat_attachments`
+3. Toggle **Public bucket** to **ON**.
+4. Click **Save bucket**.
 
-### Step 5: Edge Caching for Heavily Queried Endpoints (`server.ts` & `api/index.ts`)
-1. In `server.ts` (Express dev server on port 3000):
-   - Add `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600` on:
-     - `GET /api/game-accounts`
-     - `GET /api/push/vapid-public-key`
-     - `GET /api/push/status`
-2. In `api/index.ts` (Live Vercel serverless):
-   - Apply identical `res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600')` to ensure full production parity.
-   - Allows Cloudflare and Supabase edge nodes to serve cached responses for 5 minutes, dramatically reducing database egress and response latency.
+### Step 4 (Optional SQL Alternative): Run Storage Initialization Script
+Alternatively, navigate to the **SQL Editor** in your Supabase dashboard and run this single script:
+```sql
+-- 1. Insert avatars bucket if not exists
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('avatars', 'avatars', true, 10485760, ARRAY['image/png', 'image/jpeg', 'image/webp'])
+ON CONFLICT (id) DO NOTHING;
+
+-- 2. Insert chat_attachments bucket if not exists
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('chat_attachments', 'chat_attachments', true, 15728640, ARRAY['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+ON CONFLICT (id) DO NOTHING;
+
+-- 3. Enable public read access for both buckets
+CREATE POLICY "Public Read Avatars" ON storage.objects
+  FOR SELECT USING (bucket_id = 'avatars');
+
+CREATE POLICY "Public Read Chat Attachments" ON storage.objects
+  FOR SELECT USING (bucket_id = 'chat_attachments');
+
+-- 4. Enable insert access for authenticated & anonymous users
+CREATE POLICY "Allow Uploads Avatars" ON storage.objects
+  FOR INSERT WITH CHECK (bucket_id = 'avatars');
+
+CREATE POLICY "Allow Uploads Chat Attachments" ON storage.objects
+  FOR INSERT WITH CHECK (bucket_id = 'chat_attachments');
+```
 
 ---
 
-## 4. Verification & Production Invariants
+## 4. Implementation Steps in the Codebase
 
-1. **Zero KYC & Zero Webhook Additions**: Only chat attachments, top-up screenshots, profile avatars, and edge caching are modified.
-2. **Zero Mock Fallbacks**: Real file uploads to live Supabase Storage buckets.
-3. **Full Live Server Parity**: Exact identical changes in `server.ts` and `api/index.ts`.
-4. **Build & Lint Verification**: Verification via `compile_applet` and `lint_applet` with zero TypeScript errors.
+### Step 1: Automated Server Provisioning & Fallback Route (`server.ts` & `api/index.ts`)
+1. Create helper `ensureStorageBuckets(supabaseAdmin)`:
+   - Queries `supabaseAdmin.storage.listBuckets()`.
+   - If `avatars` or `chat_attachments` is missing, invokes `supabaseAdmin.storage.createBucket(...)` with `public: true`.
+2. Add endpoint `POST /api/storage/upload`:
+   - Accepts multipart/form-data or base64 JSON payload (`bucket`, `path`, `fileData`, `contentType`).
+   - Uses `supabaseAdmin.storage` to ensure bucket existence and upload the file.
+   - Returns `{ success: true, url: publicUrl }`.
+   - Implemented identically in both `server.ts` (Express dev) and `api/index.ts` (Vercel serverless).
+
+### Step 2: Client Self-Healing Fallback (`src/services/storageService.ts`)
+1. In `uploadAvatar` and `uploadChatAttachment`:
+   - Attempt direct client upload to Supabase first.
+   - If it succeeds, return the URL immediately.
+   - If it throws or returns `Bucket not found` (or any 400/403/404):
+     - Seamlessly send the compressed image to `POST /api/storage/upload`.
+     - The backend uses `supabaseAdmin` to auto-create the bucket and persist the file.
+     - Return the verified CDN URL back to the caller.
+   - Result: **Zero errors displayed to the user**, even before the buckets are manually created in the dashboard!
+
+---
+
+## 5. Verification Plan
+1. **Self-Healing Test**: Trigger avatar upload when bucket is initially absent. Confirm the server auto-provisions the bucket and returns HTTP 200 with the active URL.
+2. **Transformations Test**: Confirm the avatar renders with `?width=160&height=160&format=webp&quality=80`.
+3. **Parity Check**: Verify compilation with `compile_applet` and `lint_applet`.
