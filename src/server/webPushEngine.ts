@@ -110,13 +110,30 @@ export async function getSubscriptionsForUser(
 ): Promise<StoredPushSubscription[]> {
   const result: StoredPushSubscription[] = [];
   const seenEndpoints = new Set<string>();
+  const isStaffTarget =
+    targetUserId === 'staff' ||
+    targetRole === 'agent' ||
+    targetRole === 'admin' ||
+    targetUserId === 'admin' ||
+    targetUserId === 'agent';
 
-  // Check in-memory first
+  const matchesFilter = (item: StoredPushSubscription) => {
+    if (!item || !item.subscription?.endpoint) return false;
+    if (isStaffTarget && (item.userRole === 'agent' || item.userRole === 'admin')) {
+      return true;
+    }
+    if (targetUserId && item.userId === targetUserId) {
+      return true;
+    }
+    if (targetRole && item.userRole === targetRole) {
+      return true;
+    }
+    return false;
+  };
+
+  // 1. Check in-memory first
   for (const item of inMemorySubscriptions.values()) {
-    if (
-      (targetUserId && item.userId === targetUserId) ||
-      (targetRole && item.userRole === targetRole)
-    ) {
+    if (matchesFilter(item)) {
       if (!seenEndpoints.has(item.subscription.endpoint)) {
         seenEndpoints.add(item.subscription.endpoint);
         result.push(item);
@@ -124,7 +141,7 @@ export async function getSubscriptionsForUser(
     }
   }
 
-  // Load from Supabase app_config (or push_subscriptions table)
+  // 2. Load from Supabase (app_config and push_subscriptions table)
   if (supabaseAdmin) {
     try {
       const { data: configRow } = await supabaseAdmin
@@ -135,14 +152,39 @@ export async function getSubscriptionsForUser(
 
       if (configRow?.data && Array.isArray(configRow.data)) {
         for (const item of configRow.data) {
-          if (
-            (targetUserId && item.userId === targetUserId) ||
-            (targetRole && item.userRole === targetRole)
-          ) {
+          if (matchesFilter(item)) {
             if (!seenEndpoints.has(item.subscription?.endpoint)) {
               seenEndpoints.add(item.subscription.endpoint);
               result.push(item);
             }
+          }
+        }
+      }
+
+      // Also query push_subscriptions table if present
+      const query = supabaseAdmin.from('push_subscriptions').select('*');
+      if (!isStaffTarget && targetUserId) {
+        query.eq('user_id', targetUserId);
+      }
+      const { data: dbRows } = await query.limit(50);
+      if (dbRows && Array.isArray(dbRows)) {
+        for (const row of dbRows) {
+          if (row.endpoint && row.p256dh && row.auth && !seenEndpoints.has(row.endpoint)) {
+            seenEndpoints.add(row.endpoint);
+            result.push({
+              id: row.id || `push_${row.user_id}`,
+              userId: row.user_id,
+              userRole: row.user_role || 'customer',
+              subscription: {
+                endpoint: row.endpoint,
+                keys: {
+                  p256dh: row.p256dh,
+                  auth: row.auth,
+                },
+              },
+              createdAt: row.created_at || new Date().toISOString(),
+              updatedAt: row.updated_at || new Date().toISOString(),
+            });
           }
         }
       }
@@ -180,7 +222,7 @@ export async function sendPushNotification(
   const pushString = JSON.stringify({
     title: payload.title,
     body: payload.body,
-    icon: payload.icon || '/favicon.png',
+    icon: payload.icon || '/pwa-192x192.png',
     badge: payload.badge || '/favicon.png',
     tag: payload.tag || `msg_${Date.now()}`,
     data: {
@@ -194,6 +236,10 @@ export async function sendPushNotification(
       try {
         await webpush.sendNotification(record.subscription as any, pushString, {
           TTL: 60 * 60 * 24, // 24 hours
+          urgency: 'high',
+          headers: {
+            Urgency: 'high',
+          },
         });
         sent++;
       } catch (err: any) {

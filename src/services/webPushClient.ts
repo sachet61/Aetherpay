@@ -12,9 +12,35 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
   return outputArray;
 }
 
+export type DevicePlatform = 'android' | 'ios' | 'desktop';
+
 class WebPushClient {
   private swRegistration: ServiceWorkerRegistration | null = null;
   private isSubscribing = false;
+
+  public getDevicePlatform(): DevicePlatform {
+    if (typeof window === 'undefined') return 'desktop';
+    const ua = navigator.userAgent.toLowerCase();
+    if (/iphone|ipad|ipod/.test(ua)) return 'ios';
+    if (/android/.test(ua)) return 'android';
+    return 'desktop';
+  }
+
+  public isIOS(): boolean {
+    return this.getDevicePlatform() === 'ios';
+  }
+
+  public isAndroid(): boolean {
+    return this.getDevicePlatform() === 'android';
+  }
+
+  public isStandalone(): boolean {
+    if (typeof window === 'undefined') return false;
+    return (
+      window.matchMedia('(display-mode: standalone)').matches ||
+      (window.navigator as unknown as { standalone?: boolean }).standalone === true
+    );
+  }
 
   public async registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
     if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
@@ -54,12 +80,32 @@ class WebPushClient {
     return Notification.permission;
   }
 
+  public async hasActiveSubscription(): Promise<boolean> {
+    if (!this.isPushSupported()) return false;
+    try {
+      const reg = await this.getRegistration();
+      if (!reg) return false;
+      const sub = await reg.pushManager.getSubscription();
+      return !!sub;
+    } catch {
+      return false;
+    }
+  }
+
   public async subscribeToPushNotifications(currentUser: UserProfile): Promise<{
     success: boolean;
     error?: string;
   }> {
     if (!this.isPushSupported()) {
       return { success: false, error: 'Push notifications are not supported by this browser.' };
+    }
+
+    // On iOS Safari, Web Push is only supported once added to Home Screen as PWA
+    if (this.isIOS() && !this.isStandalone()) {
+      return {
+        success: false,
+        error: 'On iPhone and iPad, please first tap Share [↑] and "Add to Home Screen" to enable background alerts.',
+      };
     }
 
     if (this.isSubscribing) {
@@ -116,6 +162,7 @@ class WebPushClient {
           subscription,
           userId: currentUser.id,
           userRole: currentUser.role,
+          platform: this.getDevicePlatform(),
         }),
       });
 
@@ -128,13 +175,42 @@ class WebPushClient {
     }
   }
 
-  // Trigger push alert dispatch when a user sends a chat message
-  public async notifyRecipientViaPush(params: {
+  // Auto-sync existing subscription to server when permission is granted
+  public async autoSyncIfGranted(currentUser: UserProfile): Promise<void> {
+    if (typeof window === 'undefined' || !this.isPushSupported()) return;
+    if (Notification.permission !== 'granted') return;
+
+    try {
+      const reg = await this.getRegistration();
+      if (!reg) return;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await fetch('/api/push/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subscription: sub,
+            userId: currentUser.id,
+            userRole: currentUser.role,
+            platform: this.getDevicePlatform(),
+          }),
+        });
+      }
+    } catch {
+      // Non-blocking sync
+    }
+  }
+
+  // Trigger high-priority push alert dispatch
+  public async dispatchPushAlert(params: {
     recipientId: string;
     recipientRole?: string;
-    senderName: string;
-    messageText: string;
-    conversationId: string;
+    title: string;
+    body: string;
+    url?: string;
+    tag?: string;
+    conversationId?: string;
+    actionType?: 'chat' | 'payout' | 'deposit' | 'game';
   }): Promise<void> {
     try {
       await fetch('/api/push/notify', {
@@ -143,14 +219,63 @@ class WebPushClient {
         body: JSON.stringify({
           recipientId: params.recipientId,
           recipientRole: params.recipientRole,
-          title: `New message from ${params.senderName}`,
-          body: params.messageText.slice(0, 120),
-          url: `/#chat`,
+          title: params.title,
+          body: params.body.slice(0, 160),
+          url: params.url || '/#chat',
+          tag: params.tag || `alert_${params.actionType || 'msg'}_${Date.now()}`,
           conversationId: params.conversationId,
+          actionType: params.actionType,
         }),
       });
     } catch (e) {
       // Background push failures are non-blocking
+    }
+  }
+
+  // Trigger push alert dispatch when a user sends a chat message
+  public async notifyRecipientViaPush(params: {
+    recipientId: string;
+    recipientRole?: string;
+    senderName: string;
+    messageText: string;
+    conversationId: string;
+  }): Promise<void> {
+    return this.dispatchPushAlert({
+      recipientId: params.recipientId,
+      recipientRole: params.recipientRole,
+      title: `Swift Sweeps: ${params.senderName}`,
+      body: params.messageText,
+      url: `/#chat`,
+      tag: `chat_${params.conversationId}`,
+      conversationId: params.conversationId,
+      actionType: 'chat',
+    });
+  }
+
+  // Trigger a test alert directly to the current user's device
+  public async sendTestAlert(currentUser: UserProfile): Promise<{ success: boolean; message: string }> {
+    try {
+      const res = await fetch('/api/push/notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recipientId: currentUser.id,
+          recipientRole: currentUser.role,
+          title: 'Swift Sweeps Support',
+          body: 'Test alert: Background notification received with sound & vibration!',
+          url: '/#chat',
+          tag: `test_${Date.now()}`,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.sent > 0) {
+        return { success: true, message: `Notification sent! (${data.sent} device reached)` };
+      } else if (res.ok && data.sent === 0) {
+        return { success: false, message: 'No registered devices found. Please enable notifications first.' };
+      }
+      return { success: false, message: data.error || 'Failed to dispatch test notification' };
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'Network error sending test alert' };
     }
   }
 }

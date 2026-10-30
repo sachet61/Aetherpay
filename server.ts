@@ -1093,22 +1093,47 @@ app.post('/api/auth/register', async (req, res) => {
   // Web Push Dispatch Notification Endpoint
   app.post('/api/push/notify', async (req, res) => {
     try {
-      const { recipientId, recipientRole, title, body, url, tag, conversationId } = req.body;
+      const { recipientId, recipientRole, title, body, url, tag, conversationId, actionType } = req.body;
       const result = await sendPushNotification(
         recipientId,
         recipientRole,
         {
-          title: title || 'New Message',
-          body: body || 'You have received a new message.',
+          title: title || 'Swift Sweeps Support',
+          body: body || 'You have received a new notification.',
           url: url || '/#chat',
-          tag: tag || `chat_${conversationId || Date.now()}`,
-          data: { conversationId },
+          tag: tag || `swiftsweeps_${actionType || 'alert'}_${Date.now()}`,
+          data: { conversationId, actionType, url },
         },
         supabaseAdmin
       );
       return res.json({ success: true, ...result });
     } catch (e: any) {
       return res.status(500).json({ error: e?.message || 'Failed to dispatch push' });
+    }
+  });
+
+  // Test Push Notification Endpoint for Device Verification
+  app.post('/api/push/test', async (req, res) => {
+    try {
+      const { userId, userRole } = req.body;
+      if (!userId) {
+        return res.status(400).json({ error: 'User ID is required for testing' });
+      }
+      const result = await sendPushNotification(
+        userId,
+        userRole,
+        {
+          title: 'Swift Sweeps Notification Test',
+          body: 'Heads-up alert working in background with sound and vibration!',
+          url: '/#chat',
+          tag: `test_${Date.now()}`,
+          data: { test: true },
+        },
+        supabaseAdmin
+      );
+      return res.json({ success: true, ...result });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message || 'Test push dispatch failed' });
     }
   });
 

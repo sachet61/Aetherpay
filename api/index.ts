@@ -93,17 +93,21 @@ async function sendVercelPushNotification(
       .maybeSingle();
 
     const subs: any[] = Array.isArray(configRow?.data) ? configRow.data : [];
-    const targets = subs.filter((s: any) =>
-      (targetUserId && s.userId === targetUserId) ||
-      (targetRole && s.userRole === targetRole)
-    );
+    const isStaff = targetUserId === 'staff' || targetRole === 'agent' || targetRole === 'admin' || targetUserId === 'agent' || targetUserId === 'admin';
+    const targets = subs.filter((s: any) => {
+      if (!s || !s.subscription?.endpoint) return false;
+      if (isStaff && (s.userRole === 'agent' || s.userRole === 'admin')) return true;
+      if (targetUserId && s.userId === targetUserId) return true;
+      if (targetRole && s.userRole === targetRole) return true;
+      return false;
+    });
 
     if (targets.length === 0) return { sent: 0, failed: 0 };
 
     const pushPayload = JSON.stringify({
       title: payload.title || 'Swift Sweeps Support',
       body: payload.body || 'You have a new message.',
-      icon: payload.icon || '/favicon.png',
+      icon: payload.icon || '/pwa-192x192.png',
       badge: payload.badge || '/favicon.png',
       tag: payload.tag || `chat_${Date.now()}`,
       data: payload.data || {},
@@ -114,7 +118,11 @@ async function sendVercelPushNotification(
     await Promise.all(
       targets.map(async (t) => {
         try {
-          await wp.sendNotification(t.subscription, pushPayload, { TTL: 86400 });
+          await wp.sendNotification(t.subscription, pushPayload, {
+            TTL: 86400,
+            urgency: 'high',
+            headers: { Urgency: 'high' },
+          });
           sent++;
         } catch {
           failed++;

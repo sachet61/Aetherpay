@@ -3164,6 +3164,21 @@ class DataService {
       console.warn('Top-up approval chat dispatch warning:', chatErr);
     }
 
+    // High-priority Web Push Notification to customer phone / PWA (Messenger style)
+    if (typeof window !== 'undefined') {
+      webPushClient
+        .dispatchPushAlert({
+          recipientId: req.customerId,
+          recipientRole: 'customer',
+          title: '🎉 Deposit Approved & Loaded!',
+          body: `$${req.amount.toFixed(2)}${req.bonusAmount > 0 ? ` (+ $${req.bonusAmount.toFixed(2)} bonus = $${req.finalWalletCredit.toFixed(2)} total)` : ''} loaded to ${req.targetGameName || 'your game'}.`,
+          url: '/#games',
+          tag: `topup_${req.id}`,
+          actionType: 'deposit',
+        })
+        .catch(() => {});
+    }
+
     if (supabase && isSupabaseConfigured()) {
       supabase.from('topups').update({
         status: 'completed',
@@ -3525,8 +3540,35 @@ class DataService {
     // Sync chat transaction card in conversation thread
     if (params.newStatus === 'completed') {
       this.updateChatTransactionStatus(req.id, 'completed', params.reviewerName, params.note);
+      if (typeof window !== 'undefined') {
+        webPushClient
+          .dispatchPushAlert({
+            recipientId: req.customerId,
+            recipientRole: 'customer',
+            title: '💸 Payout Sent & Completed!',
+            body: `Your cashout of $${req.amount.toFixed(2)} has been sent! ${params.payoutReference ? `Ref: ${params.payoutReference}` : ''}`,
+            url: '/#wallet',
+            tag: `wdr_comp_${req.id}`,
+            actionType: 'payout',
+          })
+          .catch(() => {});
+      }
     } else if (params.newStatus === 'rejected' || params.newStatus === 'cancelled') {
       this.updateChatTransactionStatus(req.id, 'rejected', params.reviewerName, params.note);
+    } else if (params.newStatus === 'processing') {
+      if (typeof window !== 'undefined') {
+        webPushClient
+          .dispatchPushAlert({
+            recipientId: req.customerId,
+            recipientRole: 'customer',
+            title: '⏳ Cashout In Processing',
+            body: `Your cashout of $${req.amount.toFixed(2)} is being processed by the payout operator.`,
+            url: '/#wallet',
+            tag: `wdr_proc_${req.id}`,
+            actionType: 'payout',
+          })
+          .catch(() => {});
+      }
     }
 
     if (supabase && isSupabaseConfigured()) {
@@ -4062,6 +4104,20 @@ class DataService {
       type: 'game_account',
       linkTab: 'game_accounts',
     });
+
+    if (typeof window !== 'undefined') {
+      webPushClient
+        .dispatchPushAlert({
+          recipientId: acc.customerId,
+          recipientRole: 'customer',
+          title: '🔑 Game Credentials Assigned!',
+          body: `Your login for ${acc.gameName} is ready (Username: ${acc.username}). Tap to view and start playing!`,
+          url: '/#games',
+          tag: `game_acc_${acc.id}`,
+          actionType: 'game',
+        })
+        .catch(() => {});
+    }
 
     this.logAudit({
       actorId: params.reviewerId,

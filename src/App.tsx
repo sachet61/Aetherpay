@@ -13,6 +13,7 @@ import { SessionTimeoutWarningModal } from './components/common/SessionTimeoutWa
 import { StartupSplash } from './components/common/StartupSplash';
 import { LiveCashoutTicker } from './components/common/LiveCashoutTicker';
 import { GlobalChatNotificationManager } from './components/common/GlobalChatNotificationManager';
+import { BackgroundNotificationPrompt } from './components/common/BackgroundNotificationPrompt';
 
 
 // Customer Pages
@@ -304,6 +305,9 @@ export default function App() {
           {/* Continuous News-Style Horizontal Live Cashouts Marquee Ticker */}
           <LiveCashoutTicker />
         </div>
+
+        {/* Messenger-Style High-Priority Background Push Alert Prompt (Android & iOS PWA) */}
+        <BackgroundNotificationPrompt currentUser={currentUser} />
 
         {/* Main Content Viewport */}
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 w-full max-w-7xl mx-auto">

@@ -3,6 +3,8 @@ import { UserProfile, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
 import { authSessionService } from '../../services/authSessionService';
 import { EmailOtpModal } from '../../components/auth/EmailOtpModal';
+import { IOSPwaInstallModal } from '../../components/common/IOSPwaInstallModal';
+import { webPushClient } from '../../services/webPushClient';
 import {
   User,
   Shield,
@@ -14,6 +16,9 @@ import {
   KeyRound,
   CheckCircle2,
   ShieldCheck,
+  Bell,
+  BellRing,
+  Sparkles,
 } from 'lucide-react';
 
 interface CustomerProfileProps {
@@ -33,6 +38,47 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
 }) => {
   const [successNote, setSuccessNote] = useState<string | null>(null);
   const [showOtpModal, setShowOtpModal] = useState(false);
+  const [isPushActive, setIsPushActive] = useState<boolean>(false);
+  const [pushLoading, setPushLoading] = useState<boolean>(false);
+  const [pushStatusMsg, setPushStatusMsg] = useState<{ text: string; isError?: boolean } | null>(null);
+  const [showIOSGuide, setShowIOSGuide] = useState<boolean>(false);
+
+  React.useEffect(() => {
+    if (typeof window !== 'undefined' && webPushClient.isPushSupported()) {
+      webPushClient.hasActiveSubscription().then((active) => {
+        setIsPushActive(active || Notification.permission === 'granted');
+      });
+    }
+  }, []);
+
+  const handleEnablePush = async () => {
+    if (webPushClient.isIOS() && !webPushClient.isStandalone()) {
+      setShowIOSGuide(true);
+      return;
+    }
+    setPushLoading(true);
+    setPushStatusMsg(null);
+    const res = await webPushClient.subscribeToPushNotifications(currentUser);
+    setPushLoading(false);
+    if (res.success) {
+      setIsPushActive(true);
+      setPushStatusMsg({ text: 'Background alerts activated successfully!' });
+    } else {
+      setPushStatusMsg({ text: res.error || 'Failed to activate notifications', isError: true });
+    }
+  };
+
+  const handleTestPush = async () => {
+    setPushLoading(true);
+    setPushStatusMsg(null);
+    const res = await webPushClient.sendTestAlert(currentUser);
+    setPushLoading(false);
+    if (res.success) {
+      setPushStatusMsg({ text: 'Test alert sent! Check your notification bar / lockscreen.' });
+    } else {
+      setPushStatusMsg({ text: res.message, isError: true });
+    }
+  };
 
   const handleOtpSuccess = (updatedUser: UserProfile) => {
     setShowOtpModal(false);
@@ -163,6 +209,88 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Background Push Notifications Card */}
+      <div className="p-6 rounded-2xl border border-slate-800 bg-slate-900 shadow-xl space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-yellow-500 text-slate-950 flex items-center justify-center font-bold shrink-0 shadow-md shadow-amber-500/20">
+              <Bell className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-white">Background Push Notifications</h3>
+              <p className="text-xs text-slate-400">
+                Messenger-style heads-up alerts on Android &amp; iPhone even when app is closed
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span
+              className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
+                isPushActive
+                  ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800'
+                  : 'bg-amber-950/60 text-amber-400 border-amber-800'
+              }`}
+            >
+              {isPushActive ? 'Active 24/7' : 'Not Enabled'}
+            </span>
+          </div>
+        </div>
+
+        {pushStatusMsg && (
+          <div
+            className={`p-3 rounded-xl text-xs font-medium ${
+              pushStatusMsg.isError
+                ? 'bg-red-500/10 border border-red-500/20 text-red-400'
+                : 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+            }`}
+          >
+            {pushStatusMsg.text}
+          </div>
+        )}
+
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">
+          <p className="text-xs text-slate-400 leading-relaxed">
+            Delivers instant alerts with sound and vibration for chat replies, payout approvals, deposit credits, and gaming credentials.
+          </p>
+
+          <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+            {isPushActive ? (
+              <button
+                type="button"
+                onClick={handleTestPush}
+                disabled={pushLoading}
+                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-400 text-xs font-bold transition flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>{pushLoading ? 'Sending...' : 'Send Test Alert'}</span>
+              </button>
+            ) : webPushClient.isIOS() && !webPushClient.isStandalone() ? (
+              <button
+                type="button"
+                onClick={() => setShowIOSGuide(true)}
+                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 text-xs font-bold hover:brightness-110 transition flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20 active:scale-95"
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                <span>iPhone Setup Guide</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleEnablePush}
+                disabled={pushLoading}
+                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 text-xs font-bold hover:brightness-110 transition flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20 active:scale-95 disabled:opacity-50"
+              >
+                <BellRing className="w-3.5 h-3.5" />
+                <span>{pushLoading ? 'Activating...' : 'Turn On Alerts'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <IOSPwaInstallModal isOpen={showIOSGuide} onClose={() => setShowIOSGuide(false)} />
 
       {showOtpModal && (
         <EmailOtpModal
