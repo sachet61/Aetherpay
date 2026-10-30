@@ -171,8 +171,8 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               senderName: row.sender_name,
               senderRole: row.sender_role,
               text: row.content || '',
-              attachmentUrl: row.attachment_url,
-              attachmentName: row.attachment_name,
+              attachmentUrl: row.attachment_url || row.transaction_data?.attachmentUrl || undefined,
+              attachmentName: row.attachment_name || row.transaction_data?.attachmentName || undefined,
               isInternalNote: false,
               transactionData: row.transaction_data,
               createdAt: row.created_at,
@@ -474,7 +474,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                     <p>{msg.text}</p>
 
                     {/* Forwarded Transaction Card with Dynamic Approval Status */}
-                    {msg.transactionData && (
+                    {msg.transactionData && msg.transactionData.transactionType && (
                       <ChatTransactionCard
                         transaction={msg.transactionData}
                         currentUserRole={currentUser.role}
@@ -489,7 +489,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                     )}
 
                     {/* Image Attachment preview */}
-                    {msg.attachmentUrl && !msg.transactionData && (
+                    {msg.attachmentUrl && (
                       <div
                         onClick={() =>
                           setLightboxImage({

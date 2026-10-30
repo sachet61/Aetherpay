@@ -242,6 +242,9 @@ export interface ChatTransactionData {
   approvedBy?: string;
   approvedAt?: string;
   notes?: string;
+  attachmentUrl?: string;
+  attachmentName?: string;
+  [key: string]: any;
 }
 
 export interface ChatMessage {

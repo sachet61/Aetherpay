@@ -1,186 +1,114 @@
-# Implementation Plan: Fix Profile Avatar Upload & Storage Persistence Across Live Production
+# Chat Photo Attachment Persistence & Refresh Resilience
 
-## User Directive
-> "https://supabase.com/docs/guides/storage there is guide for storage. Please profile avataar upload and storage not fixed. Come up with a plan first and prompt me to proceed or not. Make sure that fix is compatible with live production server too."
+## Title & Summary
+**Permanent Chat Photo Persistence Across Page Refresh & Live Production Synchronization**
+Chat photo attachments currently display immediately upon upload but disappear permanently after a browser refresh. This plan details the root cause diagnosis, dual-resilient PostgreSQL storage strategy (supporting both migrated and unmigrated live production databases), and end-to-end hydration updates across Customer and Admin chat interfaces.
 
 ---
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> **Production Architecture Confirmation**:
-> We will implement a resilient dual-channel storage strategy:
-> 1. **Direct Supabase Client Upload** with WebP compression for minimum latency.
-> 2. **Automatic Service-Role Server Fallback** (`POST /api/storage/upload`) with guaranteed bucket provisioning (`avatars` & `chat_attachments`) if direct upload encounters missing buckets or RLS restrictions.
-> 3. **Atomic Database Persistence** (`POST /api/user/avatar`) updating both PostgreSQL `public.users.avatar_url` and Supabase Auth `raw_user_meta_data.avatar_url` so uploaded avatars are permanent and never lost on reload.
-> 4. **Supabase SQL Editor Ready Script** added to `supabase_schema.sql` and `public/supabase_schema.sql` containing idempotent `storage.buckets` insertion and `storage.objects` RLS policies.
+> The primary database schema currently lacks `attachment_url` and `attachment_name` columns in `public.messages`. If an application relies solely on a column that might not yet exist on a live Supabase production instance, PostgREST will reject the upsert with error `42703` (column does not exist).
+> 
+> To ensure **100% live production compatibility without downtime**, we implement a **Dual-Resilient Persistence Architecture**:
+> 1. Store attachment metadata in both the native columns (`attachment_url`, `attachment_name`) and the existing, production-active `transaction_data` JSONB column (`transaction_data.attachmentUrl`, `transaction_data.attachmentName`).
+> 2. Implement resilient fallback in `sendChatMessage`: if the database rejects `attachment_url` with column-not-found, gracefully fallback to the `transaction_data` payload.
+> 3. Read symmetrically: resolve attachments as `row.attachment_url || row.transaction_data?.attachmentUrl`.
 
 ---
 
-## 1. Root Cause Diagnosis
-
-After profiling `CustomerProfile.tsx`, `storageService.ts`, `dataService.ts`, `supabaseAuthService.ts`, `server.ts`, `api/index.ts`, and `supabase_schema.sql`, five core defects prevent avatar upload and persistence:
-
-1. **Storage Bucket & Policy Absence in Supabase Schema**:
-   - `supabase_schema.sql` and `public/supabase_schema.sql` have zero definitions for `storage.buckets` or `storage.objects` RLS policies.
-   - Without `storage.buckets` records or RLS policies on `storage.objects`, client direct uploads fail with `Bucket not found` (404) or `new row violates row-level security policy for table "objects"` (403).
-
-2. **Avatar URL Dropped During Database Persistence**:
-   - In `CustomerProfile.tsx`, after `storageService.uploadAvatar()` returns a URL, it calls `dataService.registerUser(updatedUser)`.
-   - In `dataService.ts`, the parameter interface of `registerUser` **completely omits `avatarUrl`**, and the function body never sets `existing.avatarUrl`.
-   - Crucially, neither `dataService.registerUser` nor `CustomerProfile.tsx` executes an SQL update query (`supabase.from('users').update({ avatar_url: ... })`), so PostgreSQL never receives the new avatar URL!
-
-3. **Avatar Wiped on Page Reload & Session Auth Events**:
-   - In `supabaseAuthService.ts` (`onAuthStateChange` and startup `getSession()`), when `userProfile` is hydrated or synchronized from `dbUser`, `dbUser.avatar_url` is completely omitted.
-   - Any tab reload, token refresh, or delta sync immediately resets the player's in-memory `avatarUrl` back to null/empty because the database was never updated.
-
-4. **Missing Dedicated Server Endpoint for Profile Avatar Updates**:
-   - Neither `server.ts` (Express dev/production) nor `api/index.ts` (Vercel serverless) provides an endpoint to update user profile pictures using service-role privileges (`supabaseAdmin`).
-
-5. **UI Rendering Gaps**:
-   - While `CustomerProfile.tsx` displays an avatar if present, `RoleSwitcher.tsx` (Top Navbar user menu) and `AdminUsers.tsx` (Staff User Directory) render generic fallback initial letters instead of the uploaded avatar image.
+## 1. Overview & Core Concept
+- **What It Does**: Ensures that any image/photo uploaded by a customer or staff member in chat remains permanently stored, attached to the message record in PostgreSQL, and instantly restored upon page refresh, browser restart, or cross-device session switch.
+- **Target Audience**: Customers uploading receipts/verification screenshots and Support/Treasury staff reviewing payment proofs and game account credentials.
+- **Key Value**: Eliminates lost transaction proofs, avoids asking customers to re-upload receipts, and prevents support friction.
 
 ---
 
-## 2. Technical Architecture & Data Flow
+## 2. User Experience & Visual Design
+- **Upload Flow**: 
+  1. Customer or Admin selects an image (JPEG, PNG, WebP).
+  2. Client auto-compresses to WebP (max 1200px) and uploads to Supabase Storage bucket `chat_attachments` (with server-side fallback).
+  3. Instant optimistic render in the message stream with thumbnail, filename, and full-screen lightbox preview trigger.
+- **Post-Refresh Experience**:
+  1. User reloads browser (`F5` / `Cmd+R`) or switches tabs.
+  2. `fetchMessagesForConversation` queries PostgreSQL `public.messages`.
+  3. Messages hydrate with `attachmentUrl` intact; thumbnails render immediately with zero flicker or broken image placeholders.
+  4. Lightbox modal opens high-resolution image smoothly on click.
 
+---
+
+## 3. Key Product Decisions & Trade-Offs
+
+- **Decision 1: Dual-Resilient Storage (Native Column + JSONB Payload)**
+  - *Chosen Approach*: Write `attachment_url` and `attachment_name` as explicit columns while simultaneously mirroring them in the existing `transaction_data` JSONB field.
+  - *Why*: Existing production Supabase tables may not immediately receive `ALTER TABLE` DDL execution until an administrator runs migrations. The `transaction_data` JSONB column is already present and active across all live production tables. By writing to both and falling back gracefully on `42703`, photos will persist permanently today even on unmigrated live instances.
+  - *Alternatives Considered*: Native column only (fails on live production if DDL is delayed); JSONB only (lacks clean indexed queryability and direct SQL inspection).
+
+- **Decision 2: Universal Hydration Fallback**
+  - *Chosen Approach*: `row.attachment_url || row.transaction_data?.attachmentUrl || undefined` across all readers (`fetchMessagesForConversation`, `fetchOlderMessages`, `applyMessageRows`, `db_chat` Supabase Realtime listeners).
+  - *Why*: Guarantees backward compatibility for existing records and future-proofs any newly inserted messages.
+
+---
+
+## 4. Technical Architecture & Data Strategy
+
+### System Flow Diagram
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                      Customer Profile UI (React)                       │
-│                                                                        │
-│  1. File Selected (PNG, JPEG, WebP)                                    │
-│  2. Client-Side WebP Compression (400x400 max, 88% quality)            │
-│  3. storageService.uploadAvatar()                                      │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-                ┌───────────────────┴───────────────────┐
-                ▼                                       ▼
-    [Channel 1: Direct Client]              [Channel 2: Server Fallback]
-  supabase.storage.from('avatars')       POST /api/storage/upload
-  (Fast, CDN edge)                       (Uses SUPABASE_SERVICE_ROLE_KEY)
-                │                                       │
-                │ (If 403 RLS or 404)                   │
-                └───────────────► Auto-retry ───────────┘
-                                                        │
-                                                        ▼
-                                       ┌────────────────────────────────┐
-                                       │ Public CDN URL Generated       │
-                                       │ https://.../avatars/usr_...    │
-                                       └────────────────┬───────────────┘
-                                                        │
-                                                        ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                   Dual Database & Auth Persistence                     │
-│                                                                        │
-│  1. dataService.updateUserAvatar(userId, avatarUrl)                    │
-│  2. Client: supabase.from('users').update({ avatar_url })              │
-│  3. Server: POST /api/user/avatar (service role guaranteed)            │
-│     - Updates public.users.avatar_url                                  │
-│     - Updates auth.users.raw_user_meta_data.avatar_url                 │
-│  4. In-Memory Session + LocalStorage Cache Sync                        │
-│  5. Dispatch 'aetherpay_state_changed' ({ key: 'avatar_updated' })     │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                  Global UI Instant Realtime Sync                       │
-│  - CustomerProfile (Active Avatar + Camera overlay)                    │
-│  - TopNavbar & RoleSwitcher (Active profile thumbnail)                 │
-│  - AdminUsers Directory Table & Detail Modal (Live player image)       │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 3. Step-by-Step Implementation Strategy
-
-### Step 1: Storage Schema & RLS Policies (`supabase_schema.sql` & `public/supabase_schema.sql`)
-Add official Supabase Storage configuration to schema files:
-```sql
--- Storage Buckets Creation (Idempotent)
-INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-VALUES 
-  ('avatars', 'avatars', true, 10485760, ARRAY['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']),
-  ('chat_attachments', 'chat_attachments', true, 15728640, ARRAY['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'])
-ON CONFLICT (id) DO UPDATE SET
-  public = true,
-  file_size_limit = EXCLUDED.file_size_limit,
-  allowed_mime_types = EXCLUDED.allowed_mime_types;
-
--- RLS Policies on storage.objects for Public & Authenticated Access
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'objects' AND policyname = 'Public Access for Avatars and Chat') THEN
-    CREATE POLICY "Public Access for Avatars and Chat" ON storage.objects
-      FOR SELECT USING (bucket_id IN ('avatars', 'chat_attachments'));
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'objects' AND policyname = 'Allow Uploads to Avatars and Chat') THEN
-    CREATE POLICY "Allow Uploads to Avatars and Chat" ON storage.objects
-      FOR INSERT WITH CHECK (bucket_id IN ('avatars', 'chat_attachments'));
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'objects' AND policyname = 'Allow Updates to Avatars and Chat') THEN
-    CREATE POLICY "Allow Updates to Avatars and Chat" ON storage.objects
-      FOR UPDATE USING (bucket_id IN ('avatars', 'chat_attachments'));
-  END IF;
-END $$;
+┌─────────────────────────────────────────────────────────────┐
+│ CustomerChat / AdminChat                                    │
+│ 1. User selects image -> storageService.uploadChatAttachment │
+│ 2. Public Storage URL received:                             │
+│    https://<supabase-id>.supabase.co/storage/v1/object/...   │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ dataService.sendChatMessage                                 │
+│ Dual-Resilient Payload:                                     │
+│  - content: string                                          │
+│  - attachment_url: URL                                      │
+│  - attachment_name: Name                                    │
+│  - transaction_data: { ...data, attachmentUrl, attachmentName}
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            ▼                                     ▼
+┌──────────────────────────────┐    ┌──────────────────────────────┐
+│ Standard Upsert              │    │ Fallback Upsert (on 42703)   │
+│ Inserts with native columns  │    │ Omits missing column, keeps  │
+│ & transaction_data JSONB     │    │ transaction_data JSONB       │
+└──────────────────────────────┘    └──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ PostgreSQL: public.messages                                 │
+│ id | conversation_id | content | attachment_url | tx_data   │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            ▼ (On Refresh / Load)                 ▼ (Realtime Event)
+┌──────────────────────────────┐    ┌──────────────────────────────┐
+│ fetchMessagesForConversation │    │ postgres_changes on messages │
+│ Resolves:                    │    │ Resolves:                    │
+│ attachmentUrl =              │    │ attachmentUrl =              │
+│  col || tx_data.attachmentUrl│    │  col || tx_data.attachmentUrl│
+└──────────────────────────────┘    └──────────────────────────────┘
 ```
 
-### Step 2: Server Storage & Avatar Endpoints (`server.ts` & `api/index.ts`)
-1. **Ensure Bucket Auto-Provisioning**:
-   - In `ensureStorageBuckets(supabaseAdmin)`, create the buckets using `supabaseAdmin.storage.createBucket(...)` and verify connectivity on startup and inside upload requests.
-2. **Dedicated `/api/user/avatar` Endpoint**:
-   - Accepts `{ userId, avatarUrl }`.
-   - Uses `supabaseAdmin` to update `public.users.avatar_url`.
-   - Uses `supabaseAdmin.auth.admin.updateUserById(userId, { user_metadata: { avatar_url: avatarUrl } })` so Supabase Auth user metadata stays in sync.
-   - Return `{ success: true, avatarUrl }`.
-3. **Resilient `/api/storage/upload`**:
-   - Support uploading base64-encoded files directly to `avatars` or `chat_attachments` with standard WebP content-type and public URL generation.
-
-### Step 3: Data Layer & Auth Hydration (`dataService.ts` & `supabaseAuthService.ts`)
-1. **In `dataService.ts`**:
-   - Add `avatarUrl?: string;` to `registerUser` parameter types and ensure `existing.avatarUrl = params.avatarUrl` is updated.
-   - Add `updateUserAvatar(userId: string, avatarUrl: string): Promise<{ success: boolean; error?: string }>`:
-     - Updates in-memory `cache[STORAGE_KEYS.USERS]`.
-     - Calls `supabase.from('users').update({ avatar_url: avatarUrl, updated_at: new Date().toISOString() }).eq('id', userId)`.
-     - Calls `POST /api/user/avatar` as service-role fallback.
-     - Updates `authSessionService`.
-     - Dispatches `aetherpay_state_changed` with `{ key: 'avatar_updated', avatarUrl }`.
-   - In `initialCompactLoad` and `syncDelta`, ensure `dbUser.avatar_url` is synchronized into `local.avatarUrl`.
-2. **In `supabaseAuthService.ts`**:
-   - In `onAuthStateChange`, map `dbUser?.avatar_url || user.user_metadata?.avatar_url` to `userProfile.avatarUrl`.
-   - In `getSession()`, map `dbUser?.avatar_url` to `userProfile.avatarUrl`.
-
-### Step 4: Storage Service Refinement (`src/services/storageService.ts`)
-1. In `uploadAvatar`:
-   - Compress to 400x400 WebP.
-   - Attempt direct upload with `cacheControl: '86400'` and `upsert: true`.
-   - If direct upload fails, fallback to `/api/storage/upload`.
-   - Return clean public CDN URL (compatible with all Supabase tiers).
-
-### Step 5: UI Integration Across Components
-1. **`CustomerProfile.tsx`**:
-   - Use `dataService.updateUserAvatar(currentUser.id, res.url)`.
-   - Add visual feedback, spinner, and error dismissal.
-2. **`RoleSwitcher.tsx`**:
-   - Render `currentUser.avatarUrl` in the nav trigger button and the popup menu header when present, falling back to role icon / initials.
-3. **`AdminUsers.tsx`**:
-   - Render `u.avatarUrl` in table rows and in the user detail inspect drawer.
-
----
-
-## 4. Verification Plan
-
-1. **Compilation & Type Checking**:
-   - Run `compile_applet` and `lint_applet` to verify zero TypeScript errors or missing arguments.
-2. **Avatar Upload Test**:
-   - Upload profile picture in Customer Profile.
-   - Verify image compression to WebP.
-   - Verify storage in `avatars` bucket.
-   - Verify persistence in `public.users` table (`avatar_url`).
-   - Refresh page and verify avatar persists.
-3. **Cross-Component Rendering**:
-   - Verify avatar displays in TopNavbar `RoleSwitcher` and Admin `User Directory`.
-4. **Production Serverless Compatibility**:
-   - Verify both `server.ts` and `api/index.ts` have identical `/api/storage/upload` and `/api/user/avatar` handlers.
+### Proposed Execution Steps (Upon Proceed)
+1. **Schema & Migration Update**:
+   - Add `ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;` and `attachment_name TEXT;` to `/supabase_schema.sql` and `/public/supabase_schema.sql`.
+   - Update `CREATE TABLE IF NOT EXISTS public.messages` definition.
+2. **Server-Side Live Boot Migration (`server.ts` & `api/index.ts`)**:
+   - Execute safe non-blocking `ALTER TABLE IF NOT EXISTS` check using the Supabase Service Role client so production instances automatically adopt the new columns.
+3. **Data Service Core Engine (`src/services/dataService.ts`)**:
+   - In `sendChatMessage`: Include `attachment_url` and `attachment_name`, mirror inside `transaction_data`, and handle `42703` column error fallback.
+   - In `fetchMessagesForConversation`: Extract `attachmentUrl: row.attachment_url || row.transaction_data?.attachmentUrl || undefined`.
+   - In `fetchOlderMessages`: Extract attachment fields identically.
+   - In `applyMessageRows`: Extract attachment fields identically.
+4. **Chat View Realtime Synchronization (`CustomerChat.tsx` & `AdminChat.tsx`)**:
+   - Ensure the Realtime `postgres_changes` listener extracts `attachmentUrl` from `row.attachment_url || row.transaction_data?.attachmentUrl`.
+   - Verify lightbox modal and file preview component bindings.
+5. **Validation**:
+   - Run `lint_applet` (`tsc --noEmit`) and `compile_applet`.

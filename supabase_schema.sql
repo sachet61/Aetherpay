@@ -133,9 +133,14 @@ CREATE TABLE IF NOT EXISTS public.messages (
   sender_name TEXT NOT NULL,
   sender_role TEXT NOT NULL,
   content TEXT NOT NULL,
+  attachment_url TEXT,
+  attachment_name TEXT,
   transaction_data JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
+
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS attachment_name TEXT;
 
 -- 10. Notifications Table
 CREATE TABLE IF NOT EXISTS public.notifications (

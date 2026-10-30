@@ -1,6 +1,6 @@
 {
-  "summary":  "Comprehensive architectural plan to permanently fix profile avatar upload and storage persistence across development and live production server environments (Vite/Express and Vercel serverless), including Supabase Storage bucket provisioning, RLS policies, atomic database synchronization, and UI avatar rendering.",
-  "updatedAt":  "2026-10-30T09:20:42.320233689Z",
+  "summary":  "Architectural plan to permanently resolve chat photo attachment disappearance on page refresh. Fixes PostgreSQL schema omission, implements dual-resilient database persistence via both root columns and transaction_data JSONB, updates message hydration in customer and admin chat components, and adds live production idempotent migration routines.",
+  "updatedAt":  "2026-10-30T09:47:52.779310625Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

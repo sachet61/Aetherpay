@@ -733,8 +733,8 @@ class DataService {
             senderName: row.sender_name,
             senderRole: row.sender_role || 'customer',
             text: row.content || '',
-            attachmentUrl: row.attachment_url,
-            attachmentName: row.attachment_name,
+            attachmentUrl: row.attachment_url || row.transaction_data?.attachmentUrl || undefined,
+            attachmentName: row.attachment_name || row.transaction_data?.attachmentName || undefined,
             isInternalNote: false,
             transactionData: row.transaction_data || undefined,
             createdAt: row.created_at || new Date().toISOString(),
@@ -821,8 +821,8 @@ class DataService {
             senderName: row.sender_name,
             senderRole: row.sender_role || 'customer',
             text: row.content || '',
-            attachmentUrl: row.attachment_url,
-            attachmentName: row.attachment_name,
+            attachmentUrl: row.attachment_url || row.transaction_data?.attachmentUrl || undefined,
+            attachmentName: row.attachment_name || row.transaction_data?.attachmentName || undefined,
             isInternalNote: false,
             transactionData: row.transaction_data || undefined,
             createdAt: row.created_at || new Date().toISOString(),
@@ -1343,8 +1343,8 @@ class DataService {
         text: m.content || '',
         isInternalNote: false,
         isRead: true,
-        attachmentUrl: m.attachment_url,
-        attachmentName: m.attachment_name,
+        attachmentUrl: m.attachment_url || m.transaction_data?.attachmentUrl || undefined,
+        attachmentName: m.attachment_name || m.transaction_data?.attachmentName || undefined,
         transactionData: m.transaction_data || undefined,
         createdAt: m.created_at || new Date().toISOString(),
       };
@@ -5010,7 +5010,20 @@ class DataService {
           });
         }
 
-        // 3. Persist to messages table with correct PostgreSQL schema columns (content, not text)
+        // 3. Persist to messages table with dual-resilient attachment storage (columns + transaction_data JSONB)
+        const txPayload = newMsg.transactionData
+          ? {
+              ...newMsg.transactionData,
+              attachmentUrl: newMsg.attachmentUrl || (newMsg.transactionData as any).attachmentUrl,
+              attachmentName: newMsg.attachmentName || (newMsg.transactionData as any).attachmentName,
+            }
+          : (newMsg.attachmentUrl
+            ? {
+                attachmentUrl: newMsg.attachmentUrl,
+                attachmentName: newMsg.attachmentName || null,
+              }
+            : null);
+
         supabase
           .from('messages')
           .upsert({
@@ -5020,12 +5033,37 @@ class DataService {
             sender_name: newMsg.senderName,
             sender_role: newMsg.senderRole,
             content: newMsg.text,
-            transaction_data: newMsg.transactionData || null,
+            attachment_url: newMsg.attachmentUrl || null,
+            attachment_name: newMsg.attachmentName || null,
+            transaction_data: txPayload,
             created_at: newMsg.createdAt,
           })
           .then(
-            () => {},
-            (err) => console.warn('Supabase message persist notice:', err)
+            ({ error }: any) => {
+              if (error) {
+                // If column attachment_url does not exist yet on unmigrated database (PostgreSQL 42703), retry without columns
+                if (error.code === '42703' || String(error.message || '').includes('attachment_url')) {
+                  supabase
+                    .from('messages')
+                    .upsert({
+                      id: newMsg.id,
+                      conversation_id: newMsg.conversationId,
+                      sender_id: newMsg.senderId,
+                      sender_name: newMsg.senderName,
+                      sender_role: newMsg.senderRole,
+                      content: newMsg.text,
+                      transaction_data: txPayload,
+                      created_at: newMsg.createdAt,
+                    })
+                    .then(({ error: retryErr }: any) => {
+                      if (retryErr) console.warn('Supabase message persist fallback notice:', retryErr);
+                    });
+                } else {
+                  console.warn('Supabase message persist notice:', error);
+                }
+              }
+            },
+            (err: any) => console.warn('Supabase message persist notice:', err)
           );
       }
     } catch (e) {
@@ -5086,6 +5124,13 @@ class DataService {
     if (!msg || !msg.conversationId || !msg.id) return;
     const targetConvId = this.resolveCanonicalConvId(msg.conversationId);
     msg.conversationId = targetConvId;
+
+    if (!msg.attachmentUrl && (msg.transactionData as any)?.attachmentUrl) {
+      msg.attachmentUrl = (msg.transactionData as any).attachmentUrl;
+    }
+    if (!msg.attachmentName && (msg.transactionData as any)?.attachmentName) {
+      msg.attachmentName = (msg.transactionData as any).attachmentName;
+    }
 
     const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
     if (!all[targetConvId]) {
