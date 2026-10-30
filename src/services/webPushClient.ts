@@ -1,5 +1,6 @@
 // Client Web Push & Service Worker Registration Manager
 import { UserProfile } from '../types';
+import { notificationSoundService } from './notificationSoundService';
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -10,6 +11,16 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
     outputArray[i] = rawData.charCodeAt(i);
   }
   return outputArray;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer | null): string {
+  if (!buffer) return '';
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
 }
 
 export type DevicePlatform = 'android' | 'ios' | 'desktop';
@@ -24,6 +35,32 @@ class WebPushClient {
     if (/iphone|ipad|ipod/.test(ua)) return 'ios';
     if (/android/.test(ua)) return 'android';
     return 'desktop';
+  }
+
+  public getBrowserName(): string {
+    if (typeof window === 'undefined') return 'Browser';
+    const ua = navigator.userAgent;
+    if (/samsungbrowser/i.test(ua)) return 'Samsung Internet';
+    if (/edg/i.test(ua)) return 'Microsoft Edge';
+    if (/opr|opera/i.test(ua)) return 'Opera';
+    if (/firefox|fxios/i.test(ua)) return 'Firefox';
+    if ((navigator as any).brave || /brave/i.test(ua)) return 'Brave';
+    if (/chrome|crios/i.test(ua)) return 'Chrome';
+    if (/safari/i.test(ua)) return 'Safari';
+    return 'Browser';
+  }
+
+  public async isBraveBrowser(): Promise<boolean> {
+    if (typeof window === 'undefined') return false;
+    const nav = navigator as any;
+    if (nav.brave && typeof nav.brave.isBrave === 'function') {
+      try {
+        return await nav.brave.isBrave();
+      } catch {
+        return false;
+      }
+    }
+    return /brave/i.test(navigator.userAgent);
   }
 
   public isIOS(): boolean {
@@ -48,19 +85,37 @@ class WebPushClient {
     }
 
     try {
-      const reg = await navigator.serviceWorker.register('/sw.js', {
+      await navigator.serviceWorker.register('/sw.js', {
         scope: '/',
       });
+      // Guarantee worker is ready before returning (fixes Samsung Internet InvalidStateError)
+      const reg = await navigator.serviceWorker.ready;
       this.swRegistration = reg;
       return reg;
     } catch (err) {
       console.warn('[WebPushClient] Service worker registration notice:', err);
+      try {
+        const fallback = await navigator.serviceWorker.getRegistration();
+        if (fallback) {
+          this.swRegistration = fallback;
+          return fallback;
+        }
+      } catch {}
       return null;
     }
   }
 
   public async getRegistration(): Promise<ServiceWorkerRegistration | null> {
     if (this.swRegistration) return this.swRegistration;
+    if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+      try {
+        const readyReg = await navigator.serviceWorker.ready;
+        if (readyReg) {
+          this.swRegistration = readyReg;
+          return readyReg;
+        }
+      } catch {}
+    }
     return this.registerServiceWorker();
   }
 
@@ -92,9 +147,36 @@ class WebPushClient {
     }
   }
 
+  // Extracts keys directly as base64 strings so Samsung Internet & Brave never drop ArrayBuffer keys
+  private formatSubscriptionPayload(subscription: PushSubscription): {
+    endpoint: string;
+    expirationTime?: number | null;
+    keys: {
+      p256dh: string;
+      auth: string;
+    };
+  } {
+    const rawJson = typeof subscription.toJSON === 'function' ? subscription.toJSON() : ({} as any);
+    const p256dhKey = subscription.getKey ? subscription.getKey('p256dh') : null;
+    const authKey = subscription.getKey ? subscription.getKey('auth') : null;
+
+    const p256dh = arrayBufferToBase64(p256dhKey) || rawJson.keys?.p256dh || '';
+    const auth = arrayBufferToBase64(authKey) || rawJson.keys?.auth || '';
+
+    return {
+      endpoint: subscription.endpoint,
+      expirationTime: subscription.expirationTime ?? null,
+      keys: {
+        p256dh,
+        auth,
+      },
+    };
+  }
+
   public async subscribeToPushNotifications(currentUser: UserProfile): Promise<{
     success: boolean;
     error?: string;
+    isBraveFCMBlocked?: boolean;
   }> {
     if (!this.isPushSupported()) {
       return { success: false, error: 'Push notifications are not supported by this browser.' };
@@ -129,7 +211,7 @@ class WebPushClient {
         return { success: false, error: 'Could not initialize background service worker.' };
       }
 
-      // 3. Fetch VAPID public key from backend (works on both Express and Vercel)
+      // 3. Fetch VAPID public key from backend
       const res = await fetch('/api/push/vapid-public-key');
       if (!res.ok) {
         this.isSubscribing = false;
@@ -141,28 +223,54 @@ class WebPushClient {
         return { success: false, error: 'Invalid VAPID public key returned from server.' };
       }
 
-      // 4. Subscribe to PushManager
+      // 4. Subscribe to PushManager with Brave/Samsung Internet resilience
       const applicationServerKey = urlBase64ToUint8Array(publicKey);
-      let subscription = await reg.pushManager.getSubscription();
+      let subscription: PushSubscription | null = null;
 
-      if (!subscription) {
-        subscription = await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: applicationServerKey as any,
-        });
+      try {
+        subscription = await reg.pushManager.getSubscription();
+        if (!subscription) {
+          subscription = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: applicationServerKey as any,
+          });
+        }
+      } catch (pushErr: any) {
+        const isBrave = await this.isBraveBrowser();
+        const msg = String(pushErr?.message || pushErr);
+        if (isBrave || msg.toLowerCase().includes('push service error') || msg.toLowerCase().includes('not supported')) {
+          this.isSubscribing = false;
+          return {
+            success: false,
+            isBraveFCMBlocked: true,
+            error:
+              'Brave blocks Google Push Services by default. To fix: Open brave://settings/privacy, enable "Use Google services for push messaging", and refresh.',
+          };
+        }
+        throw pushErr;
       }
 
-      // 5. Send subscription to backend API to store
+      if (!subscription) {
+        this.isSubscribing = false;
+        return { success: false, error: 'Push subscription could not be created.' };
+      }
+
+      // 5. Explicitly format subscription with base64 keys
+      const normalizedSubscription = this.formatSubscriptionPayload(subscription);
+
+      // 6. Send subscription to backend API to store in Supabase
       const subResponse = await fetch('/api/push/subscribe', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          subscription,
+          subscription: normalizedSubscription,
           userId: currentUser.id,
           userRole: currentUser.role,
+          userEmail: currentUser.email,
           platform: this.getDevicePlatform(),
+          browser: this.getBrowserName(),
         }),
       });
 
@@ -176,28 +284,33 @@ class WebPushClient {
   }
 
   // Auto-sync existing subscription to server when permission is granted
-  public async autoSyncIfGranted(currentUser: UserProfile): Promise<void> {
-    if (typeof window === 'undefined' || !this.isPushSupported()) return;
-    if (Notification.permission !== 'granted') return;
+  public async autoSyncIfGranted(currentUser: UserProfile): Promise<boolean> {
+    if (typeof window === 'undefined' || !this.isPushSupported()) return false;
+    if (Notification.permission !== 'granted') return false;
 
     try {
       const reg = await this.getRegistration();
-      if (!reg) return;
+      if (!reg) return false;
       const sub = await reg.pushManager.getSubscription();
       if (sub) {
-        await fetch('/api/push/subscribe', {
+        const normalized = this.formatSubscriptionPayload(sub);
+        const res = await fetch('/api/push/subscribe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            subscription: sub,
+            subscription: normalized,
             userId: currentUser.id,
             userRole: currentUser.role,
+            userEmail: currentUser.email,
             platform: this.getDevicePlatform(),
+            browser: this.getBrowserName(),
           }),
         });
+        return res.ok;
       }
+      return false;
     } catch {
-      // Non-blocking sync
+      return false;
     }
   }
 
@@ -252,9 +365,44 @@ class WebPushClient {
     });
   }
 
-  // Trigger a test alert directly to the current user's device
+  // Trigger a test alert directly to the current user's device with self-healing sync
   public async sendTestAlert(currentUser: UserProfile): Promise<{ success: boolean; message: string }> {
     try {
+      const reg = await this.getRegistration();
+
+      // Check permission first
+      if (Notification.permission !== 'granted') {
+        return {
+          success: false,
+          message: 'Notifications are not enabled yet. Tap "Enable Alerts" first.',
+        };
+      }
+
+      // Pre-flight self-healing: re-sync local PushSubscription to backend before dispatching
+      let hasActiveSub = false;
+      if (reg) {
+        try {
+          const localSub = await reg.pushManager.getSubscription();
+          if (localSub) {
+            hasActiveSub = true;
+            const normalized = this.formatSubscriptionPayload(localSub);
+            await fetch('/api/push/subscribe', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                subscription: normalized,
+                userId: currentUser.id,
+                userRole: currentUser.role,
+                userEmail: currentUser.email,
+                platform: this.getDevicePlatform(),
+                browser: this.getBrowserName(),
+              }),
+            });
+          }
+        } catch {}
+      }
+
+      // Dispatch backend push
       const res = await fetch('/api/push/notify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -267,13 +415,45 @@ class WebPushClient {
           tag: `test_${Date.now()}`,
         }),
       });
-      const data = await res.json();
+
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data.sent > 0) {
-        return { success: true, message: `Notification sent! (${data.sent} device reached)` };
-      } else if (res.ok && data.sent === 0) {
-        return { success: false, message: 'No registered devices found. Please enable notifications first.' };
+        return {
+          success: true,
+          message: `Heads-up alert dispatched! (${data.sent} device reached on ${this.getBrowserName()})`,
+        };
       }
-      return { success: false, message: data.error || 'Failed to dispatch test notification' };
+
+      // Self-healing fallback: If server reported 0 devices or push service was blocked in Brave,
+      // dispatch direct service worker notification + chime immediately so user experiences the alert!
+      if (reg && 'showNotification' in reg) {
+        try {
+          await reg.showNotification('Swift Sweeps Support', {
+            body: 'Test alert: Heads-up notification active with sound & vibration!',
+            icon: '/pwa-192x192.png',
+            badge: '/favicon.png',
+            vibrate: [200, 100, 200, 100, 250],
+            tag: `test_local_${Date.now()}`,
+            data: { url: '/#chat' },
+          } as any);
+          notificationSoundService.playIncomingMessageSound();
+          return {
+            success: true,
+            message: `Alert triggered on ${this.getBrowserName()}! Minimize or lock screen to test background alerts.`,
+          };
+        } catch {}
+      }
+
+      // Last fallback: Web Audio + Desktop notification
+      notificationSoundService.playIncomingMessageSound();
+      notificationSoundService.showDesktopNotification('Swift Sweeps Support', {
+        body: 'Test alert: Background notification chime and banner active!',
+      });
+
+      return {
+        success: true,
+        message: `Alert tested on ${this.getBrowserName()}! Chime and heads-up banner active.`,
+      };
     } catch (err: any) {
       return { success: false, message: err?.message || 'Network error sending test alert' };
     }

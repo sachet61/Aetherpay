@@ -130,12 +130,17 @@ export const BackgroundNotificationPrompt: React.FC<BackgroundNotificationPrompt
                 </div>
               ) : (
                 <div>
-                  <span className="font-bold text-white flex items-center gap-1.5">
-                    <Volume2 className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Instant Background Notifications:</span>
-                  </span>
-                  <p className="text-slate-300 text-xs">
-                    Get alerted on {isAndroid ? 'Android' : 'your device'} for messages, cashouts &amp; deposits when minimized or closed.
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-white flex items-center gap-1.5">
+                      <Volume2 className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Instant Background Notifications:</span>
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-800 text-slate-300 border border-slate-700">
+                      {webPushClient.getBrowserName()}
+                    </span>
+                  </div>
+                  <p className="text-slate-300 text-xs mt-0.5">
+                    Receive heads-up banners with sound &amp; vibration for messages, cashouts &amp; deposits when minimized or closed.
                   </p>
                 </div>
               )}

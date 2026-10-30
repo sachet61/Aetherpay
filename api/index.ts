@@ -40,15 +40,37 @@ async function saveVercelPushSubscription(
   sub: any,
   userId: string,
   userRole: string,
-  supabase: any
+  supabase: any,
+  userEmail?: string
 ): Promise<boolean> {
-  if (!sub || !sub.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) return false;
+  const endpoint = sub?.endpoint;
+  const p256dh = sub?.keys?.p256dh || sub?.p256dh;
+  const auth = sub?.keys?.auth || sub?.auth;
+  if (!endpoint || !p256dh || !auth) {
+    console.warn('[Vercel WebPush] Incomplete push subscription received:', {
+      hasEndpoint: !!endpoint,
+      hasP256dh: !!p256dh,
+      hasAuth: !!auth,
+    });
+    return false;
+  }
+
+  const normalizedSub = {
+    endpoint,
+    expirationTime: sub.expirationTime || null,
+    keys: {
+      p256dh: String(p256dh).trim(),
+      auth: String(auth).trim(),
+    },
+  };
+
   const now = new Date().toISOString();
   const record = {
-    id: `push_${userId}_${sub.endpoint.slice(-32)}`,
+    id: `push_${userId}_${endpoint.slice(-32)}`,
     userId,
+    userEmail: userEmail || undefined,
     userRole: userRole || 'customer',
-    subscription: sub,
+    subscription: normalizedSub,
     createdAt: now,
     updatedAt: now,
   };
@@ -60,7 +82,7 @@ async function saveVercelPushSubscription(
       .maybeSingle();
 
     const list = Array.isArray(existing?.data)
-      ? existing.data.filter((x: any) => x.subscription?.endpoint !== sub.endpoint)
+      ? existing.data.filter((x: any) => x.subscription?.endpoint !== endpoint)
       : [];
     list.push(record);
 
@@ -94,10 +116,12 @@ async function sendVercelPushNotification(
 
     const subs: any[] = Array.isArray(configRow?.data) ? configRow.data : [];
     const isStaff = targetUserId === 'staff' || targetRole === 'agent' || targetRole === 'admin' || targetUserId === 'agent' || targetUserId === 'admin';
+    const targetEmail = payload.targetEmail;
     const targets = subs.filter((s: any) => {
       if (!s || !s.subscription?.endpoint) return false;
       if (isStaff && (s.userRole === 'agent' || s.userRole === 'admin')) return true;
       if (targetUserId && s.userId === targetUserId) return true;
+      if (targetEmail && s.userEmail && s.userEmail.toLowerCase() === targetEmail.toLowerCase()) return true;
       if (targetRole && s.userRole === targetRole) return true;
       return false;
     });
@@ -453,21 +477,59 @@ export default async function handler(req: any, res: any) {
   if (url.includes('/api/push/subscribe') && req.method === 'POST') {
     try {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      const { subscription, userId, userRole } = body || {};
+      const { subscription, userId, userRole, userEmail } = body || {};
       if (!subscription || !subscription.endpoint) {
         return res.status(400).json({ error: 'Subscription data required' });
       }
-      const success = await saveVercelPushSubscription(subscription, userId || 'anonymous', userRole || 'customer', supabaseAdmin);
+      const success = await saveVercelPushSubscription(
+        subscription,
+        userId || 'anonymous',
+        userRole || 'customer',
+        supabaseAdmin,
+        userEmail
+      );
       return res.status(200).json({ success });
     } catch (e: any) {
       return res.status(500).json({ error: e?.message || 'Failed to save subscription' });
     }
   }
 
+  if (url.includes('/api/push/status') && req.method === 'GET') {
+    try {
+      const parsedUrl = new URL(url, 'http://localhost');
+      const userId = parsedUrl.searchParams.get('userId');
+      const email = parsedUrl.searchParams.get('email');
+      const role = parsedUrl.searchParams.get('role');
+
+      const { data: configRow } = await supabaseAdmin
+        .from('app_config')
+        .select('data')
+        .eq('id', 'push_subscriptions')
+        .maybeSingle();
+
+      const subs: any[] = Array.isArray(configRow?.data) ? configRow.data : [];
+      const isStaff = userId === 'staff' || role === 'agent' || role === 'admin' || userId === 'agent' || userId === 'admin';
+      const targets = subs.filter((s: any) => {
+        if (!s || !s.subscription?.endpoint) return false;
+        if (isStaff && (s.userRole === 'agent' || s.userRole === 'admin')) return true;
+        if (userId && s.userId === userId) return true;
+        if (email && s.userEmail && s.userEmail.toLowerCase() === email.toLowerCase()) return true;
+        return false;
+      });
+
+      return res.status(200).json({
+        linked: targets.length > 0,
+        count: targets.length,
+      });
+    } catch (e: any) {
+      return res.status(200).json({ linked: false, count: 0 });
+    }
+  }
+
   if (url.includes('/api/push/notify') && req.method === 'POST') {
     try {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      const { recipientId, recipientRole, title, body: msgBody, url: targetUrl, tag, conversationId } = body || {};
+      const { recipientId, recipientRole, userEmail, title, body: msgBody, url: targetUrl, tag, conversationId } = body || {};
       const result = await sendVercelPushNotification(
         recipientId,
         recipientRole,
@@ -477,6 +539,7 @@ export default async function handler(req: any, res: any) {
           url: targetUrl || '/#chat',
           tag: tag || `chat_${conversationId || Date.now()}`,
           data: { conversationId },
+          targetEmail: userEmail,
         },
         supabaseAdmin
       );

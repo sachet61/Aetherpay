@@ -6,7 +6,7 @@ import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import { createClient } from '@supabase/supabase-js';
 import { telegramEngine } from './src/server/telegramEngine.ts';
-import { VAPID_PUBLIC_KEY, savePushSubscription, sendPushNotification } from './src/server/webPushEngine.ts';
+import { VAPID_PUBLIC_KEY, savePushSubscription, sendPushNotification, getSubscriptionsForUser } from './src/server/webPushEngine.ts';
 
 dotenv.config();
 
@@ -1079,11 +1079,17 @@ app.post('/api/auth/register', async (req, res) => {
   // Web Push Register Device Subscription Endpoint
   app.post('/api/push/subscribe', async (req, res) => {
     try {
-      const { subscription, userId, userRole } = req.body;
+      const { subscription, userId, userRole, userEmail } = req.body;
       if (!subscription || !subscription.endpoint) {
         return res.status(400).json({ error: 'Subscription data required' });
       }
-      const success = await savePushSubscription(subscription, userId || 'anonymous', userRole || 'customer', supabaseAdmin);
+      const success = await savePushSubscription(
+        subscription,
+        userId || 'anonymous',
+        userRole || 'customer',
+        supabaseAdmin,
+        userEmail
+      );
       return res.json({ success });
     } catch (e: any) {
       return res.status(500).json({ error: e?.message || 'Failed to save subscription' });
@@ -1093,7 +1099,7 @@ app.post('/api/auth/register', async (req, res) => {
   // Web Push Dispatch Notification Endpoint
   app.post('/api/push/notify', async (req, res) => {
     try {
-      const { recipientId, recipientRole, title, body, url, tag, conversationId, actionType } = req.body;
+      const { recipientId, recipientRole, userEmail, title, body, url, tag, conversationId, actionType } = req.body;
       const result = await sendPushNotification(
         recipientId,
         recipientRole,
@@ -1103,6 +1109,7 @@ app.post('/api/auth/register', async (req, res) => {
           url: url || '/#chat',
           tag: tag || `swiftsweeps_${actionType || 'alert'}_${Date.now()}`,
           data: { conversationId, actionType, url },
+          targetEmail: userEmail,
         },
         supabaseAdmin
       );
@@ -1115,7 +1122,7 @@ app.post('/api/auth/register', async (req, res) => {
   // Test Push Notification Endpoint for Device Verification
   app.post('/api/push/test', async (req, res) => {
     try {
-      const { userId, userRole } = req.body;
+      const { userId, userRole, userEmail } = req.body;
       if (!userId) {
         return res.status(400).json({ error: 'User ID is required for testing' });
       }
@@ -1128,12 +1135,32 @@ app.post('/api/auth/register', async (req, res) => {
           url: '/#chat',
           tag: `test_${Date.now()}`,
           data: { test: true },
+          targetEmail: userEmail,
         },
         supabaseAdmin
       );
       return res.json({ success: true, ...result });
     } catch (e: any) {
       return res.status(500).json({ error: e?.message || 'Test push dispatch failed' });
+    }
+  });
+
+  // Web Push Status Verification Endpoint
+  app.get('/api/push/status', async (req, res) => {
+    try {
+      const userId = req.query.userId as string;
+      const email = req.query.email as string;
+      const role = req.query.role as string;
+      if (!userId && !email) {
+        return res.json({ linked: false, count: 0 });
+      }
+      const subs = await getSubscriptionsForUser(userId, role, supabaseAdmin, email);
+      return res.json({
+        linked: subs.length > 0,
+        count: subs.length,
+      });
+    } catch (e: any) {
+      return res.json({ linked: false, count: 0 });
     }
   });
 

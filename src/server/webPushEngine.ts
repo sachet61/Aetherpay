@@ -21,6 +21,7 @@ try {
 export interface StoredPushSubscription {
   id: string;
   userId: string;
+  userEmail?: string;
   userRole?: string;
   subscription: {
     endpoint: string;
@@ -41,26 +42,46 @@ export async function savePushSubscription(
   sub: any,
   userId: string,
   userRole: string,
-  supabaseAdmin?: SupabaseClient | null
+  supabaseAdmin?: SupabaseClient | null,
+  userEmail?: string
 ): Promise<boolean> {
-  if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+  const endpoint = sub?.endpoint;
+  const p256dh = sub?.keys?.p256dh || sub?.p256dh;
+  const auth = sub?.keys?.auth || sub?.auth;
+
+  if (!endpoint || !p256dh || !auth) {
+    console.warn('[WebPush] Incomplete push subscription received:', {
+      hasEndpoint: !!endpoint,
+      hasP256dh: !!p256dh,
+      hasAuth: !!auth,
+    });
     return false;
   }
 
-  const endpointKey = sub.endpoint.slice(-32);
+  const normalizedSub = {
+    endpoint,
+    expirationTime: sub.expirationTime || null,
+    keys: {
+      p256dh: String(p256dh).trim(),
+      auth: String(auth).trim(),
+    },
+  };
+
+  const endpointKey = endpoint.slice(-32);
   const id = `push_${userId}_${endpointKey}`;
   const now = new Date().toISOString();
 
   const record: StoredPushSubscription = {
     id,
     userId,
+    userEmail: userEmail || undefined,
     userRole: userRole || 'customer',
-    subscription: sub,
+    subscription: normalizedSub,
     createdAt: now,
     updatedAt: now,
   };
 
-  inMemorySubscriptions.set(sub.endpoint, record);
+  inMemorySubscriptions.set(endpoint, record);
 
   if (supabaseAdmin) {
     try {
@@ -72,7 +93,7 @@ export async function savePushSubscription(
         .maybeSingle();
 
       const list: StoredPushSubscription[] = Array.isArray(existingConfig?.data)
-        ? existingConfig.data.filter((item: StoredPushSubscription) => item.subscription?.endpoint !== sub.endpoint)
+        ? existingConfig.data.filter((item: StoredPushSubscription) => item.subscription?.endpoint !== endpoint)
         : [];
 
       list.push(record);
@@ -89,9 +110,9 @@ export async function savePushSubscription(
         .upsert({
           id,
           user_id: userId,
-          endpoint: sub.endpoint,
-          p256dh: sub.keys.p256dh,
-          auth: sub.keys.auth,
+          endpoint,
+          p256dh: normalizedSub.keys.p256dh,
+          auth: normalizedSub.keys.auth,
           updated_at: now,
         })
         .then(() => {}, () => {});
@@ -106,7 +127,8 @@ export async function savePushSubscription(
 export async function getSubscriptionsForUser(
   targetUserId: string,
   targetRole?: string,
-  supabaseAdmin?: SupabaseClient | null
+  supabaseAdmin?: SupabaseClient | null,
+  targetEmail?: string
 ): Promise<StoredPushSubscription[]> {
   const result: StoredPushSubscription[] = [];
   const seenEndpoints = new Set<string>();
@@ -123,6 +145,9 @@ export async function getSubscriptionsForUser(
       return true;
     }
     if (targetUserId && item.userId === targetUserId) {
+      return true;
+    }
+    if (targetEmail && item.userEmail && item.userEmail.toLowerCase() === targetEmail.toLowerCase()) {
       return true;
     }
     if (targetRole && item.userRole === targetRole) {
@@ -207,10 +232,11 @@ export async function sendPushNotification(
     url?: string;
     tag?: string;
     data?: any;
+    targetEmail?: string;
   },
   supabaseAdmin?: SupabaseClient | null
 ): Promise<{ sent: number; failed: number }> {
-  const subscriptions = await getSubscriptionsForUser(targetUserId, targetRole, supabaseAdmin);
+  const subscriptions = await getSubscriptionsForUser(targetUserId, targetRole, supabaseAdmin, payload.targetEmail);
   if (subscriptions.length === 0) {
     return { sent: 0, failed: 0 };
   }

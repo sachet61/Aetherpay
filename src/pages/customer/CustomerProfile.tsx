@@ -47,9 +47,12 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
     if (typeof window !== 'undefined' && webPushClient.isPushSupported()) {
       webPushClient.hasActiveSubscription().then((active) => {
         setIsPushActive(active || Notification.permission === 'granted');
+        if (active || Notification.permission === 'granted') {
+          webPushClient.autoSyncIfGranted(currentUser).catch(() => {});
+        }
       });
     }
-  }, []);
+  }, [currentUser]);
 
   const handleEnablePush = async () => {
     if (webPushClient.isIOS() && !webPushClient.isStandalone()) {
@@ -62,7 +65,9 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
     setPushLoading(false);
     if (res.success) {
       setIsPushActive(true);
-      setPushStatusMsg({ text: 'Background alerts activated successfully!' });
+      setPushStatusMsg({
+        text: `Background alerts activated successfully on ${webPushClient.getBrowserName()}!`,
+      });
     } else {
       setPushStatusMsg({ text: res.error || 'Failed to activate notifications', isError: true });
     }
@@ -74,7 +79,7 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
     const res = await webPushClient.sendTestAlert(currentUser);
     setPushLoading(false);
     if (res.success) {
-      setPushStatusMsg({ text: 'Test alert sent! Check your notification bar / lockscreen.' });
+      setPushStatusMsg({ text: res.message });
     } else {
       setPushStatusMsg({ text: res.message, isError: true });
     }
@@ -233,7 +238,7 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
                   : 'bg-amber-950/60 text-amber-400 border-amber-800'
               }`}
             >
-              {isPushActive ? 'Active 24/7' : 'Not Enabled'}
+              {isPushActive ? `${webPushClient.getBrowserName()} • Active` : 'Not Enabled'}
             </span>
           </div>
         </div>
