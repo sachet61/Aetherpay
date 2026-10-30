@@ -454,8 +454,17 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             <div className="p-3.5 mx-3 mt-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center font-bold text-amber-400 text-xs">
-                    {currentUser.displayName.charAt(0).toUpperCase()}
+                  <div className="w-8 h-8 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center font-bold text-amber-400 text-xs overflow-hidden shrink-0">
+                    {currentUser.avatarUrl ? (
+                      <img
+                        src={currentUser.avatarUrl}
+                        alt={currentUser.displayName}
+                        className="w-full h-full object-cover"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <span>{currentUser.displayName.charAt(0).toUpperCase()}</span>
+                    )}
                   </div>
                   <div>
                     <div className="text-xs font-bold text-white leading-tight truncate max-w-[130px]">

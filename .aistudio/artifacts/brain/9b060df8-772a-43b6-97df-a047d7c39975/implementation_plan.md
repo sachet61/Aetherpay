@@ -1,97 +1,121 @@
-# Implementation Plan: Fix "No Device Linked" Push Notification Error in Brave & Samsung Internet
+# Implementation Plan: Supabase Storage for Chat Image Attachments, Avatar Transformations & Edge Caching
 
 ## User Directive
-> "No device linked error in brave and samsung internet but google chrome works fine for background notification and alert. Come up with a plan first and prompt me to proceed or not. Make sure that fix is compatible witzh live production server too."
+> "I donot want to add ky documens, and webhook processing. Come up with a plan first and prompt me to proceed or not. Make sure that fix is compatible with live production server too."
 
 ---
 
-## 1. Root Cause Diagnosis
+## 1. Overview & Scope Clarification
 
-### A. Samsung Internet (SamsungBrowser) Quirks & Premature Registration
-1. **Unawaited Service Worker Readiness**:
-   - In `src/services/webPushClient.ts`, `registerServiceWorker()` calls `navigator.serviceWorker.register('/sw.js')` and immediately returns the unready registration without awaiting `navigator.serviceWorker.ready`.
-   - In Google Chrome, the worker activates quickly or `PushManager` automatically suspends until active. In Samsung Internet, calling `pushManager.subscribe()` or `pushManager.getSubscription()` while the worker is still in `installing`/`activating` state rejects immediately with `DOMException: Registration failed - service worker not ready` or `InvalidStateError`.
-2. **PushSubscription Key Serialization Loss**:
-   - In `webPushClient.ts`, `subscription` is serialized via `JSON.stringify({ subscription })`. In Chrome's V8, `subscription.toJSON()` is invoked implicitly. However, in Samsung Internet and certain Chromium variants, `PushSubscription` objects do NOT expose their ArrayBuffer keys (`p256dh`, `auth`) as enumerable properties when passed inside an object literal.
-   - As a result, the POST payload to `/api/push/subscribe` contains an empty `keys` object or missing `p256dh`/`auth`.
-   - On the backend (`src/server/webPushEngine.ts` and `api/index.ts`):
-     ```ts
-     if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) return false;
-     ```
-     The backend rejects the payload, saves **zero** records to Supabase, and when the user tests or triggers an alert, the system reports: `"No registered devices found. Please enable notifications first."` ("No device linked").
+In accordance with your instructions, **KYC document uploading** and **payment webhook processing** have been completely excluded.
 
-### B. Brave Browser Shields & Google Services for Push Messaging
-1. **Brave Push Service Shield Default**:
-   - Brave explicitly disables Google Services for Push Messaging (FCM) by default for privacy (`brave://settings/privacy` -> "Use Google services for push messaging" is off).
-   - When `pushManager.subscribe()` is called without this setting enabled, Brave throws:
-     `AbortError: Registration failed - push service error` or `NotSupportedError: Push service not available`.
-   - The subscription call throws before reaching `/api/push/subscribe`, so no device record is created.
-2. **Missing Brave Detection & Guidance**:
-   - The user currently receives a generic error or "No device linked" without actionable instructions on how to enable push in Brave.
-
-### C. Client-Side Self-Healing & Test Alert Re-Sync
-1. When a user clicks "Send Test Alert" or re-opens the app in Samsung Internet or Brave, the client checks the backend, but if the session ID changed or the database record was missed, the app does not attempt a transparent auto-heal / re-subscription sync before failing.
-2. If push services are completely blocked by the browser policy, no local service-worker notification or in-app heads-up banner with sound is triggered as a fallback.
+The implementation strictly upgrades existing features across your app using Supabase:
+1. **Real Chat Image Attachments & Top-Up Proofs** (`CustomerChat.tsx`, `AdminChat.tsx`, `CustomerTopUp.tsx`):
+   - Replace the static demo receipt placeholder (`handleAttachDemoReceipt`) with a real file picker wired directly to **Supabase Storage** (`chat_attachments` bucket).
+   - In `CustomerTopUp.tsx`, replace raw base64 data URLs with direct uploads to Supabase Storage, saving real URLs in `receiptUrl`.
+2. **Profile Avatar with On-The-Fly WebP Transformations** (`CustomerProfile.tsx`, `types/index.ts`):
+   - Hook into the existing `currentUser.avatarUrl` field.
+   - Allow players to upload their profile photo directly to the `avatars` bucket in Supabase Storage.
+   - Apply on-the-fly Supabase Storage CDN transformations (`?width=160&height=160&format=webp&quality=80`) and client-side Canvas WebP pre-compression.
+3. **Supabase API Edge Caching for High-Traffic Endpoints**:
+   - Add Edge Cache HTTP headers (`Cache-Control: public, s-maxage=300, stale-while-revalidate=600`) to existing heavily queried endpoints in both `server.ts` and `api/index.ts`.
 
 ---
 
-## 2. Proposed Architectural Strategy
+## 2. System Architecture & Flow Diagram
 
-### Step 1: Universal Service Worker Readiness & Key Extraction (`src/services/webPushClient.ts`)
-1. **Mandatory Readiness Barrier**:
-   - Update `registerServiceWorker()` and `getRegistration()` to explicitly wait for `await navigator.serviceWorker.ready`.
-   - Enforce active worker status before invoking `pushManager.subscribe` or `pushManager.getSubscription`.
-2. **Deterministic PushSubscription Serialization**:
-   - Implement an explicit serializer that extracts `p256dh` and `auth` keys directly from `subscription.getKey('p256dh')` and `subscription.getKey('auth')` as base64-encoded URL-safe strings:
-     ```ts
-     const rawP256dh = subscription.getKey ? subscription.getKey('p256dh') : null;
-     const rawAuth = subscription.getKey ? subscription.getKey('auth') : null;
-     const p256dh = rawP256dh ? arrayBufferToBase64(rawP256dh) : subJson.keys?.p256dh;
-     const auth = rawAuth ? arrayBufferToBase64(rawAuth) : subJson.keys?.auth;
-     ```
-   - Guarantee that `/api/push/subscribe` ALWAYS receives a complete `{ endpoint, keys: { p256dh, auth } }` structure across all browsers.
-3. **Brave Browser Detection & Friendly Guidance**:
-   - Detect Brave via `navigator.brave?.isBrave()` or catch Brave-specific push service rejections (`push service error`).
-   - If Brave has push messaging blocked, display an informative, friendly guide:
-     *"Brave Shields blocks Google Push Messaging by default. To receive background alerts in Brave: Go to Settings > Shields & Privacy > Turn ON 'Use Google services for push messaging', then refresh and tap Turn On Alerts."*
-4. **Self-Healing Test Alert & Fallback Dispatch**:
-   - In `sendTestAlert(currentUser)`:
-     - If the client already has permission or an active subscription, ensure it is re-synced to `/api/push/subscribe` before calling `/api/push/notify`.
-     - If the backend returns `sent: 0` (no remote device linked in database), trigger an immediate local heads-up notification via `serviceWorkerRegistration.showNotification()` or in-app audio chime so the user immediately receives confirmation on their current screen.
-
-### Step 2: Resilient Device Ingestion on Both Backends (`server.ts`, `src/server/webPushEngine.ts`, and `api/index.ts`)
-1. **Flexible Subscription Parsing**:
-   - Update `savePushSubscription` and `saveVercelPushSubscription` to handle both flat and nested key structures, and normalize base64 padding.
-2. **Multi-Identifier User Mapping**:
-   - Store both `userId` and `email` (when provided) alongside `endpoint` in the `app_config` Supabase store and `push_subscriptions` table.
-   - Allow `getSubscriptionsForUser` to match on `userId`, `email`, or role, ensuring customer alerts reach the device even if user ID casing or format differs.
-3. **Dedicated Diagnostic Endpoint (`/api/push/status`)**:
-   - Expose `POST /api/push/status` accepting `{ endpoint, userId }` so the client can instantly verify if its device is linked in the database.
-
-### Step 3: UI Feedback & Browser Guidance (`BackgroundNotificationPrompt.tsx` & `CustomerProfile.tsx`)
-1. Add instant Brave guidance modal/popover if a Brave push error is detected.
-2. Display a clear "Device Linked & Active" badge with browser name (e.g. "Samsung Internet • Linked", "Chrome • Linked") so players and support staff can visually confirm their device is registered.
-3. Add a 1-tap "Re-link Device" button that re-syncs the push credentials to the backend if the device record ever drops.
-
-### Step 4: Full-Stack Live Production Compatibility
-1. Mirror all server-side push handling and subscription sanitization in both:
-   - `server.ts` & `src/server/webPushEngine.ts` (Express dev/production server on port 3000)
-   - `api/index.ts` (Vercel serverless live production endpoint)
-2. Verify all operations use live Supabase PostgreSQL (`app_config` and `push_subscriptions`) with zero mock data.
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Existing React SPA                              │
+│                                                                        │
+│  ┌───────────────────────┐  ┌────────────────────┐  ┌────────────────┐ │
+│  │ CustomerChat &        │  │ CustomerTopUp      │  │ CustomerProfile│ │
+│  │ AdminChat Paperclip   │  │ Screenshot Input   │  │ Avatar Picture │ │
+│  └───────────┬───────────┘  └──────────┬─────────┘  └────────┬───────┘ │
+└──────────────┼─────────────────────────┼─────────────────────┼─────────┘
+               │                         │                     │
+               ▼                         ▼                     ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                 Client-Side WebP Canvas Pre-Compressor                 │
+│      (Scales photos and encodes to WebP before upload to save data)    │
+└────────────────────────────────────────┬───────────────────────────────┘
+                                         │
+                                         ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Live Supabase Storage                           │
+│                                                                        │
+│  ┌─────────────────────────┐              ┌──────────────────────────┐ │
+│  │ chat_attachments        │              │ avatars                  │ │
+│  │ (Chat receipts, payment │              │ (Player profile photos   │ │
+│  │  proofs, image files)   │              │  with on-the-fly WebP)   │ │
+│  └─────────────────────────┘              └──────────────────────────┘ │
+└────────────────────────────────────────┬───────────────────────────────┘
+                                         │
+                                         ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│           Dual-Route Production Server (server.ts & api/index.ts)      │
+│                                                                        │
+│  - Edge Caching HTTP Headers on public read endpoints:                 │
+│    Cache-Control: public, max-age=60, s-maxage=300,                    │
+│    stale-while-revalidate=600                                          │
+│  - Reduces direct database load and utilizes Cloudflare cached egress  │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 3. Verification & Acceptance Criteria
-1. **Samsung Internet Verification**:
-   - `navigator.serviceWorker.ready` cleanly resolves.
-   - Keys (`p256dh`, `auth`) are extracted and saved to Supabase without rejection.
-   - "Send Test Alert" succeeds and reaches the device without "No registered devices found" error.
-2. **Brave Verification**:
-   - If Brave FCM setting is disabled, clear actionable instructions are displayed, and local fallback alert fires.
-   - Once the user toggles "Use Google services for push messaging", subscription links seamlessly.
-3. **Google Chrome Parity**:
-   - Chrome continues to function flawlessly with zero regression.
-4. **Production Server Parity**:
-   - Both Express (`server.ts`) and Vercel (`api/index.ts`) accept and dispatch push notifications identically.
-5. **Compilation & Build**:
-   - `compile_applet` and `tsc --noEmit` build cleanly with zero errors.
+## 3. Implementation Steps
+
+### Step 1: Storage Utility Service (`src/services/storageService.ts`)
+1. Create a dedicated storage service utilizing the existing Supabase client (`src/services/supabaseClient.ts`):
+   - `uploadChatAttachment(file: File, folderId: string)`:
+     - Pre-compresses image to WebP (max 1200px, quality 0.85).
+     - Uploads to `chat_attachments/${folderId}/${Date.now()}_${cleanFileName}.webp`.
+     - Returns public or signed URL for immediate rendering.
+   - `uploadAvatar(file: File, userId: string)`:
+     - Scales to 400x400 square and encodes to WebP (~35KB).
+     - Uploads to `avatars/${userId}/avatar.webp` with `upsert: true`.
+     - Returns transformed CDN URL:
+       `${publicUrl}?width=160&height=160&format=webp&quality=80`.
+
+### Step 2: Live Chat Image Attachments (`CustomerChat.tsx` & `AdminChat.tsx`)
+1. **In `CustomerChat.tsx`**:
+   - Replace `handleAttachDemoReceipt` with a hidden file input triggered by the paperclip button.
+   - When an image is selected, upload it via `storageService.uploadChatAttachment()`.
+   - Show an attachment preview chip above the input box with a remove (`X`) button.
+   - When sent, `attachmentUrl` and `attachmentName` are saved to the Supabase `messages` table and broadcasted in real time.
+   - Tapping an image in the chat stream opens a clean full-resolution preview lightbox.
+2. **In `AdminChat.tsx`**:
+   - Activate the paperclip button in the support agent reply box with the same storage upload flow, allowing staff to attach receipts, balance verification screenshots, or game account QR codes back to the player.
+
+### Step 3: Top-Up Screenshot Upload (`CustomerTopUp.tsx`)
+1. In `handleScreenshotChange`:
+   - Replace the large base64 DataURL (`FileReader.readAsDataURL`) with an immediate upload to `chat_attachments/${currentUser.id}/topup_${Date.now()}.webp`.
+   - Store the resulting Supabase Storage URL in `screenshotFile`.
+   - Reduces database payload size by 98% and prevents browser memory bloat on mobile devices.
+
+### Step 4: Profile Avatar with WebP Compression (`CustomerProfile.tsx`)
+1. On the user profile card (where the letter initial currently sits):
+   - Render `currentUser.avatarUrl` if present, falling back to the initial letter.
+   - Add a subtle camera/upload overlay on hover/tap.
+   - On selecting an image, compress to WebP, upload to `avatars`, and update `currentUser.avatarUrl` in Supabase `user_profiles` and local session state.
+   - Reflect the avatar instantly in the top navigation bar and user profile.
+
+### Step 5: Edge Caching for Heavily Queried Endpoints (`server.ts` & `api/index.ts`)
+1. In `server.ts` (Express dev server on port 3000):
+   - Add `Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600` on:
+     - `GET /api/game-accounts`
+     - `GET /api/push/vapid-public-key`
+     - `GET /api/push/status`
+2. In `api/index.ts` (Live Vercel serverless):
+   - Apply identical `res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600')` to ensure full production parity.
+   - Allows Cloudflare and Supabase edge nodes to serve cached responses for 5 minutes, dramatically reducing database egress and response latency.
+
+---
+
+## 4. Verification & Production Invariants
+
+1. **Zero KYC & Zero Webhook Additions**: Only chat attachments, top-up screenshots, profile avatars, and edge caching are modified.
+2. **Zero Mock Fallbacks**: Real file uploads to live Supabase Storage buckets.
+3. **Full Live Server Parity**: Exact identical changes in `server.ts` and `api/index.ts`.
+4. **Build & Lint Verification**: Verification via `compile_applet` and `lint_applet` with zero TypeScript errors.

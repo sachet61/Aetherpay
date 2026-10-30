@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan to resolve the 'No device linked / No registered devices found' error in Brave and Samsung Internet browsers, ensuring seamless push subscription, key serialization, Brave Shield push messaging guidance, service worker readiness, and live production server parity.",
-  "updatedAt":  "2026-10-30T07:30:14.801885139Z",
+  "summary":  "Revised implementation plan removing KYC documents and webhook processing. Focuses exclusively on Supabase Storage for real chat image attachments and top-up screenshots, Profile Picture Avatar upload with WebP image transformations, and API Edge Caching for heavily queried endpoints, ensuring 100% compatibility with the live production server.",
+  "updatedAt":  "2026-10-30T08:09:33.883851332Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

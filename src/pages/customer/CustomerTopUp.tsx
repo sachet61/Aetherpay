@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { UserProfile, UserWallet, PaymentMethodType } from '../../types';
 import { dataService } from '../../services/dataService';
 import { telegramService } from '../../services/telegramService';
+import { storageService } from '../../services/storageService';
 import {
   ArrowDownToLine,
   CreditCard,
@@ -72,6 +73,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
   // Screenshot upload state for Admin verification
   const [screenshotFile, setScreenshotFile] = useState<string | null>(null);
   const [screenshotName, setScreenshotName] = useState<string>('');
+  const [isUploadingScreenshot, setIsUploadingScreenshot] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -115,15 +117,24 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  const handleScreenshotChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleScreenshotChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       setScreenshotName(file.name);
-      const reader = new FileReader();
-      reader.onload = () => {
-        setScreenshotFile(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+      setIsUploadingScreenshot(true);
+      const res = await storageService.uploadPaymentProof(file, currentUser.id);
+      setIsUploadingScreenshot(false);
+
+      if (res.success && res.url) {
+        setScreenshotFile(res.url);
+      } else {
+        // Safe fallback if bucket upload returns notice
+        const reader = new FileReader();
+        reader.onload = () => {
+          setScreenshotFile(reader.result as string);
+        };
+        reader.readAsDataURL(file);
+      }
     }
   };
 
@@ -776,15 +787,30 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                         type="file"
                         accept="image/*"
                         onChange={handleScreenshotChange}
-                        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                        disabled={isUploadingScreenshot}
+                        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full disabled:cursor-not-allowed"
                       />
-                      <Upload className="w-6 h-6 mx-auto text-indigo-400 mb-1" />
-                      <div className="text-xs font-semibold text-slate-200">
-                        Upload or Drag Payment Screenshot
-                      </div>
-                      <p className="text-[10px] text-slate-400 mt-0.5">
-                        PNG, JPG, or WebP screenshot from Cash App, Chime, Bank, or Crypto wallet
-                      </p>
+                      {isUploadingScreenshot ? (
+                        <>
+                          <Loader2 className="w-6 h-6 mx-auto text-amber-400 mb-1 animate-spin" />
+                          <div className="text-xs font-semibold text-amber-300">
+                            Optimizing &amp; Uploading Screenshot to Storage...
+                          </div>
+                          <p className="text-[10px] text-slate-400 mt-0.5">
+                            Converting to high-speed WebP format
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-6 h-6 mx-auto text-indigo-400 mb-1" />
+                          <div className="text-xs font-semibold text-slate-200">
+                            Upload or Drag Payment Screenshot
+                          </div>
+                          <p className="text-[10px] text-slate-400 mt-0.5">
+                            PNG, JPG, or WebP screenshot from Cash App, Chime, Bank, or Crypto wallet
+                          </p>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>

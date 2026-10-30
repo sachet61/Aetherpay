@@ -1071,8 +1071,9 @@ app.post('/api/auth/register', async (req, res) => {
     return res.json({ received: true });
   });
 
-  // Web Push VAPID Public Key Endpoint
+  // Web Push VAPID Public Key Endpoint with Edge Caching
   app.get('/api/push/vapid-public-key', (req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
     return res.json({ publicKey: VAPID_PUBLIC_KEY });
   });
 

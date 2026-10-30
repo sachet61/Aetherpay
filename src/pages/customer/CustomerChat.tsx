@@ -27,8 +27,10 @@ import {
   BellOff,
   Volume2,
   VolumeX,
+  ZoomIn,
 } from 'lucide-react';
 import { notificationSoundService } from '../../services/notificationSoundService';
+import { storageService } from '../../services/storageService';
 
 interface CustomerChatProps {
   currentUser: UserProfile;
@@ -245,9 +247,28 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     setAttachmentUrl(null);
   };
 
-  const handleAttachDemoReceipt = () => {
-    setAttachmentName('payment_receipt_proof.jpg');
-    setAttachmentUrl('/src/assets/images/gaming_wallet_hero_1791685883611.jpg');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState<{ url: string; name: string } | null>(null);
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !conversation) return;
+
+    setIsUploadingAttachment(true);
+    const result = await storageService.uploadChatAttachment(file, conversation.id);
+    setIsUploadingAttachment(false);
+
+    if (result.success && result.url) {
+      setAttachmentUrl(result.url);
+      setAttachmentName(result.name || file.name);
+    } else {
+      alert(result.error || 'Failed to upload image. Please try again.');
+    }
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
   };
 
   const handleConfirmGameRequest = (e: React.FormEvent) => {
@@ -469,15 +490,28 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
                     {/* Image Attachment preview */}
                     {msg.attachmentUrl && !msg.transactionData && (
-                      <div className="mt-2 rounded-lg overflow-hidden border border-slate-700/60 bg-black/40">
+                      <div
+                        onClick={() =>
+                          setLightboxImage({
+                            url: msg.attachmentUrl!,
+                            name: msg.attachmentName || 'Attachment image',
+                          })
+                        }
+                        className="mt-2 rounded-lg overflow-hidden border border-slate-700/60 bg-black/40 cursor-pointer group relative"
+                        title="Click to view full image"
+                      >
                         <img
                           src={msg.attachmentUrl}
                           alt="Attachment"
-                          className="w-full h-32 object-cover"
+                          className="w-full max-h-48 object-cover group-hover:scale-105 transition-transform duration-200"
                           referrerPolicy="no-referrer"
                         />
-                        <div className="p-1.5 text-[10px] text-slate-300 font-mono truncate">
-                          {msg.attachmentName || 'Attachment image'}
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-amber-300">
+                          <ZoomIn className="w-5 h-5 drop-shadow-md" />
+                        </div>
+                        <div className="p-1.5 text-[10px] text-slate-300 font-mono truncate bg-slate-900/80 flex items-center justify-between">
+                          <span className="truncate">{msg.attachmentName || 'Attachment image'}</span>
+                          <span className="text-[9px] text-amber-400 font-sans ml-1 shrink-0">Click to expand</span>
                         </div>
                       </div>
                     )}
@@ -558,13 +592,25 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
         onSubmit={handleSendMessage}
         className="p-3.5 rounded-b-2xl border border-t-0 border-slate-800 bg-[#0E1726] flex items-center gap-2"
       >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          onChange={handleFileSelect}
+          className="hidden"
+        />
         <button
           type="button"
-          onClick={handleAttachDemoReceipt}
-          className="p-2.5 rounded-xl bg-[#0A0F1D] border border-slate-800 hover:border-amber-500/40 text-slate-400 hover:text-white transition-colors"
-          title="Attach payment receipt / image"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isUploadingAttachment}
+          className="p-2.5 rounded-xl bg-[#0A0F1D] border border-slate-800 hover:border-amber-500/40 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+          title="Attach payment receipt / image from device"
         >
-          <Paperclip className="w-4 h-4" />
+          {isUploadingAttachment ? (
+            <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
+          ) : (
+            <Paperclip className="w-4 h-4" />
+          )}
         </button>
 
         <input
@@ -649,6 +695,29 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               </button>
             </div>
           </form>
+        </div>
+      )}
+      {/* LIGHTBOX MODAL: Full Resolution Image Viewer */}
+      {lightboxImage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150">
+          <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center">
+            <button
+              onClick={() => setLightboxImage(null)}
+              className="absolute -top-10 right-0 p-1.5 rounded-full bg-slate-800 text-slate-300 hover:text-white transition-colors"
+              title="Close image viewer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <img
+              src={lightboxImage.url}
+              alt={lightboxImage.name}
+              className="max-w-full max-h-[82vh] object-contain rounded-xl border border-slate-700/80 shadow-2xl"
+              referrerPolicy="no-referrer"
+            />
+            <div className="mt-2 text-xs font-mono text-slate-300 bg-slate-900/90 px-3 py-1 rounded-full border border-slate-700">
+              {lightboxImage.name}
+            </div>
+          </div>
         </div>
       )}
     </div>

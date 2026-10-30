@@ -19,7 +19,10 @@ import {
   Bell,
   BellRing,
   Sparkles,
+  Camera,
+  Loader2,
 } from 'lucide-react';
+import { storageService } from '../../services/storageService';
 
 interface CustomerProfileProps {
   currentUser: UserProfile;
@@ -42,6 +45,38 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
   const [pushLoading, setPushLoading] = useState<boolean>(false);
   const [pushStatusMsg, setPushStatusMsg] = useState<{ text: string; isError?: boolean } | null>(null);
   const [showIOSGuide, setShowIOSGuide] = useState<boolean>(false);
+  const avatarInputRef = React.useRef<HTMLInputElement>(null);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState<boolean>(false);
+
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setIsUploadingAvatar(true);
+      const res = await storageService.uploadAvatar(file, currentUser.id);
+      setIsUploadingAvatar(false);
+
+      if (res.success && res.url) {
+        const updatedUser: UserProfile = {
+          ...currentUser,
+          avatarUrl: res.url,
+        };
+        dataService.registerUser(updatedUser);
+        authSessionService.updateUserProfile(updatedUser);
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'avatar_updated' } }));
+        setSuccessNote('Profile picture uploaded and compressed via WebP transform!');
+        setTimeout(() => setSuccessNote(null), 5000);
+      } else {
+        alert(res.error || 'Failed to update profile picture.');
+      }
+    } catch (err: any) {
+      setIsUploadingAvatar(false);
+      alert(err.message || 'Error uploading profile picture.');
+    } finally {
+      if (avatarInputRef.current) avatarInputRef.current.value = '';
+    }
+  };
 
   React.useEffect(() => {
     if (typeof window !== 'undefined' && webPushClient.isPushSupported()) {
@@ -114,8 +149,49 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
       <div className="p-6 rounded-2xl border border-slate-800 bg-slate-900 shadow-xl space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-800">
           <div className="flex items-center gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-indigo-600/30 border border-indigo-500/50 flex items-center justify-center text-white font-bold text-xl font-mono">
-              {currentUser.displayName.charAt(0)}
+            <div className="relative group">
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleAvatarChange}
+                className="hidden"
+              />
+              <div
+                onClick={() => avatarInputRef.current?.click()}
+                className="w-16 h-16 rounded-2xl bg-indigo-600/30 border border-indigo-500/50 flex items-center justify-center text-white font-bold text-xl font-mono overflow-hidden cursor-pointer relative shadow-lg group-hover:border-indigo-400 transition-all"
+                title="Click to change profile picture"
+              >
+                {currentUser.avatarUrl ? (
+                  <img
+                    src={currentUser.avatarUrl}
+                    alt={currentUser.displayName}
+                    className="w-full h-full object-cover"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <span>{currentUser.displayName.charAt(0)}</span>
+                )}
+
+                {/* Camera Overlay on Hover */}
+                <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-indigo-300">
+                  {isUploadingAvatar ? (
+                    <Loader2 className="w-5 h-5 animate-spin text-amber-400" />
+                  ) : (
+                    <Camera className="w-5 h-5 drop-shadow" />
+                  )}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => avatarInputRef.current?.click()}
+                disabled={isUploadingAvatar}
+                className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center shadow-md border-2 border-slate-900 hover:bg-indigo-500 transition-colors disabled:opacity-50"
+                title="Upload Photo"
+              >
+                {isUploadingAvatar ? <Loader2 className="w-3 h-3 animate-spin" /> : <Camera className="w-3 h-3" />}
+              </button>
             </div>
             <div>
               <h2 className="text-lg font-bold text-white">{currentUser.displayName}</h2>

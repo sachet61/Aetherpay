@@ -42,8 +42,12 @@ import {
   BellOff,
   Volume2,
   VolumeX,
+  Paperclip,
+  ZoomIn,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { notificationSoundService } from '../../services/notificationSoundService';
+import { storageService } from '../../services/storageService';
 
 interface AdminChatProps {
   currentUser: UserProfile;
@@ -69,6 +73,11 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   const [isInternalNote, setIsInternalNote] = useState(false);
   const [showCustomerDetails, setShowCustomerDetails] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [attachmentUrl, setAttachmentUrl] = useState<string | null>(null);
+  const [attachmentName, setAttachmentName] = useState<string | null>(null);
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState<{ url: string; name: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Sync highlightConvId if updated from external navigation (e.g. Directory)
   useEffect(() => {
@@ -468,9 +477,29 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     setTimeout(() => setCopiedField(null), 2000);
   };
 
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !activeConv) return;
+
+    setIsUploadingAttachment(true);
+    const result = await storageService.uploadChatAttachment(file, activeConv.id);
+    setIsUploadingAttachment(false);
+
+    if (result.success && result.url) {
+      setAttachmentUrl(result.url);
+      setAttachmentName(result.name || file.name);
+    } else {
+      alert(result.error || 'Failed to upload attachment.');
+    }
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
   const handleSendMessage = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!inputText.trim() || !activeConv) return;
+    if ((!inputText.trim() && !attachmentUrl) || !activeConv) return;
 
     const newMsg = dataService.sendChatMessage({
       conversationId: activeConv.id,
@@ -478,6 +507,8 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       senderName: currentUser.displayName,
       senderRole: currentUser.role,
       text: inputText.trim(),
+      attachmentUrl: attachmentUrl || undefined,
+      attachmentName: attachmentName || undefined,
       isInternalNote,
     });
 
@@ -497,6 +528,8 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     });
 
     setInputText('');
+    setAttachmentUrl(null);
+    setAttachmentName(null);
     setIsInternalNote(false);
   };
 
@@ -1111,15 +1144,28 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                           )}
 
                           {msg.attachmentUrl && !msg.transactionData && (
-                            <div className="mt-2 rounded-lg overflow-hidden border border-slate-700/60 bg-black/40">
+                            <div
+                              onClick={() =>
+                                setLightboxImage({
+                                  url: msg.attachmentUrl!,
+                                  name: msg.attachmentName || 'Attached receipt',
+                                })
+                              }
+                              className="mt-2 rounded-lg overflow-hidden border border-slate-700/60 bg-black/40 cursor-pointer group relative"
+                              title="Click to view full image"
+                            >
                               <img
                                 src={msg.attachmentUrl}
                                 alt="Receipt"
-                                className="w-full h-28 object-cover"
+                                className="w-full max-h-48 object-cover group-hover:scale-105 transition-transform duration-200"
                                 referrerPolicy="no-referrer"
                               />
-                              <div className="p-1 text-[10px] text-slate-300 font-mono truncate">
-                                {msg.attachmentName || 'Attached receipt'}
+                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-indigo-300">
+                                <ZoomIn className="w-5 h-5 drop-shadow-md" />
+                              </div>
+                              <div className="p-1 text-[10px] text-slate-300 font-mono truncate bg-slate-900/80 flex items-center justify-between">
+                                <span className="truncate">{msg.attachmentName || 'Attached receipt'}</span>
+                                <span className="text-[9px] text-indigo-400 font-sans ml-1 shrink-0">Click to expand</span>
                               </div>
                             </div>
                           )}
@@ -1131,7 +1177,25 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                 <div ref={messagesEndRef} />
               </div>
 
-
+              {/* Attachment Preview Chip */}
+              {attachmentName && (
+                <div className="px-4 py-2 bg-slate-900 border-t border-slate-800 flex items-center justify-between text-xs text-indigo-300 shrink-0">
+                  <div className="flex items-center gap-1.5">
+                    <ImageIcon className="w-3.5 h-3.5 text-indigo-400" />
+                    <span className="font-mono truncate max-w-xs">{attachmentName}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAttachmentName(null);
+                      setAttachmentUrl(null);
+                    }}
+                    className="text-slate-400 hover:text-white"
+                  >
+                    Remove
+                  </button>
+                </div>
+              )}
 
               {/* COMPOSER BAR */}
               <form
@@ -1156,6 +1220,27 @@ export const AdminChat: React.FC<AdminChatProps> = ({
 
                 <div className="flex items-center gap-2">
                   <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleFileSelect}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isUploadingAttachment}
+                    className="p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-indigo-500 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+                    title="Attach receipt / screenshot"
+                  >
+                    {isUploadingAttachment ? (
+                      <RefreshCw className="w-4 h-4 animate-spin text-indigo-400" />
+                    ) : (
+                      <Paperclip className="w-4 h-4" />
+                    )}
+                  </button>
+
+                  <input
                     type="text"
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
@@ -1172,7 +1257,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                   />
                   <button
                     type="submit"
-                    disabled={!inputText.trim()}
+                    disabled={!inputText.trim() && !attachmentUrl}
                     className={`p-2.5 rounded-xl font-medium text-xs transition-colors disabled:opacity-50 ${
                       isInternalNote
                         ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold'
@@ -1733,6 +1818,30 @@ export const AdminChat: React.FC<AdminChatProps> = ({
             >
               Cancel
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* LIGHTBOX MODAL: Full Resolution Image Viewer */}
+      {lightboxImage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150">
+          <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center">
+            <button
+              onClick={() => setLightboxImage(null)}
+              className="absolute -top-10 right-0 p-1.5 rounded-full bg-slate-800 text-slate-300 hover:text-white transition-colors"
+              title="Close image viewer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <img
+              src={lightboxImage.url}
+              alt={lightboxImage.name}
+              className="max-w-full max-h-[82vh] object-contain rounded-xl border border-slate-700/80 shadow-2xl"
+              referrerPolicy="no-referrer"
+            />
+            <div className="mt-2 text-xs font-mono text-slate-300 bg-slate-900/90 px-3 py-1 rounded-full border border-slate-700">
+              {lightboxImage.name}
+            </div>
           </div>
         </div>
       )}

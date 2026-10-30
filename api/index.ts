@@ -471,6 +471,7 @@ export default async function handler(req: any, res: any) {
 
   // 5. Web Push Endpoints for PWA Background Notifications on Vercel
   if (url.includes('/api/push/vapid-public-key') && req.method === 'GET') {
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
     return res.status(200).json({ publicKey: VAPID_PUBLIC_KEY });
   }
 
