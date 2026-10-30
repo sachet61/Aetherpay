@@ -65,6 +65,7 @@ const STORAGE_KEYS = {
   CONFIG: 'aetherpay_config',
   FAKED_CASHOUTS: 'aetherpay_faked_cashouts',
   PASSWORD_RESET_TOKENS: 'aetherpay_password_reset_tokens',
+  WEBHOOK_LOGS: 'aetherpay_webhook_logs',
   CURRENT_USER_ID: 'aetherpay_current_user_id',
 };
 
@@ -394,7 +395,13 @@ class DataService {
     window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
 
     try {
-      const user = this.getCurrentUser() || authSessionService.getCurrentUser();
+      const activeSession = authSessionService.getActiveSession();
+      const user = this.getCurrentUser() || (activeSession ? {
+        id: activeSession.userId,
+        email: activeSession.email,
+        displayName: activeSession.displayName,
+        role: activeSession.role,
+      } as any : null);
       const isAdmin = user?.role === 'admin' || user?.role === 'agent';
       const currentUserId = user?.id;
 
@@ -489,7 +496,7 @@ class DataService {
           this.applyConversationRows(convRes.data, false);
           // Hydrate customer's active chat messages capped at 40
           const convIds = convRes.data.map((c: any) => c.id);
-          const activeConv = this.getOrCreateConversationForCustomer(currentUserId, currentUser?.displayName || 'Player');
+          const activeConv = this.getOrCreateConversationForCustomer(currentUserId, user?.displayName || 'Player');
           const allTargetIds = Array.from(new Set([...convIds, activeConv.id, `conv_${currentUserId}`].filter(Boolean)));
           let msgQuery = supabase.from('messages').select('*');
           if (allTargetIds.length === 1) {
@@ -4388,7 +4395,14 @@ class DataService {
   }
 
   public hydrateForSession(user?: UserProfile): void {
-    const target = user || this.getCurrentUser() || authSessionService.getCurrentUser();
+    const activeSession = authSessionService.getActiveSession();
+    const sessionUser = activeSession ? ({
+      id: activeSession.userId,
+      email: activeSession.email,
+      displayName: activeSession.displayName,
+      role: activeSession.role,
+    } as any) : null;
+    const target = user || this.getCurrentUser() || sessionUser;
     if (target?.role === 'admin' || target?.role === 'agent') {
       this.initialCompactLoad();
     }

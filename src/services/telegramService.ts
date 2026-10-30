@@ -87,7 +87,7 @@ class TelegramService {
   public async testConnection(
     botToken: string,
     channelId: string
-  ): Promise<{ success: boolean; message: string }> {
+  ): Promise<{ success: boolean; message: string; suggestedChannelId?: string }> {
     const cleanToken = botToken.trim();
     const cleanChatId = channelId.trim();
 

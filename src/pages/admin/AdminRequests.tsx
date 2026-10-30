@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { UserProfile, TopUpRequest, WithdrawalRequest, GameAccount, WithdrawalStatus } from '../../types';
 import { dataService } from '../../services/dataService';
 import {
@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Sparkles,
   Zap,
+  X,
 } from 'lucide-react';
 
 interface AdminRequestsProps {
@@ -57,6 +58,12 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
   // Game ID assignment inputs
   const [assignedUsername, setAssignedUsername] = useState('');
   const [assignedPassword, setAssignedPassword] = useState('');
+
+  // Pagination & Feedback States
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMoreTopups, setHasMoreTopups] = useState(true);
+  const [hasMoreWithdrawals, setHasMoreWithdrawals] = useState(true);
+  const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   const [syncVersion, setSyncVersion] = useState(0);
 

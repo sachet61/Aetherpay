@@ -251,6 +251,11 @@ class TelegramEngine {
     return this.sendDirectMessage(this.config.channelId, minimalText);
   }
 
+  public async sendNotification(payload: { message?: string; text?: string; [key: string]: any }) {
+    const text = payload.text || payload.message || 'Notification';
+    return this.sendDirectMessage(this.config.channelId, text);
+  }
+
   public async sendDirectMessage(chatId: string | number, text: string) {
     if (!this.config.botToken) {
       return { success: false, message: 'Bot token not set' };

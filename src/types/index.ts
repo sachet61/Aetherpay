@@ -352,6 +352,14 @@ export interface GatewaySimulatorConfig {
   };
 }
 
+export interface CashoutFeedConfig {
+  enabled: boolean;
+  minAmount?: number;
+  maxAmount?: number;
+  frequencySeconds?: number;
+  [key: string]: any;
+}
+
 export interface AppConfig {
   currency: string;
   paymentMethods: PaymentMethodConfig[];
