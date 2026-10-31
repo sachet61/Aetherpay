@@ -1,6 +1,6 @@
 {
-  "summary":  "Architectural plan to permanently resolve chat photo attachment disappearance on page refresh. Fixes PostgreSQL schema omission, implements dual-resilient database persistence via both root columns and transaction_data JSONB, updates message hydration in customer and admin chat components, and adds live production idempotent migration routines.",
-  "updatedAt":  "2026-10-30T09:47:52.779310625Z",
+  "summary":  "Updated plan addressing dev server startup stability on port 3000 and the cross-browser chat synchronization architecture. Enforces deterministic conversation IDs, unifies Supabase Realtime channels, adds visibility-based delta catch-up, and consolidates fragmented messages in live PostgreSQL without message loss.",
+  "updatedAt":  "2026-10-31T05:40:56.369896413Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

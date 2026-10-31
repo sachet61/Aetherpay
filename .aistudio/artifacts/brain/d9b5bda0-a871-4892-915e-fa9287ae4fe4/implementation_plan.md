@@ -1,114 +1,106 @@
-# Chat Photo Attachment Persistence & Refresh Resilience
+# Cross-Browser Chat Sync & Dev Server Stability Plan
 
-## Title & Summary
-**Permanent Chat Photo Persistence Across Page Refresh & Live Production Synchronization**
-Chat photo attachments currently display immediately upon upload but disappear permanently after a browser refresh. This plan details the root cause diagnosis, dual-resilient PostgreSQL storage strategy (supporting both migrated and unmigrated live production databases), and end-to-end hydration updates across Customer and Admin chat interfaces.
+## Summary
+Resolve real-time chat desynchronization between separate browsers logged into the same account, while verifying and locking dev server runtime stability on port 3000. Eliminates fragmented conversation IDs, unifies Supabase Realtime rooms and `postgres_changes` stream filters, prevents destructive message deletion during thread deduplication, and adds automatic visibility/focus delta sync.
+
+---
+
+## Dev Server Status & Runtime Stability
+
+- **Port & Host**: Verified running on `http://localhost:3000` (listening on `0.0.0.0:3000`).
+- **HTTP Verification**: Confirmed responsive with `HTTP/1.1 200 OK` (`X-Powered-By: Express` mounting `vite.middlewares`).
+- **Compilation Check**: `npm run build` and `compile_applet` verified passing with zero errors.
+- **Process Guard**: Dev server process restarted fresh via `restart_dev_server` to ensure clean WebSocket and HMR listeners.
 
 ---
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The primary database schema currently lacks `attachment_url` and `attachment_name` columns in `public.messages`. If an application relies solely on a column that might not yet exist on a live Supabase production instance, PostgREST will reject the upsert with error `42703` (column does not exist).
-> 
-> To ensure **100% live production compatibility without downtime**, we implement a **Dual-Resilient Persistence Architecture**:
-> 1. Store attachment metadata in both the native columns (`attachment_url`, `attachment_name`) and the existing, production-active `transaction_data` JSONB column (`transaction_data.attachmentUrl`, `transaction_data.attachmentName`).
-> 2. Implement resilient fallback in `sendChatMessage`: if the database rejects `attachment_url` with column-not-found, gracefully fallback to the `transaction_data` payload.
-> 3. Read symmetrically: resolve attachments as `row.attachment_url || row.transaction_data?.attachmentUrl`.
+> **Deterministic Canonical ID**: Every customer conversation ID is strictly enforced as `conv_${customerId}` across all browser sessions and devices. Any legacy conversation IDs (`conv_1`, `conv_abc`, etc.) will be automatically consolidated into `conv_${customerId}` in live PostgreSQL without message loss.
+>
+> **Zero Data Loss Guarantee**: Destructive `DELETE FROM messages` operations in client deduplication routines are removed. All messages belonging to legacy aliases are re-parented via SQL `UPDATE messages SET conversation_id = 'conv_' || customer_id`.
 
 ---
 
 ## 1. Overview & Core Concept
-- **What It Does**: Ensures that any image/photo uploaded by a customer or staff member in chat remains permanently stored, attached to the message record in PostgreSQL, and instantly restored upon page refresh, browser restart, or cross-device session switch.
-- **Target Audience**: Customers uploading receipts/verification screenshots and Support/Treasury staff reviewing payment proofs and game account credentials.
-- **Key Value**: Eliminates lost transaction proofs, avoids asking customers to re-upload receipts, and prevents support friction.
+- **Problem**: When a customer logs into two separate browsers, Browser A and Browser B maintain independent local caches. If Browser A holds a legacy conversation (`conv_1`) while Browser B initializes `conv_${customerId}`, messages sent from Browser A are saved under `conv_1` and broadcast to `room_conv_1`, while Browser B only subscribes to `room_conv_${customerId}` and filters `postgres_changes` on `conversation_id = conv_${customerId}`. Furthermore, neither browser performs delta catch-up on tab focus or visibility changes.
+- **Goal**: Full bidirectional synchronization where any message sent from either browser appears instantaneously (< 150ms) in the other browser, and the entire message history is unified and complete across both browsers and on page refresh.
 
 ---
 
-## 2. User Experience & Visual Design
-- **Upload Flow**: 
-  1. Customer or Admin selects an image (JPEG, PNG, WebP).
-  2. Client auto-compresses to WebP (max 1200px) and uploads to Supabase Storage bucket `chat_attachments` (with server-side fallback).
-  3. Instant optimistic render in the message stream with thumbnail, filename, and full-screen lightbox preview trigger.
-- **Post-Refresh Experience**:
-  1. User reloads browser (`F5` / `Cmd+R`) or switches tabs.
-  2. `fetchMessagesForConversation` queries PostgreSQL `public.messages`.
-  3. Messages hydrate with `attachmentUrl` intact; thumbnails render immediately with zero flicker or broken image placeholders.
-  4. Lightbox modal opens high-resolution image smoothly on click.
+## 2. Key Architecture & Synchronization Flow
 
----
-
-## 3. Key Product Decisions & Trade-Offs
-
-- **Decision 1: Dual-Resilient Storage (Native Column + JSONB Payload)**
-  - *Chosen Approach*: Write `attachment_url` and `attachment_name` as explicit columns while simultaneously mirroring them in the existing `transaction_data` JSONB field.
-  - *Why*: Existing production Supabase tables may not immediately receive `ALTER TABLE` DDL execution until an administrator runs migrations. The `transaction_data` JSONB column is already present and active across all live production tables. By writing to both and falling back gracefully on `42703`, photos will persist permanently today even on unmigrated live instances.
-  - *Alternatives Considered*: Native column only (fails on live production if DDL is delayed); JSONB only (lacks clean indexed queryability and direct SQL inspection).
-
-- **Decision 2: Universal Hydration Fallback**
-  - *Chosen Approach*: `row.attachment_url || row.transaction_data?.attachmentUrl || undefined` across all readers (`fetchMessagesForConversation`, `fetchOlderMessages`, `applyMessageRows`, `db_chat` Supabase Realtime listeners).
-  - *Why*: Guarantees backward compatibility for existing records and future-proofs any newly inserted messages.
-
----
-
-## 4. Technical Architecture & Data Strategy
-
-### System Flow Diagram
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ CustomerChat / AdminChat                                    │
-│ 1. User selects image -> storageService.uploadChatAttachment │
-│ 2. Public Storage URL received:                             │
-│    https://<supabase-id>.supabase.co/storage/v1/object/...   │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│ dataService.sendChatMessage                                 │
-│ Dual-Resilient Payload:                                     │
-│  - content: string                                          │
-│  - attachment_url: URL                                      │
-│  - attachment_name: Name                                    │
-│  - transaction_data: { ...data, attachmentUrl, attachmentName}
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-            ┌──────────────────┴──────────────────┐
-            ▼                                     ▼
-┌──────────────────────────────┐    ┌──────────────────────────────┐
-│ Standard Upsert              │    │ Fallback Upsert (on 42703)   │
-│ Inserts with native columns  │    │ Omits missing column, keeps  │
-│ & transaction_data JSONB     │    │ transaction_data JSONB       │
-└──────────────────────────────┘    └──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│ PostgreSQL: public.messages                                 │
-│ id | conversation_id | content | attachment_url | tx_data   │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-            ┌──────────────────┴──────────────────┐
-            ▼ (On Refresh / Load)                 ▼ (Realtime Event)
-┌──────────────────────────────┐    ┌──────────────────────────────┐
-│ fetchMessagesForConversation │    │ postgres_changes on messages │
-│ Resolves:                    │    │ Resolves:                    │
-│ attachmentUrl =              │    │ attachmentUrl =              │
-│  col || tx_data.attachmentUrl│    │  col || tx_data.attachmentUrl│
-└──────────────────────────────┘    └──────────────────────────────┘
+┌─────────────────────────────────┐                ┌─────────────────────────────────┐
+│        Browser Instance A       │                │        Browser Instance B       │
+│  (Logged in as customer usr_X)  │                │  (Logged in as customer usr_X)  │
+└────────────────┬────────────────┘                └────────────────┬────────────────┘
+                 │                                                  │
+                 │ 1. Guaranteed Canonical ID: conv_usr_X           │ 1. Guaranteed Canonical ID: conv_usr_X
+                 │                                                  │
+                 │ 2. Broadcast & DB Upsert                         │ 2. Realtime Broadcast & Postgres Stream
+                 ▼                                                  ▼
+   ┌─────────────────────────────────────────────────────────────────────────────┐
+   │                         Supabase Realtime & PostgreSQL                      │
+   │                                                                             │
+   │   • Channel: room_conv_usr_X (both browsers subscribed)                    │
+   │   • postgres_changes: messages WHERE conversation_id = 'conv_usr_X'         │
+   │   • Database Table: messages (strictly keyed to conv_usr_X)                 │
+   └──────────────────────────────────────┬──────────────────────────────────────┘
+                                          │
+                        3. Window Focus / Tab Activation
+                        Catch-up Delta (.gt('created_at', lastTimestamp))
+                                          ▼
+   ┌─────────────────────────────────────────────────────────────────────────────┐
+   │                   Instant State & Chronological Merge                       │
+   └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Proposed Execution Steps (Upon Proceed)
-1. **Schema & Migration Update**:
-   - Add `ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;` and `attachment_name TEXT;` to `/supabase_schema.sql` and `/public/supabase_schema.sql`.
-   - Update `CREATE TABLE IF NOT EXISTS public.messages` definition.
-2. **Server-Side Live Boot Migration (`server.ts` & `api/index.ts`)**:
-   - Execute safe non-blocking `ALTER TABLE IF NOT EXISTS` check using the Supabase Service Role client so production instances automatically adopt the new columns.
-3. **Data Service Core Engine (`src/services/dataService.ts`)**:
-   - In `sendChatMessage`: Include `attachment_url` and `attachment_name`, mirror inside `transaction_data`, and handle `42703` column error fallback.
-   - In `fetchMessagesForConversation`: Extract `attachmentUrl: row.attachment_url || row.transaction_data?.attachmentUrl || undefined`.
-   - In `fetchOlderMessages`: Extract attachment fields identically.
-   - In `applyMessageRows`: Extract attachment fields identically.
-4. **Chat View Realtime Synchronization (`CustomerChat.tsx` & `AdminChat.tsx`)**:
-   - Ensure the Realtime `postgres_changes` listener extracts `attachmentUrl` from `row.attachment_url || row.transaction_data?.attachmentUrl`.
-   - Verify lightbox modal and file preview component bindings.
-5. **Validation**:
-   - Run `lint_applet` (`tsc --noEmit`) and `compile_applet`.
+---
+
+## 3. Key Technical Decisions & Trade-Offs
+
+### 1. Deterministic Canonical Conversation ID Invariant
+- **Approach**: Ensure `getOrCreateConversationForCustomer` and `deduplicateAndMergeConversations` ALWAYS enforce `conv_${customerId}` as the primary ID.
+- **Why**: Eliminates client-side ID divergence where Browser A adopts an arbitrary local ID from cache while Browser B creates a fresh canonical ID.
+- **Trade-Off**: Any legacy aliases in storage (`conv_1`, etc.) will be cleanly re-mapped to `conv_${customerId}`.
+
+### 2. Live Supabase Thread Consolidation Without Deletion
+- **Approach**: Remove the unsafe `supabase.from('messages').delete().in('conversation_id', duplicateIds)` call. Instead, execute an atomic update:
+  `UPDATE messages SET conversation_id = 'conv_' || customer_id WHERE conversation_id IN (legacyIds)`
+  prior to deleting empty legacy conversation records.
+- **Why**: Prevents message loss if concurrent inserts occur or if migration is partially executed.
+
+### 3. Unified Realtime Subscriptions (Broadcast + Postgres Changes)
+- **Approach**:
+  - In `CustomerChat.tsx`: Subscribe to `room_${canonicalId}` for instant peer-to-peer broadcast delivery across tabs/browsers.
+  - Subscribe to `postgres_changes` on `messages` table for `conversation_id=eq.${canonicalId}` so database inserts from the server or other clients are immediately captured.
+  - Handle duplicate message reconciliation by unique message `id`.
+
+### 4. Visibility & Window Focus Delta Catch-Up
+- **Approach**: In `CustomerChat.tsx` and `dataService.ts`:
+  - When `document.visibilityState === 'visible'` or window receives `focus`, fetch messages created after the latest in-memory message timestamp (`.gt('created_at', latestTimestamp)`).
+  - Merges newly received rows into React state without full page reload or UI flicker.
+
+---
+
+## 4. Implementation Steps (To Execute Upon Approval)
+
+1. **`src/services/dataService.ts`**:
+   - Enforce `conv_${customerId}` as the non-negotiable canonical ID in `getOrCreateConversationForCustomer` and `deduplicateAndMergeConversations`.
+   - Update `fetchMessagesForConversation` to query all historical candidate IDs and user-scoped messages, consolidating them under `conv_${customerId}` in PostgreSQL.
+   - Remove destructive message deletion from `deduplicateAndMergeConversations`.
+   - Add chat message delta sync to `syncDelta()`.
+
+2. **`src/pages/customer/CustomerChat.tsx`**:
+   - Ensure the active conversation ID is resolved to `conv_${currentUser.id}`.
+   - Attach a window `focus` and `visibilitychange` listener that performs a timestamp-bounded delta query to catch up messages sent from another browser.
+   - Ensure `channelRef` and `dbChannel` consistently use `conv_${currentUser.id}`.
+
+3. **`src/components/common/GlobalChatNotificationManager.tsx`**:
+   - Align the background customer message listener with `conv_${currentUser.id}`.
+
+4. **Verification**:
+   - Compile using `compile_applet`.
+   - Verify TypeScript type safety (`tsc --noEmit`).
