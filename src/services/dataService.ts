@@ -273,18 +273,14 @@ class DataService {
     }
 
     if (document.visibilityState === 'visible') {
-      console.log('[SwiftSweeps] Browser tab active. Realtime WebSocket stream maintaining live state with 0 polling egress.');
+      console.log('[SwiftSweeps] Browser tab active. Running delta sync.');
       this.syncStatus = 'connected';
       window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
 
       const now = Date.now();
       const lastSync = this.lastSyncTimestamp ? new Date(this.lastSyncTimestamp).getTime() : 0;
-      const hoursDormant = (now - lastSync) / (1000 * 60 * 60);
-
-      // Only run a compact refresh if the user returns after a dormant overnight session (>12 hours)
-      if (!this.lastSyncTimestamp || hoursDormant > 12) {
-        console.log('[SwiftSweeps] Tab dormant for >12h. Running targeted initial compact load.');
-        this.initialCompactLoad();
+      if (!this.lastSyncTimestamp || (now - lastSync) > 3000) {
+        this.syncDelta().catch(() => {});
       }
     }
   }
@@ -588,11 +584,28 @@ class DataService {
       let changed = false;
 
       if (!isAdmin && currentUserId) {
-        // Customer: only refresh user's own wallet and recent requests
-        const [walletRes, topupsRes, withdrawalsRes] = await Promise.all([
+        // Customer: refresh user's own wallet, recent requests, and delta chat messages
+        const canonicalConvId = `conv_${currentUserId}`;
+        const msgQuery = this.lastSyncTimestamp
+          ? supabase
+              .from('messages')
+              .select('*')
+              .eq('conversation_id', canonicalConvId)
+              .gt('created_at', this.lastSyncTimestamp)
+              .order('created_at', { ascending: false })
+              .limit(25)
+          : supabase
+              .from('messages')
+              .select('*')
+              .eq('conversation_id', canonicalConvId)
+              .order('created_at', { ascending: false })
+              .limit(25);
+
+        const [walletRes, topupsRes, withdrawalsRes, msgsRes] = await Promise.all([
           supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
           supabase.from('topups').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(10),
           supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(10),
+          msgQuery,
         ]);
 
         if (walletRes.data) {
@@ -605,6 +618,10 @@ class DataService {
         }
         if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
           this.applyWithdrawalRows(withdrawalsRes.data, false);
+          changed = true;
+        }
+        if (msgsRes.data && msgsRes.data.length > 0) {
+          this.applyMessageRows(msgsRes.data);
           changed = true;
         }
       } else if (isAdmin) {
@@ -766,6 +783,26 @@ class DataService {
 
         this.cache[STORAGE_KEYS.MESSAGES] = all;
         this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
+
+        // Consolidate legacy thread messages in PostgreSQL asynchronously
+        const legacyIds = queryIds.filter((id) => id !== targetConvId);
+        if (legacyIds.length > 0 && supabase && isSupabaseConfigured()) {
+          (async () => {
+            try {
+              await supabase
+                .from('messages')
+                .update({ conversation_id: targetConvId })
+                .in('conversation_id', legacyIds);
+              await supabase
+                .from('conversations')
+                .delete()
+                .in('id', legacyIds);
+            } catch (err) {
+              console.warn('Error consolidating legacy threads:', err);
+            }
+          })();
+        }
+
         window.dispatchEvent(
           new CustomEvent('aetherpay_state_changed', {
             detail: { key: 'conversation_messages_fetched', conversationId: targetConvId, count: merged.length },
@@ -4506,19 +4543,39 @@ class DataService {
   // Real-Time Chat & Customer Support Center (Invariant: Strictly 1 persistent conversation per customer)
   public resolveCanonicalConvId(convId: string): string {
     if (!convId) return '';
-    return this.conversationAliasMap.get(convId) || convId;
+    const mapped = this.conversationAliasMap.get(convId);
+    if (mapped) return mapped;
+    if (convId.startsWith('conv_')) {
+      const candidateCustId = convId.slice(5);
+      const user = this.getUserById(candidateCustId);
+      if (user) {
+        return `conv_${user.id}`;
+      }
+    }
+    const convs = this.cache[STORAGE_KEYS.CONVERSATIONS] as SupportConversation[];
+    if (Array.isArray(convs)) {
+      const found = convs.find(
+        (c) => c.id === convId || c.customerId === convId || (c.customerId && `conv_${c.customerId}` === convId)
+      );
+      if (found && found.customerId) {
+        const canonicalId = `conv_${found.customerId}`;
+        this.conversationAliasMap.set(convId, canonicalId);
+        return canonicalId;
+      }
+    }
+    return convId;
   }
 
   private getCustomerGroupKey(c: SupportConversation): string {
+    if (c.customerId && c.customerId.trim()) {
+      return `usr_${c.customerId.trim().toLowerCase()}`;
+    }
     const user = this.getUserById(c.customerId) || (c.customerEmail ? this.getUsers().find((u) => u.email.toLowerCase() === c.customerEmail?.toLowerCase()) : undefined);
     if (user) {
       return `usr_${user.id}`;
     }
     if (c.customerEmail && c.customerEmail.trim()) {
       return `email_${c.customerEmail.trim().toLowerCase()}`;
-    }
-    if (c.customerId && c.customerId.trim()) {
-      return `id_${c.customerId.trim().toLowerCase()}`;
     }
     if (c.customerName && c.customerName.trim()) {
       return `name_${c.customerName.trim().toLowerCase()}`;
@@ -4548,32 +4605,56 @@ class DataService {
     const messagesToReassignInDb: { fromIds: string[]; toId: string }[] = [];
 
     for (const [, convs] of groups.entries()) {
-      if (convs.length === 1) {
-        deduplicated.push(convs[0]);
+      const sampleConv = convs[0];
+      const user = this.getUserById(sampleConv.customerId) || (sampleConv.customerEmail ? this.getUsers().find((u) => u.email.toLowerCase() === sampleConv.customerEmail?.toLowerCase()) : undefined);
+
+      // Support agents and administrators must never have customer support tickets
+      if (user && (user.role === 'agent' || user.role === 'admin')) {
+        const allIds = convs.map((c) => c.id);
+        duplicateIdsToDeleteInDb.push(...allIds);
+        for (const cid of allIds) {
+          delete messagesDict[cid];
+        }
+        messagesUpdated = true;
         continue;
       }
 
-      // Multiple conversations found for this single customer: prefer thread with messages, then earliest created
+      // Enforce strictly deterministic canonical ID: conv_${customerId}
+      const resolvedCustomerId = user?.id || sampleConv.customerId;
+      const canonicalId = resolvedCustomerId ? `conv_${resolvedCustomerId}` : sampleConv.id;
+
+      // Multiple conversations found or non-canonical ID: merge them
       convs.sort((a, b) => {
         const countA = (messagesDict[a.id] || []).length;
         const countB = (messagesDict[b.id] || []).length;
         if (countA !== countB) return countB - countA;
         return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
       });
-      const canonical = { ...convs[0] };
+
+      const primary = { ...convs[0] };
       const duplicates = convs.slice(1);
       const dupIds: string[] = [];
 
       // Collect all messages across canonical and duplicates
-      const canonicalMsgs: ChatMessage[] = [...(messagesDict[canonical.id] || [])];
+      const allMsgs: ChatMessage[] = [];
+      const primaryMsgs = messagesDict[primary.id] || [];
+      allMsgs.push(...primaryMsgs);
+      if (primary.id !== canonicalId) {
+        dupIds.push(primary.id);
+        this.conversationAliasMap.set(primary.id, canonicalId);
+        delete messagesDict[primary.id];
+        messagesUpdated = true;
+      }
 
-      let maxUnreadStaff = canonical.unreadCountStaff || 0;
-      let maxUnreadCustomer = canonical.unreadCountCustomer || 0;
-      let hasOpenStatus = canonical.status === 'open';
+      let maxUnreadStaff = primary.unreadCountStaff || 0;
+      let maxUnreadCustomer = primary.unreadCountCustomer || 0;
+      let hasOpenStatus = primary.status === 'open';
 
       for (const dup of duplicates) {
-        dupIds.push(dup.id);
-        this.conversationAliasMap.set(dup.id, canonical.id);
+        if (dup.id !== canonicalId) {
+          dupIds.push(dup.id);
+        }
+        this.conversationAliasMap.set(dup.id, canonicalId);
 
         if (dup.status === 'open') hasOpenStatus = true;
         maxUnreadStaff = Math.max(maxUnreadStaff, dup.unreadCountStaff || 0);
@@ -4581,61 +4662,49 @@ class DataService {
 
         const dupMsgs = messagesDict[dup.id] || [];
         if (dupMsgs.length > 0) {
-          for (const m of dupMsgs) {
-            canonicalMsgs.push({
-              ...m,
-              conversationId: canonical.id,
-            });
-          }
+          allMsgs.push(...dupMsgs);
           delete messagesDict[dup.id];
           messagesUpdated = true;
         }
       }
 
-      // Deduplicate messages by id and sort chronologically
+      // Re-assign all collected messages to canonical ID, deduplicating by id
       const seenMsgIds = new Set<string>();
       const cleanMsgs: ChatMessage[] = [];
-      for (const m of canonicalMsgs) {
+      for (const m of allMsgs) {
         if (!seenMsgIds.has(m.id)) {
           seenMsgIds.add(m.id);
-          cleanMsgs.push(m);
+          cleanMsgs.push({
+            ...m,
+            conversationId: canonicalId,
+          });
         }
       }
       cleanMsgs.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-      messagesDict[canonical.id] = cleanMsgs;
+      messagesDict[canonicalId] = cleanMsgs;
       messagesUpdated = true;
 
       // Update canonical conversation attributes
-      canonical.status = hasOpenStatus ? 'open' : canonical.status;
-      canonical.unreadCountStaff = maxUnreadStaff;
-      canonical.unreadCountCustomer = maxUnreadCustomer;
+      primary.id = canonicalId;
+      if (resolvedCustomerId) primary.customerId = resolvedCustomerId;
+      if (user?.displayName) primary.customerName = user.displayName;
+      if (user?.email) primary.customerEmail = user.email;
+      primary.status = hasOpenStatus ? 'open' : primary.status;
+      primary.unreadCountStaff = maxUnreadStaff;
+      primary.unreadCountCustomer = maxUnreadCustomer;
 
       if (cleanMsgs.length > 0) {
         const lastMsg = cleanMsgs[cleanMsgs.length - 1];
-        canonical.lastMessageText = lastMsg.text || canonical.lastMessageText;
-        canonical.lastMessageTimestamp = lastMsg.createdAt || canonical.lastMessageTimestamp;
-        canonical.updatedAt = lastMsg.createdAt || canonical.updatedAt;
+        primary.lastMessageText = lastMsg.text || primary.lastMessageText;
+        primary.lastMessageTimestamp = lastMsg.createdAt || primary.lastMessageTimestamp;
+        primary.updatedAt = lastMsg.createdAt || primary.updatedAt;
       }
 
-      // Reconcile user profile if available
-      const user = this.getUserById(canonical.customerId) || (canonical.customerEmail ? this.getUsers().find((u) => u.email.toLowerCase() === canonical.customerEmail?.toLowerCase()) : undefined);
-      if (user) {
-        canonical.customerId = user.id;
-        canonical.customerName = user.displayName;
-        canonical.customerEmail = user.email;
+      deduplicated.push(primary);
+      if (dupIds.length > 0) {
+        duplicateIdsToDeleteInDb.push(...dupIds);
+        messagesToReassignInDb.push({ fromIds: dupIds, toId: canonicalId });
       }
-
-      // Invariant: Support agents and administrators must never have customer support tickets
-      if (user && (user.role === 'agent' || user.role === 'admin')) {
-        duplicateIdsToDeleteInDb.push(canonical.id, ...dupIds);
-        delete messagesDict[canonical.id];
-        messagesUpdated = true;
-        continue;
-      }
-
-      deduplicated.push(canonical);
-      duplicateIdsToDeleteInDb.push(...dupIds);
-      messagesToReassignInDb.push({ fromIds: dupIds, toId: canonical.id });
     }
 
     if (messagesUpdated) {
@@ -4650,8 +4719,10 @@ class DataService {
     this.cache[STORAGE_KEYS.CONVERSATIONS] = deduplicated;
     this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, deduplicated);
 
-    // Asynchronously update Supabase database to maintain single persistent thread invariant
-    if (duplicateIdsToDeleteInDb.length > 0 && supabase && isSupabaseConfigured()) {
+    // Asynchronously update Supabase database to maintain single persistent thread invariant:
+    // Re-assign messages to canonicalId, and delete duplicate conversation shells ONLY.
+    // Invariant: Never delete message history records during deduplication.
+    if ((messagesToReassignInDb.length > 0 || duplicateIdsToDeleteInDb.length > 0) && supabase && isSupabaseConfigured()) {
       (async () => {
         try {
           for (const item of messagesToReassignInDb) {
@@ -4662,14 +4733,12 @@ class DataService {
                 .in('conversation_id', item.fromIds);
             }
           }
-          await supabase
-            .from('messages')
-            .delete()
-            .in('conversation_id', duplicateIdsToDeleteInDb);
-          await supabase
-            .from('conversations')
-            .delete()
-            .in('id', duplicateIdsToDeleteInDb);
+          if (duplicateIdsToDeleteInDb.length > 0) {
+            await supabase
+              .from('conversations')
+              .delete()
+              .in('id', duplicateIdsToDeleteInDb);
+          }
         } catch (dbErr) {
           console.warn('[SwiftSweeps] Supabase conversation consolidation sync notice:', dbErr);
         }
@@ -4736,11 +4805,12 @@ class DataService {
   }
 
   public getOrCreateConversationForCustomer(customerId: string, customerName: string): SupportConversation {
+    const canonicalId = `conv_${customerId}`;
     const user = this.getUserById(customerId) || this.getUserByEmail(customerId);
     if (user && (user.role === 'agent' || user.role === 'admin')) {
       // Support staff accounts must not have active player support channels
       return {
-        id: `conv_${customerId}`,
+        id: canonicalId,
         customerId,
         customerName: user.displayName || customerName,
         customerEmail: user.email,
@@ -4760,40 +4830,61 @@ class DataService {
     const userEmail = user?.email?.toLowerCase();
     const cleanCustomerName = customerName?.trim().toLowerCase();
 
-    // 1. First look by customerId
-    let conv = list.find((c) => c.customerId === customerId);
+    // 1. Look strictly by canonical ID
+    let conv = list.find((c) => c.id === canonicalId);
 
-    // 2. If not found by ID, look by email (handles ID migrations / account recreation)
+    // 2. Look by customerId
+    if (!conv) {
+      conv = list.find((c) => c.customerId === customerId);
+    }
+
+    // 3. Look by email
     if (!conv && userEmail) {
       conv = list.find((c) => c.customerEmail && c.customerEmail.toLowerCase() === userEmail);
     }
 
-    // 3. Look by customer name
+    // 4. Look by customer name
     if (!conv && cleanCustomerName) {
       conv = list.find((c) => c.customerName && c.customerName.trim().toLowerCase() === cleanCustomerName);
     }
 
-    // 4. Look by conv ID alias (e.g. conv_haude_maxe)
-    if (!conv && cleanCustomerName) {
-      const idAlias = `conv_${cleanCustomerName.replace(/\s+/g, '_')}`;
-      conv = list.find((c) => c.id.toLowerCase() === idAlias);
-    }
-
-    // 5. Look if any registered user has matching name/id to link
-    if (!conv && user) {
-      conv = list.find((c) => {
-        const cUser = this.getUserById(c.customerId);
-        return cUser && cUser.id === user.id;
-      });
-    }
-
-    // 6. Look by deterministic canonical ID
-    if (!conv) {
-      conv = list.find((c) => c.id === `conv_${customerId}`);
-    }
-
     if (conv) {
       let needsSave = false;
+      if (conv.id !== canonicalId) {
+        const oldId = conv.id;
+        this.conversationAliasMap.set(oldId, canonicalId);
+        conv.id = canonicalId;
+        needsSave = true;
+
+        // Migrate local cached messages
+        const allMsgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+        if (allMsgs[oldId]) {
+          const remapped = allMsgs[oldId].map((m) => ({ ...m, conversationId: canonicalId }));
+          allMsgs[canonicalId] = [...(allMsgs[canonicalId] || []), ...remapped];
+          delete allMsgs[oldId];
+          this.cache[STORAGE_KEYS.MESSAGES] = allMsgs;
+          this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, allMsgs);
+        }
+
+        // Re-parent in database asynchronously
+        if (supabase && isSupabaseConfigured()) {
+          (async () => {
+            try {
+              await supabase
+                .from('messages')
+                .update({ conversation_id: canonicalId })
+                .eq('conversation_id', oldId);
+              await supabase
+                .from('conversations')
+                .delete()
+                .eq('id', oldId);
+            } catch (err) {
+              console.warn('Error re-parenting messages in Supabase:', err);
+            }
+          })();
+        }
+      }
+
       if (conv.customerId !== customerId) {
         conv.customerId = customerId;
         needsSave = true;
@@ -4812,7 +4903,6 @@ class DataService {
     }
 
     if (!conv) {
-      const canonicalId = `conv_${customerId}`;
       conv = {
         id: canonicalId,
         customerId,

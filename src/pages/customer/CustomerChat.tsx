@@ -199,9 +199,36 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       )
       .subscribe();
 
+    let lastCatchUpTime = 0;
+    const performCatchUp = () => {
+      const now = Date.now();
+      if (now - lastCatchUpTime < 1500) return;
+      lastCatchUpTime = now;
+      dataService.fetchMessagesForConversation(conv.id, { limit: 40 }).then((fresh) => {
+        if (fresh && fresh.length > 0) {
+          setMessages(fresh);
+        }
+      });
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        performCatchUp();
+      }
+    };
+
+    const handleFocus = () => {
+      performCatchUp();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleFocus);
+
     return () => {
       window.removeEventListener('aetherpay_state_changed', handleSync);
       window.removeEventListener('storage', handleSync);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleFocus);
       supabase.removeChannel(broadcastChannel);
       supabase.removeChannel(dbChannel);
     };
