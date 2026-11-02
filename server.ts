@@ -97,6 +97,7 @@ async function startServer() {
   };
   app.use('/src/images', express.static(path.resolve(process.cwd(), 'src/images'), staticCacheOptions));
   app.use('/images', express.static(path.resolve(process.cwd(), 'public/images'), staticCacheOptions));
+  app.use('/uploads', express.static(path.resolve(process.cwd(), 'public/uploads'), staticCacheOptions));
   app.use(express.static(path.resolve(process.cwd(), 'public'), staticCacheOptions));
 
   // Upload QR code image from PC or Mobile and store in server storage / repo
@@ -1106,7 +1107,7 @@ app.post('/api/auth/register', async (req, res) => {
     return res.json({ received: true });
   });
 
-  // Secure Storage Fallback Upload Endpoint (Uses Service Role to guarantee bucket existence & persistence)
+  // Secure Storage Fallback Upload Endpoint (Dual disk persistence + Supabase Service Role)
   app.post('/api/storage/upload', async (req, res) => {
     try {
       const { bucket, path: filePath, fileBase64, contentType, userId } = req.body;
@@ -1114,40 +1115,60 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(400).json({ error: 'bucket, path, and fileBase64 are required' });
       }
 
-      await ensureStorageBuckets(supabaseAdmin);
+      await ensureStorageBuckets(supabaseAdmin).catch(() => {});
 
       const buffer = Buffer.from(fileBase64, 'base64');
-      const { data, error } = await supabaseAdmin.storage
-        .from(bucket)
-        .upload(filePath, buffer, {
-          contentType: contentType || 'image/webp',
-          upsert: true,
-          cacheControl: '86400',
-        });
+      const cleanPath = filePath.replace(/^\/+/, '');
+      const localFilePath = path.resolve(process.cwd(), 'public/uploads', bucket, cleanPath);
 
-      if (error) {
-        return res.status(500).json({ error: error.message });
+      // 1. Dual-persist to server disk immediately
+      try {
+        await fs.promises.mkdir(path.dirname(localFilePath), { recursive: true });
+        await fs.promises.writeFile(localFilePath, buffer);
+      } catch (fsErr: any) {
+        console.warn('[Storage Local Disk Write Warning]:', fsErr?.message);
       }
 
-      const { data: urlData } = supabaseAdmin.storage
-        .from(bucket)
-        .getPublicUrl(data?.path || filePath);
+      const localUrl = `/uploads/${bucket}/${cleanPath}`;
+      let finalPublicUrl = localUrl;
 
-      const publicUrl = urlData.publicUrl;
+      // 2. Mirror upload to Supabase Storage
+      try {
+        const { data, error } = await supabaseAdmin.storage
+          .from(bucket)
+          .upload(cleanPath, buffer, {
+            contentType: contentType || 'image/webp',
+            upsert: true,
+            cacheControl: '86400',
+          });
+
+        if (!error) {
+          const { data: urlData } = supabaseAdmin.storage
+            .from(bucket)
+            .getPublicUrl(data?.path || cleanPath);
+          if (urlData?.publicUrl) {
+            finalPublicUrl = urlData.publicUrl;
+          }
+        } else {
+          console.warn(`[Supabase Storage Notice for ${bucket}]:`, error.message);
+        }
+      } catch (supaErr: any) {
+        console.warn(`[Supabase Storage Exception for ${bucket}]:`, supaErr?.message);
+      }
 
       // If uploading an avatar and userId is provided, atomically update public.users and auth metadata
       if (bucket === 'avatars' && userId) {
         try {
           await supabaseAdmin
             .from('users')
-            .update({ avatar_url: publicUrl, updated_at: new Date().toISOString() })
+            .update({ avatar_url: finalPublicUrl, updated_at: new Date().toISOString() })
             .eq('id', userId);
         } catch (e: any) {
           console.warn('[Auto Avatar DB Update Notice]:', e?.message);
         }
 
         try {
-          await supabaseAdmin.auth.admin.updateUserById(userId, { user_metadata: { avatar_url: publicUrl } });
+          await supabaseAdmin.auth.admin.updateUserById(userId, { user_metadata: { avatar_url: finalPublicUrl } });
         } catch (e: any) {
           console.warn('[Auto Avatar Auth Update Notice]:', e?.message);
         }
@@ -1155,11 +1176,306 @@ app.post('/api/auth/register', async (req, res) => {
 
       return res.json({
         success: true,
-        url: publicUrl,
-        path: data?.path || filePath,
+        url: finalPublicUrl,
+        fallbackUrl: localUrl,
+        path: cleanPath,
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Server storage upload failed' });
+    }
+  });
+
+  // Streaming storage proxy endpoint to guarantee reliable image delivery across all networks & browsers
+  app.get('/api/storage/file', async (req, res) => {
+    try {
+      const bucket = (req.query.bucket as string) || 'chat_attachments';
+      const filePath = (req.query.path as string) || '';
+      const rawUrl = (req.query.url as string) || '';
+
+      let targetPath = filePath.replace(/^\/+/, '');
+      let targetBucket = bucket;
+
+      if (!targetPath && rawUrl) {
+        const match = rawUrl.match(/\/object\/public\/([^\/]+)\/(.+)$/);
+        if (match) {
+          targetBucket = match[1];
+          targetPath = match[2];
+        } else if (rawUrl.startsWith('/uploads/')) {
+          const localRel = rawUrl.replace(/^\/uploads\//, '');
+          const localOnDisk = path.resolve(process.cwd(), 'public/uploads', localRel);
+          if (fs.existsSync(localOnDisk)) {
+            const ext = path.extname(localOnDisk).toLowerCase();
+            const mime = ext === '.webp' ? 'image/webp' : ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
+            res.setHeader('Content-Type', mime);
+            res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+            return fs.createReadStream(localOnDisk).pipe(res);
+          }
+        }
+      }
+
+      if (!targetPath) {
+        return res.status(400).json({ error: 'path or url parameter is required' });
+      }
+
+      // 1. Check local disk first
+      const localDiskPath = path.resolve(process.cwd(), 'public/uploads', targetBucket, targetPath);
+      if (fs.existsSync(localDiskPath)) {
+        const ext = path.extname(localDiskPath).toLowerCase();
+        const mime = ext === '.webp' ? 'image/webp' : ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
+        res.setHeader('Content-Type', mime);
+        res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+        return fs.createReadStream(localDiskPath).pipe(res);
+      }
+
+      // 2. Download via Supabase Service Role
+      const { data: blob, error } = await supabaseAdmin.storage.from(targetBucket).download(targetPath);
+      if (error || !blob) {
+        return res.status(404).json({ error: 'File not found' });
+      }
+
+      const buffer = Buffer.from(await blob.arrayBuffer());
+      const ext = path.extname(targetPath).toLowerCase();
+      const mime = blob.type || (ext === '.webp' ? 'image/webp' : ext === '.png' ? 'image/png' : 'image/jpeg');
+
+      // Cache locally on disk for future instant requests
+      await fs.promises.mkdir(path.dirname(localDiskPath), { recursive: true }).catch(() => {});
+      await fs.promises.writeFile(localDiskPath, buffer).catch(() => {});
+
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+      return res.send(buffer);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Error streaming file' });
+    }
+  });
+
+  // Authoritative Cross-Browser Chat Message Consolidation & Retrieval Endpoint
+  app.get('/api/chat/messages', async (req, res) => {
+    try {
+      const customerId = (req.query.customerId as string || '').trim();
+      const conversationId = (req.query.conversationId as string || '').trim();
+      if (!customerId && !conversationId) {
+        return res.status(400).json({ error: 'customerId or conversationId is required' });
+      }
+
+      const effectiveCustomerId = customerId || (conversationId.startsWith('conv_') ? conversationId.replace('conv_', '') : conversationId);
+      const canonicalConvId = `conv_${effectiveCustomerId}`;
+
+      // 1. Gather all related conversation IDs
+      const candidateIds = new Set<string>();
+      if (conversationId) candidateIds.add(conversationId);
+      if (canonicalConvId) candidateIds.add(canonicalConvId);
+      if (effectiveCustomerId) {
+        candidateIds.add(effectiveCustomerId);
+        candidateIds.add(`conv_cust_${effectiveCustomerId}`);
+
+        // Find any existing conversation rows in PostgreSQL for this customer
+        const { data: dbConvs } = await supabaseAdmin
+          .from('conversations')
+          .select('id')
+          .or(`customer_id.eq.${effectiveCustomerId},id.eq.${canonicalConvId}`);
+        if (dbConvs && dbConvs.length > 0) {
+          dbConvs.forEach((c: any) => candidateIds.add(c.id));
+        }
+      }
+
+      const queryIds = Array.from(candidateIds);
+
+      // 2. Fetch all messages in PostgreSQL for these conversation IDs
+      let query = supabaseAdmin
+        .from('messages')
+        .select('*');
+
+      if (queryIds.length === 1) {
+        query = query.eq('conversation_id', queryIds[0]);
+      } else {
+        query = query.in('conversation_id', queryIds);
+      }
+
+      const { data: messages, error: msgErr } = await query
+        .order('created_at', { ascending: true })
+        .limit(200);
+
+      if (msgErr) {
+        return res.status(500).json({ error: msgErr.message });
+      }
+
+      // 3. Server-side authoritative consolidation: Re-parent legacy messages in PostgreSQL to canonical ID
+      const legacyIds = queryIds.filter((id) => id !== canonicalConvId);
+      if (legacyIds.length > 0 && effectiveCustomerId) {
+        supabaseAdmin
+          .from('messages')
+          .update({ conversation_id: canonicalConvId })
+          .in('conversation_id', legacyIds)
+          .then(() => {}, () => {});
+      }
+
+      // 4. Ensure canonical parent conversation exists in PostgreSQL
+      if (effectiveCustomerId) {
+        const { data: existingConv } = await supabaseAdmin
+          .from('conversations')
+          .select('id')
+          .eq('id', canonicalConvId)
+          .maybeSingle();
+
+        if (!existingConv) {
+          const { data: dbUser } = await supabaseAdmin
+            .from('users')
+            .select('display_name, email')
+            .eq('id', effectiveCustomerId)
+            .maybeSingle();
+
+          const now = new Date().toISOString();
+          const lastMsgContent = (messages && messages.length > 0) ? messages[messages.length - 1].content : '';
+          const lastMsgAt = (messages && messages.length > 0) ? messages[messages.length - 1].created_at : now;
+
+          try {
+            await supabaseAdmin.from('conversations').upsert({
+              id: canonicalConvId,
+              customer_id: effectiveCustomerId,
+              customer_name: dbUser?.display_name || 'Customer',
+              status: 'open',
+              last_message: lastMsgContent || '',
+              last_message_at: lastMsgAt || now,
+              created_at: now,
+            }, { onConflict: 'id' });
+          } catch (convErr: any) {
+            console.warn('[Auto Upsert Conversation Warning]:', convErr?.message);
+          }
+        }
+      }
+
+      return res.json({
+        success: true,
+        canonicalId: canonicalConvId,
+        messages: messages || [],
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to fetch chat messages' });
+    }
+  });
+
+  // Authoritative Message Sending Endpoint with Guaranteed Parent Conversation Upsert
+  app.post('/api/chat/send', async (req, res) => {
+    try {
+      const {
+        conversationId,
+        senderId,
+        senderName,
+        senderRole,
+        recipientId,
+        recipientName,
+        text,
+        attachmentUrl,
+        attachmentName,
+        transactionData,
+        isInternalNote,
+      } = req.body;
+
+      if (!senderId) {
+        return res.status(400).json({ error: 'senderId is required' });
+      }
+
+      // Determine customer ID and canonical conversation ID
+      const customerId = senderRole === 'customer'
+        ? senderId
+        : (recipientId || (conversationId ? conversationId.replace(/^conv_/, '') : ''));
+
+      if (!customerId) {
+        return res.status(400).json({ error: 'Cannot determine customer ID for conversation' });
+      }
+
+      const canonicalConvId = `conv_${customerId}`;
+      const now = new Date().toISOString();
+
+      // 1. GUARANTEE parent conversation exists in conversations table BEFORE inserting message
+      const { data: existingConv } = await supabaseAdmin
+        .from('conversations')
+        .select('id, customer_name')
+        .eq('id', canonicalConvId)
+        .maybeSingle();
+
+      const customerDisplayName =
+        existingConv?.customer_name ||
+        (senderRole === 'customer' ? senderName : recipientName) ||
+        'Customer';
+
+      const { error: convErr } = await supabaseAdmin
+        .from('conversations')
+        .upsert(
+          {
+            id: canonicalConvId,
+            customer_id: customerId,
+            customer_name: customerDisplayName,
+            last_message: text || (attachmentUrl ? '[Photo Attachment]' : ''),
+            last_message_at: now,
+            status: existingConv?.status || 'open',
+          },
+          { onConflict: 'id' }
+        );
+
+      if (convErr) {
+        console.warn('[Parent Conv Upsert Notice]:', convErr.message);
+      }
+
+      // 2. Insert message with complete metadata
+      const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const txPayload = transactionData
+        ? {
+            ...transactionData,
+            attachmentUrl: attachmentUrl || transactionData.attachmentUrl || transactionData.proofUrl,
+            attachmentName: attachmentName || transactionData.attachmentName,
+          }
+        : (attachmentUrl ? { attachmentUrl, attachmentName } : null);
+
+      const messageRow: any = {
+        id: msgId,
+        conversation_id: canonicalConvId,
+        sender_id: senderId,
+        sender_name: senderName || 'User',
+        sender_role: senderRole || 'customer',
+        content: text || '',
+        transaction_data: txPayload,
+        created_at: now,
+      };
+
+      if (attachmentUrl) {
+        messageRow.attachment_url = attachmentUrl;
+      }
+
+      let savedMsg: any = null;
+      const { data, error: insertErr } = await supabaseAdmin
+        .from('messages')
+        .insert(messageRow)
+        .select()
+        .single();
+
+      if (insertErr) {
+        // Fallback without attachment_url if column does not exist in schema
+        delete messageRow.attachment_url;
+        const { data: fallbackMsg, error: retryErr } = await supabaseAdmin
+          .from('messages')
+          .insert(messageRow)
+          .select()
+          .single();
+
+        if (retryErr) {
+          console.error('[Chat Send Fallback Error]:', retryErr);
+          return res.status(500).json({ error: retryErr.message });
+        }
+        savedMsg = fallbackMsg;
+      } else {
+        savedMsg = data;
+      }
+
+      return res.json({
+        success: true,
+        message: savedMsg,
+        canonicalId: canonicalConvId,
+      });
+    } catch (err: any) {
+      console.error('[Chat Send Fatal Error]:', err);
+      return res.status(500).json({ error: err.message || 'Failed to dispatch chat message' });
     }
   });
 

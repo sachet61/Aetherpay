@@ -692,6 +692,24 @@ class DataService {
             candidateIds.add(c.id);
           }
         }
+      }
+
+      // 1. Authoritative cross-browser fetch via server endpoint first
+      try {
+        const queryCustId = customerId || (targetConvId.startsWith('conv_') ? targetConvId.replace('conv_', '') : '');
+        const srvRes = await fetch(`/api/chat/messages?conversationId=${encodeURIComponent(targetConvId)}&customerId=${encodeURIComponent(queryCustId || '')}`);
+        if (srvRes.ok) {
+          const srvData = await srvRes.json();
+          if (srvData.success && Array.isArray(srvData.messages) && srvData.messages.length > 0) {
+            this.applyMessageRows(srvData.messages);
+            return this.getMessages(targetConvId);
+          }
+        }
+      } catch (srvErr) {
+        console.warn('[DataService] /api/chat/messages notice:', srvErr);
+      }
+
+      if (customerId) {
         try {
           const { data: dbConvs } = await supabase
             .from('conversations')
@@ -743,6 +761,25 @@ class DataService {
         }
 
         for (const row of data) {
+          const resolvedAttachmentUrl =
+            row.attachment_url ||
+            row.transaction_data?.attachmentUrl ||
+            row.transaction_data?.proofUrl ||
+            row.transaction_data?.proof_url ||
+            row.transaction_data?.receiptUrl ||
+            row.transaction_data?.receipt_url ||
+            row.transaction_data?.imageUrl ||
+            row.transaction_data?.image_url ||
+            row.proof_url ||
+            undefined;
+
+          const resolvedAttachmentName =
+            row.attachment_name ||
+            row.transaction_data?.attachmentName ||
+            row.transaction_data?.proofName ||
+            row.transaction_data?.fileName ||
+            (resolvedAttachmentUrl ? 'Attached image' : undefined);
+
           const item: ChatMessage = {
             id: row.id,
             conversationId: targetConvId,
@@ -750,8 +787,8 @@ class DataService {
             senderName: row.sender_name,
             senderRole: row.sender_role || 'customer',
             text: row.content || '',
-            attachmentUrl: row.attachment_url || row.transaction_data?.attachmentUrl || undefined,
-            attachmentName: row.attachment_name || row.transaction_data?.attachmentName || undefined,
+            attachmentUrl: resolvedAttachmentUrl,
+            attachmentName: resolvedAttachmentName,
             isInternalNote: false,
             transactionData: row.transaction_data || undefined,
             createdAt: row.created_at || new Date().toISOString(),
@@ -851,6 +888,25 @@ class DataService {
         }
 
         for (const row of data) {
+          const resolvedAttachmentUrl =
+            row.attachment_url ||
+            row.transaction_data?.attachmentUrl ||
+            row.transaction_data?.proofUrl ||
+            row.transaction_data?.proof_url ||
+            row.transaction_data?.receiptUrl ||
+            row.transaction_data?.receipt_url ||
+            row.transaction_data?.imageUrl ||
+            row.transaction_data?.image_url ||
+            row.proof_url ||
+            undefined;
+
+          const resolvedAttachmentName =
+            row.attachment_name ||
+            row.transaction_data?.attachmentName ||
+            row.transaction_data?.proofName ||
+            row.transaction_data?.fileName ||
+            (resolvedAttachmentUrl ? 'Attached image' : undefined);
+
           const item: ChatMessage = {
             id: row.id,
             conversationId: row.conversation_id,
@@ -858,8 +914,8 @@ class DataService {
             senderName: row.sender_name,
             senderRole: row.sender_role || 'customer',
             text: row.content || '',
-            attachmentUrl: row.attachment_url || row.transaction_data?.attachmentUrl || undefined,
-            attachmentName: row.attachment_name || row.transaction_data?.attachmentName || undefined,
+            attachmentUrl: resolvedAttachmentUrl,
+            attachmentName: resolvedAttachmentName,
             isInternalNote: false,
             transactionData: row.transaction_data || undefined,
             createdAt: row.created_at || new Date().toISOString(),
@@ -1371,6 +1427,25 @@ class DataService {
     const msgMap: Record<string, ChatMessage[]> = { ...currentMsgs };
 
     for (const m of rows) {
+      const resolvedAttachmentUrl =
+        m.attachment_url ||
+        m.transaction_data?.attachmentUrl ||
+        m.transaction_data?.proofUrl ||
+        m.transaction_data?.proof_url ||
+        m.transaction_data?.receiptUrl ||
+        m.transaction_data?.receipt_url ||
+        m.transaction_data?.imageUrl ||
+        m.transaction_data?.image_url ||
+        m.proof_url ||
+        undefined;
+
+      const resolvedAttachmentName =
+        m.attachment_name ||
+        m.transaction_data?.attachmentName ||
+        m.transaction_data?.proofName ||
+        m.transaction_data?.fileName ||
+        (resolvedAttachmentUrl ? 'Attached image' : undefined);
+
       const item: ChatMessage = {
         id: m.id,
         conversationId: m.conversation_id,
@@ -1378,10 +1453,10 @@ class DataService {
         senderName: m.sender_name,
         senderRole: m.sender_role || 'customer',
         text: m.content || '',
-        isInternalNote: false,
+        isInternalNote: Boolean(m.is_internal_note),
         isRead: true,
-        attachmentUrl: m.attachment_url || m.transaction_data?.attachmentUrl || undefined,
-        attachmentName: m.attachment_name || m.transaction_data?.attachmentName || undefined,
+        attachmentUrl: resolvedAttachmentUrl,
+        attachmentName: resolvedAttachmentName,
         transactionData: m.transaction_data || undefined,
         createdAt: m.created_at || new Date().toISOString(),
       };
@@ -5113,6 +5188,25 @@ class DataService {
                 attachmentName: newMsg.attachmentName || null,
               }
             : null);
+
+        // Authoritative server dispatch with Service Role to guarantee parent conversation existence in PostgreSQL
+        fetch('/api/chat/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: targetConvId,
+            senderId: newMsg.senderId,
+            senderName: newMsg.senderName,
+            senderRole: newMsg.senderRole,
+            recipientId: conv?.customerId || (targetConvId.startsWith('conv_') ? targetConvId.replace(/^conv_/, '') : ''),
+            recipientName: conv?.customerName,
+            text: newMsg.text,
+            attachmentUrl: newMsg.attachmentUrl,
+            attachmentName: newMsg.attachmentName,
+            transactionData: txPayload,
+            isInternalNote: newMsg.isInternalNote,
+          }),
+        }).catch((apiErr) => console.warn('[DataService] Server chat send notice:', apiErr));
 
         supabase
           .from('messages')

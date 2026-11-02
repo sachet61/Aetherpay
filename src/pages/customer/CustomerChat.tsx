@@ -516,32 +516,54 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                     )}
 
                     {/* Image Attachment preview */}
-                    {msg.attachmentUrl && (
-                      <div
-                        onClick={() =>
-                          setLightboxImage({
-                            url: msg.attachmentUrl!,
-                            name: msg.attachmentName || 'Attachment image',
-                          })
-                        }
-                        className="mt-2 rounded-lg overflow-hidden border border-slate-700/60 bg-black/40 cursor-pointer group relative"
-                        title="Click to view full image"
-                      >
-                        <img
-                          src={msg.attachmentUrl}
-                          alt="Attachment"
-                          className="w-full max-h-48 object-cover group-hover:scale-105 transition-transform duration-200"
-                          referrerPolicy="no-referrer"
-                        />
-                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-amber-300">
-                          <ZoomIn className="w-5 h-5 drop-shadow-md" />
+                    {(() => {
+                      const effectiveImgUrl =
+                        msg.attachmentUrl ||
+                        (msg.transactionData as any)?.attachmentUrl ||
+                        (msg.transactionData as any)?.proofUrl ||
+                        (msg.transactionData as any)?.receiptUrl;
+                      const effectiveImgName =
+                        msg.attachmentName ||
+                        (msg.transactionData as any)?.attachmentName ||
+                        (msg.transactionData as any)?.proofName ||
+                        'Attachment image';
+
+                      if (!effectiveImgUrl) return null;
+
+                      return (
+                        <div
+                          onClick={() =>
+                            setLightboxImage({
+                              url: effectiveImgUrl,
+                              name: effectiveImgName,
+                            })
+                          }
+                          className="mt-2 rounded-lg overflow-hidden border border-slate-700/60 bg-black/40 cursor-pointer group relative"
+                          title="Click to view full image"
+                        >
+                          <img
+                            src={effectiveImgUrl}
+                            alt={effectiveImgName}
+                            className="w-full max-h-48 object-cover group-hover:scale-105 transition-transform duration-200"
+                            referrerPolicy="no-referrer"
+                            onError={(e) => {
+                              const target = e.currentTarget;
+                              if (!target.dataset.retried) {
+                                target.dataset.retried = 'true';
+                                target.src = `/api/storage/file?url=${encodeURIComponent(effectiveImgUrl)}`;
+                              }
+                            }}
+                          />
+                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-amber-300">
+                            <ZoomIn className="w-5 h-5 drop-shadow-md" />
+                          </div>
+                          <div className="p-1.5 text-[10px] text-slate-300 font-mono truncate bg-slate-900/80 flex items-center justify-between">
+                            <span className="truncate">{effectiveImgName}</span>
+                            <span className="text-[9px] text-amber-400 font-sans ml-1 shrink-0">Click to expand</span>
+                          </div>
                         </div>
-                        <div className="p-1.5 text-[10px] text-slate-300 font-mono truncate bg-slate-900/80 flex items-center justify-between">
-                          <span className="truncate">{msg.attachmentName || 'Attachment image'}</span>
-                          <span className="text-[9px] text-amber-400 font-sans ml-1 shrink-0">Click to expand</span>
-                        </div>
-                      </div>
-                    )}
+                      );
+                    })()}
 
                     {/* Deterministic Smart Chat Intent Action */}
                     {msg.intentAction && (
