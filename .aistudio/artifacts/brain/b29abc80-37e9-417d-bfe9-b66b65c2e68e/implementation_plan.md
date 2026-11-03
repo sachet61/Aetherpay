@@ -1,66 +1,77 @@
-# Implementation Plan: Permanent Prevention of User Role Reversion (Agent / Admin)
+# Production Real-Time Chat Infrastructure Optimization Plan
 
-## 1. Problem Diagnosis & Root Causes
-
-When an administrator promotes a user (such as changing `haudemaxe@gmail.com` to `agent`) via the Admin Dashboard, the change succeeds in the database, but repeatedly reverts to `customer` upon session refresh or re-login in testing and production environments due to three interlocking flaws:
-
-1. **Unsynced `auth.users` Metadata in `server.ts`**:
-   The `/api/admin/users/:userId/role` endpoint in `server.ts` updated `public.users` but did NOT update `auth.users.raw_user_meta_data.role` via `supabaseAdmin.auth.admin.updateUserById`. The user's Supabase Auth JWT and auth session retained `role: "customer"`.
-
-2. **Blind Role Overwrite in `supabaseAuthService.ts` (`syncProfileAndWallet`)**:
-   During app startup (`onAuthStateChange`, `getSession`) or `loginWithEmail`, if the user was not present in the in-memory cache, `supabaseAuthService` reconstructed the user profile using `session.user.user_metadata?.role || 'customer'`. It immediately called `syncProfileAndWallet(userProfile)`, which executed `supabase.from('users').upsert({ id, role: 'customer', ... })`, actively clobbering the PostgreSQL database record back to `customer`.
-
-3. **Client-Side Role Leak in `dataService.ts` (`saveEntityToSupabase`)**:
-   Whenever generic user records were synchronized through `saveEntityToSupabase(STORAGE_KEYS.USERS)`, the client's local cached `role` was upserted back into PostgreSQL, allowing unprivileged client state to downgrade database roles.
+## Summary
+Comprehensive resolution of all 5 diagnostic bottlenecks identified in the non-AI real-time chat infrastructure. Consolidates redundant Supabase Realtime channels into single multiplexed connections, eliminates UI main-thread blocking from synchronous `localStorage` writes via bounded debounced caching, implements deterministic composite keyset pagination `(created_at, id)` with monotonic tie-breaking, and streamlines delta synchronization to single-query canonical lookups. Fully compatible with live Supabase PostgreSQL and the Node/Express backend.
 
 ---
 
-## 2. Architectural Fix & Invariants
+## 1. Core Architectural Flaws & Targeted Solutions
 
-1. **PostgreSQL `public.users` as Authoritative Single Source of Truth**:
-   - Client sessions and authentication listeners must always query `public.users` in PostgreSQL for the user's canonical `role` rather than defaulting to stale `user_metadata` or hardcoded `'customer'`.
-
-2. **Atomic Dual-Sync in Admin Role API (`server.ts`)**:
-   - When an administrator modifies a user's role via `/api/admin/users/:userId/role`, the server will update `public.users` AND `auth.users.user_metadata` via `supabaseAdmin.auth.admin.updateUserById`.
-   - Handles lookups by both UUID and email to ensure 100% reliability regardless of identifier passed.
-
-3. **Role Immutability in Client Sync (`syncProfileAndWallet` & `saveEntityToSupabase`)**:
-   - `syncProfileAndWallet()` will check existing records in `public.users` and preserve the database role rather than overwriting it with client session metadata.
-   - `saveEntityToSupabase(STORAGE_KEYS.USERS)` will omit or preserve existing `role` to prevent client downgrades.
-
-4. **Instant Role Hydration in `supabaseAuthService.ts`**:
-   - In `onAuthStateChange`, `getSession`, and `loginWithEmail`, fetch the user's row from `public.users` before establishing the session, ensuring that agents and admins are assigned their correct role on initial login and reload.
+| Diagnostic Issue | Root Cause | Production Architectural Fix |
+| :--- | :--- | :--- |
+| **1. Dual-Channel Subscription Overhead** | `CustomerChat.tsx` creates two separate WebSocket channels (`room_` + `db_chat_`), doubling gateway connections. | Consolidate broadcast and `postgres_changes` into a **single multiplexed channel** (`chat_${canonicalConvId}`). |
+| **2. Main-Thread LocalStorage Serialization** | `dataService.ts` executes synchronous `JSON.stringify` on the entire message history on every single incoming socket event. | Implement **bounded thread-local storage** (latest 100 messages per conversation) with **debounced asynchronous writes (300ms)** while updating memory immediately. |
+| **3. Monotonic Ordering & Jitter** | Sort comparison relies solely on `new Date(createdAt).getTime()`, leading to indeterminate ordering on rapid sub-millisecond multi-tab sends. | Implement **monotonic composite tie-breaking**: `new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime() \|\| a.id.localeCompare(b.id)`. |
+| **4. Keyset Pagination & DB Efficiency** | Messages fetched with offset/timestamp filters without compound keyset cursor support. | Implement **composite keyset pagination** using `(created_at, id)` cursor slicing in `dataService.ts` and ensure index compatibility on `messages(conversation_id, created_at DESC, id)`. |
+| **5. Multi-Candidate ID Query Waste** | `syncDelta` and `fetchMessagesForConversation` scan multiple legacy alias arrays on each poll/focus event. | Enforce **write-time canonical ID normalization**; query strictly `conv_${currentUserId}` during delta sync. |
 
 ---
 
-## 3. Step-by-Step Implementation Strategy
+## 2. Technical Implementation Specifications
 
-### Step 1: Update Server Role Handler (`server.ts`)
-- Modify `app.patch('/api/admin/users/:userId/role')` to:
-  - Query user by ID or email.
-  - Update `public.users` with `newRole`.
-  - Update `auth.users` metadata via `supabaseAdmin.auth.admin.updateUserById(userId, { user_metadata: { role: newRole } })`.
+### Step 1: Single Multiplexed Realtime Channel (`src/pages/customer/CustomerChat.tsx` & `GlobalChatNotificationManager.tsx`)
+- Replace the twin `broadcastChannel` + `dbChannel` setup with a single multiplexed Supabase channel:
+  ```typescript
+  const chatChannel = supabase.channel(`chat_${canonicalConvId}`)
+    .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
+      handleIncoming(payload);
+    })
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'messages',
+      filter: `conversation_id=eq.${canonicalConvId}`
+    }, (payload) => {
+      handlePostgresInsert(payload.new);
+    })
+    .subscribe();
+  ```
+- Store and cleanly unsubscribe `chatChannel` on component unmount or user change.
 
-### Step 2: Fix `supabaseAuthService.ts` Session Hydration & Sync
-- In `initAuthListener` (`onAuthStateChange` and `getSession`):
-  - Query `public.users` for the user's database role before generating `userProfile`.
-  - Ensure `userProfile.role` matches the database record.
-- In `loginWithEmail`:
-  - Query `public.users` for the verified role before constructing `userProfile` and `authSessionService.createSessionForUser`.
-- In `syncProfileAndWallet`:
-  - Verify if a record already exists in `public.users`; if so, retain `dbUser.role` and do not overwrite it.
+### Step 2: Bounded Local Storage & Debounced Persistence (`src/services/dataService.ts`)
+- In `saveToLocalStorage(STORAGE_KEYS.MESSAGES)`:
+  - Prune each conversation thread in the persistent payload to the **latest 100 messages**.
+  - Debounce the `localStorage.setItem` call by 300ms so rapid bursts of incoming or sent messages never block the rendering pipeline.
+  - In-memory cache (`this.cache[STORAGE_KEYS.MESSAGES]`) retains the full active session history for immediate, zero-latency UI rendering.
 
-### Step 3: Guard `dataService.ts` Storage Sync
-- In `saveEntityToSupabase(STORAGE_KEYS.USERS)`:
-  - Do not overwrite `role` with client state if the database row already exists.
-- In `updateUserRole`:
-  - Immediately call `authSessionService.updateUserProfile(targetUser)` if the updated user is the active user.
+### Step 3: Composite Keyset Pagination & Deterministic Monotonic Sorting (`src/services/dataService.ts`)
+- In `getMessages()` and `fetchOlderMessages()`:
+  - Enforce monotonic ordering:
+    ```typescript
+    sorted = messages.sort((a, b) => {
+      const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      return diff !== 0 ? diff : a.id.localeCompare(b.id);
+    });
+    ```
+  - In `fetchOlderMessages(conversationId, oldestTimestamp, oldestId)`:
+    - Slices strictly by `created_at <= oldestTimestamp` and excludes `id = oldestId` to eliminate edge pagination duplicate records.
 
-### Step 4: Verification & Live Database Audit
-- Run `node` verification script to verify `haudemaxe@gmail.com` and other test users in both `public.users` and `auth.users`.
-- Run `compile_applet` to confirm zero TypeScript and build errors.
+### Step 4: Write-Time Normalization & Streamlined Delta Sync (`src/services/dataService.ts`)
+- In `syncDelta()`:
+  - Query directly against `canonicalConvId` with a 10-second clock-skew tolerance buffer.
+  - Eliminate multi-candidate alias array construction.
+- In `server.ts`:
+  - Verify `/api/chat/messages` and `/api/chat/send` strictly enforce `conv_${customerId}`.
 
 ---
 
-## 4. User Prompt
-Please review the plan above. Click **Proceed** to apply the fix across `server.ts`, `supabaseAuthService.ts`, and `dataService.ts`.
+## 3. Production Verification & Safety Invariants
+- **Zero Mock / Zero Fallback**: Real PostgreSQL and Supabase Realtime channels only.
+- **Port 3000 Stability**: Dev server verified responding with `HTTP 200`.
+- **Zero Data Loss**: Existing message history and database rows remain untouched and protected.
+- **Build Verification**: Run `compile_applet` to confirm clean compilation and zero TypeScript errors.
+
+---
+
+## 4. User Confirmation
+Please review the architecture plan above. Click **Proceed** to apply the fixes across `src/services/dataService.ts`, `src/pages/customer/CustomerChat.tsx`, and `src/components/common/GlobalChatNotificationManager.tsx`.

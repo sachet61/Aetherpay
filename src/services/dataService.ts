@@ -97,6 +97,7 @@ class DataService {
   private realtimeChannel: any = null;
   private mutationQueue: Array<{ table: string; eventType: string; newRow: any; oldRow: any }> = [];
   private mutationDebounceTimer: number | null = null;
+  private messageSaveDebounceTimer: any = null;
   private isVisibilityListenerAttached = false;
   private isSyncingDelta = false;
   private conversationAliasMap: Map<string, string> = new Map();
@@ -239,6 +240,29 @@ class DataService {
     if (typeof localStorage === 'undefined') return;
     // Invariant: NEVER persist user directory records into browser localStorage
     if (key === STORAGE_KEYS.USERS) return;
+
+    if (key === STORAGE_KEYS.MESSAGES && typeof value === 'object' && value !== null) {
+      if (this.messageSaveDebounceTimer) {
+        clearTimeout(this.messageSaveDebounceTimer);
+      }
+      this.messageSaveDebounceTimer = setTimeout(() => {
+        try {
+          // Bounded thread storage: cap each conversation in persistent storage to latest 100 messages
+          const boundedPayload: Record<string, ChatMessage[]> = {};
+          for (const convId in value) {
+            const list = value[convId];
+            if (Array.isArray(list)) {
+              boundedPayload[convId] = list.slice(-100);
+            }
+          }
+          localStorage.setItem(key, JSON.stringify(boundedPayload));
+        } catch (e) {
+          // Ignore quota errors on local storage
+        }
+      }, 300);
+      return;
+    }
+
     try {
       localStorage.setItem(key, JSON.stringify(value));
     } catch (e) {
@@ -800,9 +824,10 @@ class DataService {
           msgMap.set(item.id, item);
         }
 
-        const sorted = Array.from(msgMap.values()).sort(
-          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-        );
+        const sorted = Array.from(msgMap.values()).sort((a, b) => {
+          const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+          return diff !== 0 ? diff : a.id.localeCompare(b.id);
+        });
 
         // Unconditionally filter out automated greetings and canned bot messages
         const merged = sorted.filter((m) => {
@@ -857,11 +882,12 @@ class DataService {
     return localMsgs;
   }
 
-  // On-demand pagination for older messages
+  // On-demand pagination for older messages with composite keyset tie-breaking
   public async fetchOlderMessages(
     conversationId: string,
     beforeCreatedAt: string,
-    limit: number = 50
+    limit: number = 50,
+    beforeId?: string
   ): Promise<{ newCount: number; hasMore: boolean }> {
     if (!supabase || !isSupabaseConfigured() || !conversationId || !beforeCreatedAt) {
       return { newCount: 0, hasMore: false };
@@ -881,7 +907,10 @@ class DataService {
         return { newCount: 0, hasMore: false };
       }
 
-      if (data.length > 0) {
+      // Filter out beforeId if edge collision occurs on identical timestamps
+      const filteredData = beforeId ? data.filter((row: any) => row.id !== beforeId) : data;
+
+      if (filteredData.length > 0) {
         const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
         const currentList = all[conversationId] || [];
         const msgMap = new Map<string, ChatMessage>();
@@ -890,7 +919,7 @@ class DataService {
           msgMap.set(m.id, m);
         }
 
-        for (const row of data) {
+        for (const row of filteredData) {
           const resolvedAttachmentUrl =
             row.attachment_url ||
             row.transaction_data?.attachmentUrl ||
@@ -927,21 +956,22 @@ class DataService {
           msgMap.set(item.id, item);
         }
 
-        const merged = Array.from(msgMap.values()).sort(
-          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-        );
+        const merged = Array.from(msgMap.values()).sort((a, b) => {
+          const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+          return diff !== 0 ? diff : a.id.localeCompare(b.id);
+        });
 
         all[conversationId] = merged;
         this.cache[STORAGE_KEYS.MESSAGES] = all;
         this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
         window.dispatchEvent(
           new CustomEvent('aetherpay_state_changed', {
-            detail: { key: 'conversation_messages_fetched', conversationId, count: data.length },
+            detail: { key: 'conversation_messages_fetched', conversationId, count: filteredData.length },
           })
         );
       }
 
-      return { newCount: data.length, hasMore: data.length === limit };
+      return { newCount: filteredData.length, hasMore: filteredData.length === limit };
     } catch (e) {
       console.warn('fetchOlderMessages exception:', e);
       return { newCount: 0, hasMore: false };
@@ -5145,8 +5175,8 @@ class DataService {
     // Broadcast live via Supabase Realtime (both room-specific and staff channel)
     try {
       if (supabase && isSupabaseConfigured()) {
-        // 1. Room specific broadcast
-        const channel = supabase.channel(`room_${targetConvId}`);
+        // 1. Room specific broadcast (multiplexed channel)
+        const channel = supabase.channel(`chat_${targetConvId}`);
         if ((channel as any).state === 'joined') {
           channel
             .send({

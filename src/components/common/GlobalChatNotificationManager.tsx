@@ -104,71 +104,60 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
       };
     }
 
-    let roomChannel: any = null;
-    let dbChannel: any = null;
+    let activeChannel: any = null;
 
     if (isCustomer && currentUser.role === 'customer') {
-      // Customer: listen to their personal support room and message updates
+      // Customer: listen to their personal support room and message updates in single multiplexed channel
       const canonicalConvId = `conv_${currentUser.id}`;
       const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
       if (conv && conv.status !== 'closed') {
-        const roomName = `room_${canonicalConvId}`;
-
-        roomChannel = supabase
-          .channel(`global_bg_${roomName}`)
+        activeChannel = supabase
+          .channel(`global_chat_${canonicalConvId}`)
           .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
             if (payload && payload.id) {
               dataService.appendIncomingMessage(payload);
               handleIncomingMessage(payload);
             }
           })
+          .on(
+            'postgres_changes',
+            {
+              event: 'INSERT',
+              schema: 'public',
+              table: 'messages',
+              filter: `conversation_id=eq.${canonicalConvId}`,
+            },
+            (payload: any) => {
+              const raw = payload.new;
+              if (raw && raw.id && raw.sender_id !== currentUser.id) {
+                const formattedMsg: ChatMessage = {
+                  id: raw.id,
+                  conversationId: raw.conversation_id,
+                  senderId: raw.sender_id,
+                  senderName: raw.sender_name || 'Support Agent',
+                  senderRole: raw.sender_role || 'agent',
+                  text: raw.content || '',
+                  transactionData: raw.transaction_data,
+                  createdAt: raw.created_at || new Date().toISOString(),
+                  isRead: false,
+                };
+                dataService.appendIncomingMessage(formattedMsg);
+                handleIncomingMessage(formattedMsg);
+              }
+            }
+          )
           .subscribe();
       }
-
-      dbChannel = supabase
-        .channel(`global_db_${canonicalConvId}`)
-        .on(
-          'postgres_changes',
-          {
-            event: 'INSERT',
-            schema: 'public',
-            table: 'messages',
-            filter: `conversation_id=eq.${canonicalConvId}`,
-          },
-          (payload: any) => {
-            const raw = payload.new;
-            if (raw && raw.id && raw.sender_id !== currentUser.id) {
-              const formattedMsg: ChatMessage = {
-                id: raw.id,
-                conversationId: raw.conversation_id,
-                senderId: raw.sender_id,
-                senderName: raw.sender_name || 'Support Agent',
-                senderRole: raw.sender_role || 'agent',
-                text: raw.content || '',
-                transactionData: raw.transaction_data,
-                createdAt: raw.created_at || new Date().toISOString(),
-                isRead: false,
-              };
-              dataService.appendIncomingMessage(formattedMsg);
-              handleIncomingMessage(formattedMsg);
-            }
-          }
-        )
-        .subscribe();
     } else {
-      // Staff / Admin: listen to the global admin support feed
-      roomChannel = supabase
-        .channel('global_bg_room_admin_support')
+      // Staff / Admin: listen to the global admin support feed in single multiplexed channel
+      activeChannel = supabase
+        .channel('global_bg_admin_channel')
         .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
           if (payload && payload.id) {
             dataService.appendIncomingMessage(payload);
             handleIncomingMessage(payload);
           }
         })
-        .subscribe();
-
-      dbChannel = supabase
-        .channel('global_bg_all_messages')
         .on(
           'postgres_changes',
           {
@@ -200,8 +189,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
 
     return () => {
       window.removeEventListener('aetherpay_state_changed', handleLocalState);
-      if (roomChannel) supabase.removeChannel(roomChannel);
-      if (dbChannel) supabase.removeChannel(dbChannel);
+      if (activeChannel) supabase.removeChannel(activeChannel);
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     };
   }, [currentUser.id, currentUser.role, activeTab]);

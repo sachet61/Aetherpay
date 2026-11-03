@@ -58,7 +58,8 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     if (!conversation?.id || loadingOlder || messages.length === 0) return;
     setLoadingOlder(true);
     const oldestTimestamp = messages[0].createdAt;
-    const res = await dataService.fetchOlderMessages(conversation.id, oldestTimestamp, 50);
+    const oldestId = messages[0].id;
+    const res = await dataService.fetchOlderMessages(conversation.id, oldestTimestamp, 50, oldestId);
     setLoadingOlder(false);
     if (!res.hasMore) {
       setHasMoreOlder(false);
@@ -132,30 +133,24 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     window.addEventListener('aetherpay_state_changed', handleSync);
     window.addEventListener('storage', handleSync);
 
-    // 1. Supabase Realtime channel subscription for instant cross-tab/device messaging
-    const broadcastChannel = supabase.channel(`room_${canonicalConvId}`)
+    // Single Multiplexed Realtime Channel (Broadcast + PostgreSQL CDC stream in ONE connection)
+    const chatChannel = supabase
+      .channel(`chat_${canonicalConvId}`)
       .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
         if (payload && payload.id) {
           dataService.appendIncomingMessage(payload);
           setMessages((prev) => {
             if (prev.some((m) => m.id === payload.id)) return prev;
-            return [...prev, payload];
+            return [...prev, payload].sort((a, b) => {
+              const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+              return diff !== 0 ? diff : a.id.localeCompare(b.id);
+            });
           });
           if (payload.senderRole === 'agent' || payload.senderRole === 'admin') {
             notificationSoundService.playIncomingMessageSound();
           }
         }
       })
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          channelRef.current = broadcastChannel;
-        }
-      });
-
-    channelRef.current = broadcastChannel;
-
-    // 2. Persistent Supabase Database Changes stream directly on the messages table
-    const dbChannel = supabase.channel(`db_chat_${canonicalConvId}`)
       .on(
         'postgres_changes',
         {
@@ -185,7 +180,10 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
             dataService.appendIncomingMessage(incoming);
             setMessages((prev) => {
               if (prev.some((m) => m.id === incoming.id)) return prev;
-              return [...prev, incoming];
+              return [...prev, incoming].sort((a, b) => {
+                const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+                return diff !== 0 ? diff : a.id.localeCompare(b.id);
+              });
             });
 
             if (incoming.senderRole === 'agent' || incoming.senderRole === 'admin') {
@@ -200,7 +198,13 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
           }
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          channelRef.current = chatChannel;
+        }
+      });
+
+    channelRef.current = chatChannel;
 
     let lastCatchUpTime = 0;
     const performCatchUp = () => {
@@ -232,8 +236,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       window.removeEventListener('storage', handleSync);
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', handleFocus);
-      supabase.removeChannel(broadcastChannel);
-      supabase.removeChannel(dbChannel);
+      supabase.removeChannel(chatChannel);
     };
   }, [currentUser.id]);
 

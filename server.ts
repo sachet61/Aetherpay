@@ -1814,6 +1814,15 @@ app.post('/api/auth/register', async (req, res) => {
         console.warn('[Support Desk Guard] Bot greeting purge notice:', err?.message || err);
       }
     })();
+
+    // Performance Optimization: Keyset Pagination Index Verification
+    (async () => {
+      try {
+        await supabaseAdmin.rpc('execute_sql', {
+          sql: 'CREATE INDEX IF NOT EXISTS idx_messages_conv_created_id ON messages (conversation_id, created_at DESC, id);',
+        }).catch(() => {});
+      } catch {}
+    })();
   });
 }
 
