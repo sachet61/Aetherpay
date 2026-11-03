@@ -1,134 +1,108 @@
-# Live Production Chat Synchronization, Message Delivery & Photo Support Architecture
+# Implementation Plan: Authoritative Cross-Session & Incognito Chat Persistence
 
-Comprehensive architectural fix resolving cross-browser message discrepancies, guaranteeing atomic first-message delivery from support specialists to customers in PostgreSQL, and restoring full image and photo attachment upload, persistence, and rendering.
+Guarantee 100% persistent message and conversation retrieval in incognito mode and fresh browser sessions across both Customer Support Chat and Staff Operations Inbox by eliminating local storage dependency and enforcing server-side identity consolidation.
 
-### User Review & Critical Decisions
+## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> All proposed changes operate strictly on live production code with zero mock fallbacks, maintaining full compatibility with the existing Express server (`server.ts`), Supabase PostgreSQL database, and Vite React SPA.
+> In an incognito or fresh browser window, `localStorage` is completely empty on first load. The application previously relied on client-side cache and direct anonymous Supabase queries that failed to resolve historical user aliases (e.g. Supabase Auth UUIDs vs initial customer IDs) or bypassed RLS restrictions. This plan establishes server-authoritative consolidation via the Service Role so all historical messages and conversations are unified by user ID, email, and display name and immediately delivered to fresh sessions.
 
-- **Cross-Browser Thread Reconciliation**: Ensure older chat messages load identically in any browser (fresh browser, incognito, or secondary device) by performing server-authoritative reconciliation of legacy conversation aliases directly in PostgreSQL rather than relying on browser-local storage.
-- **Parent Conversation Existence Guarantee**: Await and verify parent conversation record commitment in `conversations` prior to dispatching messages to prevent PostgreSQL foreign key constraint drops (`23503`) when staff initiates chat.
-- **Dual-Resilient Photo & Attachment Storage**: Save attachments to server storage (`public/uploads/chat`) and mirror to Supabase Storage, with an Express streaming proxy (`/api/storage/file`) and unified metadata resolution (`attachmentUrl`, `proofUrl`, `receiptUrl`) so photos never fail to render.
-
----
-
-### 1. Overview & Core Concept
-
-- **What It Does**: Unifies live customer support and administrative messaging across all browsers and devices. It ensures that 100% of historical conversation records stored in Supabase PostgreSQL are fetched on any browser, guarantees that staff-initiated messages are never dropped due to race conditions with parent conversation creation, and restores seamless photo uploads and image previews in both customer and administrative consoles.
-- **Target Audience / Persona**:
-  - **Players/Customers**: View complete chat history across any device/browser without missing responses from support, receive instant replies, and upload payment receipts/screenshots that render reliably.
-  - **Support Specialists & Admins**: Confidently dispatch initial messages, rotate game credentials, process top-up/cashout actions directly from chat, and inspect attached photos without broken image links or sync delays.
-- **Key Value**: Eliminates message loss, removes device-specific chat discrepancies, and provides high-trust financial auditability for iGaming support operations.
+- **Authoritative Server Endpoints**: Route all conversation and message queries through Express Service Role endpoints (`/api/chat/messages` and `/api/chat/conversations`) rather than unauthenticated client queries.
+- **Unified Identity & Alias Resolution**: Automatically correlate user UUIDs, legacy customer identifiers, emails, and display names on the server and re-parent orphan messages in PostgreSQL to canonical conversation IDs (`conv_${customerId}`).
+- **Incognito Hydration Handlers**: Update customer and admin chat components to pass full identity context (`customerId`, `email`, `customerName`) and render the returned authoritative message list immediately on mount.
 
 ---
 
-### 2. User Experience & Visual Design
+## 1. Overview & Core Concept
 
-- **Key User Flows**:
-  1. *Customer Opens Support Chat in Fresh Browser*:
-     - The chat client detects the authenticated customer ID and requests the canonical message thread.
-     - The system queries Supabase PostgreSQL across all alias records, consolidates them into canonical `conv_${customerId}`, and streams the complete message history into the chat view.
-     - Loading indicators cleanly present thread hydration without blank screens.
-  2. *Support Agent Sends First Message to New Customer*:
-     - Agent selects customer from directory or clicks "Start New Customer Chat".
-     - The system ensures the parent conversation row is committed to PostgreSQL before inserting the message payload.
-     - The message is saved in PostgreSQL, broadcast over Supabase Realtime, and web push/desktop alerts are dispatched.
-     - The customer sees the message immediately upon receiving the alert and opening the chat.
-  3. *Customer or Staff Attaches Photo / Receipt*:
-     - User clicks the paperclip icon and selects an image (JPEG, PNG, WebP).
-     - Image is compressed on client and uploaded via `/api/storage/upload`.
-     - File is saved to server storage and mirrored to Supabase Storage bucket `chat_attachments`.
-     - The message bubble renders an inline image preview with click-to-expand lightbox modal; if direct storage CDN is blocked, the fallback proxy transparently streams the image.
-- **Visual Identity & Theme**:
-  - Maintained dark financial aesthetic: deep slate background (`#0A0F1D`, `#0E1726`), gold/amber primary accents (`#F59E0B`, `#D97706`), indigo staff branding (`#6366F1`), and emerald completion indicators (`#10B981`).
-  - Seamless image cards with subtle borders (`border-slate-700/60`), zoom hover indicators, and fullscreen lightbox with backdrop blur.
+- **What It Does**: Ensures that any customer or staff member logging in or opening chat in incognito mode, a new browser, or a different device immediately sees all historical chat messages, transaction approval notes, and photo attachments.
+- **Target Audience / Persona**: Customers accessing support across multiple browsers/devices, and support agents/administrators managing live player requests.
+- **Key Value**: Zero message loss across sessions, no dependence on volatile browser storage, and instant synchronization between player and staff portals.
 
 ---
 
-### 3. Key Product Decisions & Trade-Offs
+## 2. User Experience & Visual Design
 
-- **Decision 1: Server-Authoritative Thread Consolidation vs. Client-Side Alias Mapping**
-  - *Chosen Approach*: Server endpoint (`/api/chat/messages`) and data service query that consolidates all legacy conversation rows and messages in PostgreSQL under canonical `conv_${customerId}`.
-  - *Why*: In the current codebase, `migrateUserEntityIds` only rewrote `localStorage` in the browser where the migration happened. A second browser querying PostgreSQL with the new user UUID could not see older messages because their rows in PostgreSQL still had legacy conversation IDs. Server consolidation ensures all devices view the identical history.
-  - *Alternatives Considered*: Client-only multi-query with in-memory union. Rejected because it incurs high PostgREST egress and fails if local storage lacks alias knowledge.
-
-- **Decision 2: Sequential Parent Conversation Upsert with Server Fallback vs. Fire-and-Forget Message Upsert**
-  - *Chosen Approach*: In `sendChatMessage`, ensure the parent conversation record exists in `conversations` table in PostgreSQL before inserting into `messages`. Provide an authoritative `/api/chat/send` server endpoint using Service Role privileges as a fallback.
-  - *Why*: When staff sends the first message, `conversations.upsert` was called without `await`, causing `messages.upsert` to execute concurrently. PostgreSQL rejected the message insert with foreign key error `23503`, while web push notifications still fired, leading to "ghost notifications" with missing messages.
-  - *Alternatives Considered*: Removing foreign key constraint on `messages.conversation_id`. Rejected because foreign key constraints enforce relational integrity in production.
-
-- **Decision 3: Dual Storage Persistence with Streaming Proxy vs. Supabase-Only Storage**
-  - *Chosen Approach*: Save uploaded chat photos to local server disk (`public/uploads/chat`) AND Supabase Storage `chat_attachments`, while serving an intelligent URL backed by `/api/storage/file` streaming proxy.
-  - *Why*: Supabase storage buckets can have strict RLS, public access toggle restrictions, or egress limits that cause 403 Forbidden or 400 Bucket Not Found errors in the browser. Storing a local copy and offering a streaming proxy guarantees 100% photo availability.
-  - *Alternatives Considered*: Storing images as raw Base64 data strings in PostgreSQL `messages.content`. Rejected because large Base64 blobs degrade PostgreSQL query performance and inflate database size.
+- **Zero-Flicker Chat Hydration**:
+  - When a customer opens Support Chat (`#chat`) in incognito mode, a subtle loading indicator displays while the server endpoint retrieves the authoritative thread history.
+  - Historical messages, transaction approval badges (Top-Up / Cashout completed), and photos render chronologically without disappearing on refresh.
+- **Support Inbox Consistency**:
+  - In Admin Chat (`#ops_chat`), the conversation list is populated directly from PostgreSQL via `/api/chat/conversations`.
+  - Selecting any conversation instantly hydrates the full thread history via `/api/chat/messages`, including messages sent from other browsers.
+- **Real-Time Continuity**:
+  - Realtime broadcast and database listeners remain subscribed to the canonical conversation ID (`conv_${customerId}`), ensuring subsequent messages sent in any session appear instantly across all open windows.
 
 ---
 
-### 4. Technical Architecture & Data Strategy
+## 3. Key Product Decisions & Trade-Offs
+
+- **Decision 1: Server Service-Role Consolidation vs Client RLS Direct Queries**
+  - *Chosen Approach*: Use Express endpoints backed by `supabaseAdmin` (Service Role) to query and consolidate conversations and messages, while keeping Supabase Realtime channels for instant live updates.
+  - *Why*: Eliminates RLS read-blocking and foreign key resolution errors on the client, and ensures that incognito sessions with empty local storage fetch complete server-authoritative history.
+  - *Alternatives Considered*: Client-side multi-table joins using public anon key were rejected due to RLS limitations and inability to run server-level foreign key and alias re-parenting.
+
+- **Decision 2: Multi-Field Identity Resolution (ID + Email + Name)**
+  - *Chosen Approach*: Query candidate conversations and messages by user UUID, email, and display name in `server.ts`. Automatically update orphan message rows in PostgreSQL to point to `conv_${customerId}`.
+  - *Why*: Players transitioning from guest/seed IDs to Supabase Auth accounts retain their complete chat history seamlessly.
+  - *Alternatives Considered*: Enforcing strict single-ID queries caused all pre-login or alias messages to be completely invisible in incognito mode.
+
+---
+
+## 4. Technical Architecture & Data Strategy
+
+### System Architecture Diagram
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                          CLIENT FRONTEND (SPA)                         │
-│                                                                        │
-│   CustomerChat.tsx                          AdminChat.tsx              │
-│   ┌───────────────────────────┐             ┌────────────────────────┐ │
-│   │ • Full History Hydration  │             │ • Messenger Queue View │ │
-│   │ • Photo Upload & Lightbox │             │ • Quick Action Modals  │ │
-│   │ • Realtime & Push Listener│             │ • Staff Notes & Attach │ │
-│   └─────────────┬─────────────┘             └────────────┬───────────┘ │
-└─────────────────┼────────────────────────────────────────┼─────────────┘
-                  │                                        │
-                  ▼                                        ▼
+│               Incognito / Fresh Browser Session (Client)                │
+└────────────────────────────────────┬───────────────────────────────────┘
+                                     │ 1. GET /api/chat/messages
+                                     │    ?conversationId=...&customerId=...
+                                     │    &email=...&customerName=...
+                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                   DATA & STORAGE LAYER (Client Services)               │
-│                                                                        │
-│   dataService.ts                            storageService.ts          │
-│   ┌───────────────────────────┐             ┌────────────────────────┐ │
-│   │ • Canonical conv_${id}    │             │ • WebP Auto-Compress   │ │
-│   │ • Parent Conv Await Before│             │ • Dual-Write Fallback  │ │
-│   │   Message Insert          │             │ • Unified Attachment   │ │
-│   │ • Multi-Field Normalizer  │             │   Field Extraction     │ │
-│   └─────────────┬─────────────┘             └────────────┬───────────┘ │
-└─────────────────┼────────────────────────────────────────┼─────────────┘
-                  │                                        │
-                  ▼                                        ▼
+│                    Express Backend (`server.ts`)                       │
+│  - Lookup user in public.users by ID or Email                          │
+│  - Resolve all historical conversation IDs and sender IDs               │
+│  - Fetch messages from PostgreSQL via Service Role (Bypasses RLS)       │
+│  - Re-parent orphan rows to canonical ID (conv_${customerId})          │
+│  - Guarantee canonical conversation row exists in conversations table   │
+└────────────────────────────────────┬───────────────────────────────────┘
+                                     │ 2. SQL SELECT & UPDATE
+                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                     EXPRESS BACKEND (server.ts)                        │
-│                                                                        │
-│   /api/chat/messages           /api/chat/send        /api/storage/*    │
-│   ┌─────────────────────┐      ┌───────────────┐     ┌───────────────┐ │
-│   │ Consolidates legacy │      │ Guarantees    │     │ Uploads local │ │
-│   │ threads in Postgres │      │ parent conv   │     │ & Supabase,   │ │
-│   │ & returns full list │      │ before insert │     │ streams files │ │
-│   └──────────┬──────────┘      └───────┬───────┘     └───────┬───────┘ │
-└──────────────┼─────────────────────────┼─────────────────────┼─────────┘
-               │                         │                     │
-               ▼                         ▼                     ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                      SUPABASE / POSTGRESQL & STORAGE                   │
-│                                                                        │
-│   public.conversations         public.messages       chat_attachments  │
-│   ┌─────────────────────┐      ┌───────────────┐     ┌───────────────┐ │
-│   │ Foreign Key Parent  │◄─────┤ FK validated  │     │ Storage Bucket│ │
-│   │ conv_${customerId}  │      │ content, url  │     │ + Local Disk  │ │
-│   └─────────────────────┘      └───────────────┘     └───────────────┘ │
+│                     Supabase PostgreSQL Database                       │
+│  - Table: public.conversations (Canonical thread shells)               │
+│  - Table: public.messages (Authoritative message log + JSONB payloads)  │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Detailed Component & Handler Mapping
+### Proposed Changes
+
 1. **`server.ts`**:
-   - Add `/api/chat/messages`: Queries all messages by customer ID, resolves legacy thread IDs to canonical `conv_${customerId}`, commits any pending re-parenting in PostgreSQL using `supabaseAdmin`, and returns complete sorted message history.
-   - Add `/api/chat/send`: Server-side endpoint with Service Role privileges that executes:
-     1. Upsert parent row in `conversations` if not already present.
-     2. Insert message into `messages` table with attachment URLs and transaction data.
-     3. Update conversation's `last_message` and timestamps.
-   - Enhance `/api/storage/upload` & add `/api/storage/file`: Stores files locally in `public/uploads/chat` and mirrors to Supabase storage, serving files via streaming proxy to bypass bucket ACL issues.
+   - Enhance `/api/chat/messages` to accept `email` and `customerName` in query parameters.
+   - Look up the user in `public.users` to find all linked accounts or historical IDs.
+   - Collect candidate conversation IDs and query messages where `conversation_id IN (candidateIds)` OR `sender_id IN (candidateIds)` OR `sender_id = customerId`.
+   - Authoritatively re-parent legacy messages in PostgreSQL to `conv_${customerId}`.
+   - Implement `GET /api/chat/conversations` with Service Role to return all open/active conversations sorted by `last_message_at DESC` for reliable Support Inbox loading in fresh sessions.
+
 2. **`src/services/dataService.ts`**:
-   - In `sendChatMessage`: Ensure parent conversation is upserted and awaited before message insert. If client Supabase PostgREST fails or returns foreign key error `23503`, automatically fall back to `/api/chat/send`.
-   - In `fetchMessagesForConversation`: Call `/api/chat/messages` for complete thread retrieval, falling back to direct Supabase query with canonical alias expansion.
-   - In `applyMessageRows`: Standardize attachment field resolution across `attachment_url`, `attachmentUrl`, `proofUrl`, `proof_url`, `receiptUrl`, and `imageUrl`.
-3. **`src/pages/customer/CustomerChat.tsx` & `src/pages/admin/AdminChat.tsx`**:
-   - Normalize attachment rendering: Check both `msg.attachmentUrl` and `msg.transactionData?.proofUrl`.
-   - Add image `onError` fallback that transparently routes broken CDN links through `/api/storage/file`.
-   - Ensure file input resets and provides visual feedback during upload.
+   - Update `fetchMessagesForConversation`: Pass `email` and `customerName` to `/api/chat/messages`, populate in-memory cache directly with the returned messages, and return the chronological list.
+   - Update `fetchConversations`: Fetch from `/api/chat/conversations` with fallback to direct Supabase query, guaranteeing full conversation list hydration in incognito mode.
+
+3. **`src/pages/customer/CustomerChat.tsx`**:
+   - Pass `currentUser.email` and `currentUser.displayName` into `fetchMessagesForConversation`.
+   - Update state immediately with server-returned messages on mount.
+
+4. **`src/pages/admin/AdminChat.tsx`**:
+   - Ensure selected conversation passes `customerId`, `customerEmail`, and `customerName` to message hydration.
+   - Subscribe to canonical room channel for real-time bi-directional messaging.
+
+### Verification Plan
+
+- Unit test verification using `npx tsx --test` to validate message alias resolution and deduplication logic.
+- Automated browser testing via `playwright-cli` simulating incognito/fresh sessions:
+  1. Open fresh browser context without local storage.
+  2. Log in as customer and open `#chat`. Verify older messages, approvals, and photos render immediately.
+  3. Log in as support agent / admin in another session and open `#ops_chat`. Verify the conversation appears in the inbox with full history.
+  4. Send a message from incognito session and verify real-time arrival in the admin session.
