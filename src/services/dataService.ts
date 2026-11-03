@@ -586,20 +586,23 @@ class DataService {
       if (!isAdmin && currentUserId) {
         // Customer: refresh user's own wallet, recent requests, and delta chat messages
         const canonicalConvId = `conv_${currentUserId}`;
-        const msgQuery = this.lastSyncTimestamp
+        const querySince = this.lastSyncTimestamp
+          ? new Date(Math.max(0, Date.parse(this.lastSyncTimestamp) - 10000)).toISOString()
+          : null;
+        const msgQuery = querySince
           ? supabase
               .from('messages')
               .select('*')
-              .eq('conversation_id', canonicalConvId)
-              .gt('created_at', this.lastSyncTimestamp)
+              .in('conversation_id', [canonicalConvId, currentUserId])
+              .gt('created_at', querySince)
               .order('created_at', { ascending: false })
-              .limit(25)
+              .limit(50)
           : supabase
               .from('messages')
               .select('*')
-              .eq('conversation_id', canonicalConvId)
+              .in('conversation_id', [canonicalConvId, currentUserId])
               .order('created_at', { ascending: false })
-              .limit(25);
+              .limit(50);
 
         const [walletRes, topupsRes, withdrawalsRes, msgsRes] = await Promise.all([
           supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
@@ -4620,13 +4623,28 @@ class DataService {
     if (!convId) return '';
     const mapped = this.conversationAliasMap.get(convId);
     if (mapped) return mapped;
+
+    // 1. Direct user ID or email resolution
+    const directUser = this.getUserById(convId) || this.getUserByEmail(convId);
+    if (directUser) {
+      const canonical = `conv_${directUser.id}`;
+      this.conversationAliasMap.set(convId, canonical);
+      return canonical;
+    }
+
+    // 2. Candidate customer ID from conv_ prefix
     if (convId.startsWith('conv_')) {
       const candidateCustId = convId.slice(5);
-      const user = this.getUserById(candidateCustId);
+      const user = this.getUserById(candidateCustId) || this.getUserByEmail(candidateCustId);
       if (user) {
-        return `conv_${user.id}`;
+        const canonical = `conv_${user.id}`;
+        this.conversationAliasMap.set(convId, canonical);
+        return canonical;
       }
+      return convId;
     }
+
+    // 3. Search cached conversations
     const convs = this.cache[STORAGE_KEYS.CONVERSATIONS] as SupportConversation[];
     if (Array.isArray(convs)) {
       const found = convs.find(

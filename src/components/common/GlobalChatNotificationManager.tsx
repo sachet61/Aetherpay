@@ -109,9 +109,10 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
 
     if (isCustomer && currentUser.role === 'customer') {
       // Customer: listen to their personal support room and message updates
+      const canonicalConvId = `conv_${currentUser.id}`;
       const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
       if (conv && conv.status !== 'closed') {
-        const roomName = `room_${conv.id}`;
+        const roomName = `room_${canonicalConvId}`;
 
         roomChannel = supabase
           .channel(`global_bg_${roomName}`)
@@ -125,14 +126,14 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
       }
 
       dbChannel = supabase
-        .channel(`global_db_${conv.id}`)
+        .channel(`global_db_${canonicalConvId}`)
         .on(
           'postgres_changes',
           {
             event: 'INSERT',
             schema: 'public',
             table: 'messages',
-            filter: `conversation_id=eq.${conv.id}`,
+            filter: `conversation_id=eq.${canonicalConvId}`,
           },
           (payload: any) => {
             const raw = payload.new;

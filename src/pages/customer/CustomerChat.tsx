@@ -104,25 +104,28 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
   // Initialize or load conversation
   useEffect(() => {
+    const canonicalConvId = `conv_${currentUser.id}`;
     const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
+    conv.id = canonicalConvId;
     setConversation(conv);
-    setMessages(dataService.getMessages(conv.id));
-    dataService.markConversationRead(conv.id, 'customer');
+    setMessages(dataService.getMessages(canonicalConvId));
+    dataService.markConversationRead(canonicalConvId, 'customer');
 
-    // Asynchronously hydrate messages directly from PostgreSQL capped strictly to 40 records
-    dataService.fetchMessagesForConversation(conv.id, { limit: 40 }).then((freshMsgs) => {
+    // Asynchronously hydrate messages directly from PostgreSQL capped strictly to 50 records
+    dataService.fetchMessagesForConversation(canonicalConvId, { limit: 50 }).then((freshMsgs) => {
       if (freshMsgs && freshMsgs.length > 0) {
         setMessages(freshMsgs);
       } else {
-        setMessages(dataService.getMessages(conv.id));
+        setMessages(dataService.getMessages(canonicalConvId));
       }
     });
 
     const handleSync = () => {
       const updated = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
       if (updated) {
+        updated.id = canonicalConvId;
         setConversation(updated);
-        setMessages(dataService.getMessages(updated.id));
+        setMessages(dataService.getMessages(canonicalConvId));
       }
     };
 
@@ -130,7 +133,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     window.addEventListener('storage', handleSync);
 
     // 1. Supabase Realtime channel subscription for instant cross-tab/device messaging
-    const broadcastChannel = supabase.channel(`room_${conv.id}`)
+    const broadcastChannel = supabase.channel(`room_${canonicalConvId}`)
       .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
         if (payload && payload.id) {
           dataService.appendIncomingMessage(payload);
@@ -152,14 +155,14 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     channelRef.current = broadcastChannel;
 
     // 2. Persistent Supabase Database Changes stream directly on the messages table
-    const dbChannel = supabase.channel(`db_chat_${conv.id}`)
+    const dbChannel = supabase.channel(`db_chat_${canonicalConvId}`)
       .on(
         'postgres_changes',
         {
           event: 'INSERT',
           schema: 'public',
           table: 'messages',
-          filter: `conversation_id=eq.${conv.id}`,
+          filter: `conversation_id=eq.${canonicalConvId}`,
         },
         (payload) => {
           const row: any = payload.new;
@@ -202,9 +205,9 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     let lastCatchUpTime = 0;
     const performCatchUp = () => {
       const now = Date.now();
-      if (now - lastCatchUpTime < 1500) return;
+      if (now - lastCatchUpTime < 800) return;
       lastCatchUpTime = now;
-      dataService.fetchMessagesForConversation(conv.id, { limit: 40 }).then((fresh) => {
+      dataService.fetchMessagesForConversation(canonicalConvId, { limit: 50 }).then((fresh) => {
         if (fresh && fresh.length > 0) {
           setMessages(fresh);
         }
@@ -241,10 +244,10 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
   const handleSendMessage = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!inputText.trim() && !attachmentUrl) return;
-    if (!conversation) return;
+    const canonicalConvId = `conv_${currentUser.id}`;
 
     const newMsg = dataService.sendChatMessage({
-      conversationId: conversation.id,
+      conversationId: canonicalConvId,
       senderId: currentUser.id,
       senderName: currentUser.displayName,
       senderRole: 'customer',
