@@ -1,6 +1,0 @@
-{
-  "summary":  "Detailed root cause analysis and architectural plan to resolve the 'Bucket not found' error during avatar and chat uploads. Includes automated service-role bucket provisioning, a secure server upload fallback route (/api/storage/upload) with auto-retry, and step-by-step manual Supabase Dashboard instructions for complete production readiness.",
-  "updatedAt":  "2026-10-30T08:39:21.358259654Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

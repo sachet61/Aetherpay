@@ -205,7 +205,9 @@ export default async function handler(req: any, res: any) {
   const rawUrl = req.url || '';
   const xForwardedUri = (req.headers['x-forwarded-uri'] as string) || '';
   const xMatchedPath = (req.headers['x-matched-path'] as string) || '';
-  const url = (xForwardedUri || rawUrl || xMatchedPath || '').split('?')[0];
+  const rawFullUrl = xForwardedUri || rawUrl || xMatchedPath || '';
+  const url = rawFullUrl.split('?')[0];
+  const parsedUrl = new URL(rawFullUrl.startsWith('http') ? rawFullUrl : `https://localhost${rawFullUrl.startsWith('/') ? '' : '/'}${rawFullUrl}`);
 
   // 1. User Directory Endpoint
   if (url.includes('/api/admin/users') && req.method === 'GET') {
@@ -347,6 +349,153 @@ export default async function handler(req: any, res: any) {
       return {};
     }
   };
+
+  // 1b. Update User Role with Parent Admin Protection
+  const roleMatch = url.match(/^\/api\/admin\/users\/([^/]+)\/role$/);
+  if (roleMatch && req.method === 'PATCH') {
+    try {
+      const userId = decodeURIComponent(roleMatch[1]);
+      const { newRole, actingUserRole } = getBody(req);
+
+      if (!userId || !newRole) {
+        return res.status(400).json({ error: 'User ID and newRole are required' });
+      }
+      if (!['customer', 'agent', 'admin'].includes(newRole)) {
+        return res.status(400).json({ error: 'Invalid role specified. Must be customer, agent, or admin.' });
+      }
+      if (actingUserRole && actingUserRole !== 'admin') {
+        return res.status(403).json({ error: 'Access Denied: Only administrators can modify roles.' });
+      }
+
+      let targetUser: any = null;
+      const { data: userById } = await supabaseAdmin.from('users').select('*').eq('id', userId).maybeSingle();
+      if (userById) {
+        targetUser = userById;
+      } else {
+        const { data: userByEmail } = await supabaseAdmin.from('users').select('*').ilike('email', userId).maybeSingle();
+        targetUser = userByEmail;
+      }
+
+      if (!targetUser) {
+        return res.status(404).json({ error: 'User not found in database.' });
+      }
+
+      const protectedEmails = ['sachet61@gmail.com'];
+      const isParentAdmin =
+        protectedEmails.includes(targetUser.email?.toLowerCase()) ||
+        targetUser.id === 'usr_admin_master' ||
+        targetUser.id === 'usr_admin_1';
+
+      if (isParentAdmin && newRole !== 'admin') {
+        return res.status(403).json({
+          error: 'Security Guard: The Parent Admin role is permanently protected and cannot be demoted.',
+        });
+      }
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from('users')
+        .update({ role: newRole, updated_at: new Date().toISOString() })
+        .eq('id', targetUser.id)
+        .select()
+        .single();
+
+      if (updateErr) {
+        return res.status(500).json({ error: updateErr.message || 'Failed to update user role in database' });
+      }
+
+      try {
+        let authUserId = targetUser.id;
+        const { data: authUserDirect } = await supabaseAdmin.auth.admin.getUserById(authUserId).catch(() => ({ data: null }));
+        let existingMeta = authUserDirect?.user?.user_metadata || {};
+
+        if (!authUserDirect?.user && targetUser.email) {
+          const { data: authList } = await supabaseAdmin.auth.admin.listUsers().catch(() => ({ data: { users: [] } }));
+          const matched = authList?.users?.find((u: any) => u.email?.toLowerCase() === targetUser.email?.toLowerCase());
+          if (matched) {
+            authUserId = matched.id;
+            existingMeta = matched.user_metadata || {};
+          }
+        }
+
+        if (authUserId) {
+          await supabaseAdmin.auth.admin.updateUserById(authUserId, {
+            user_metadata: { ...existingMeta, role: newRole },
+          });
+        }
+      } catch (authSyncErr) {
+        console.warn('[Vercel Role Sync Notice]:', authSyncErr);
+      }
+
+      if (['agent', 'admin'].includes(newRole)) {
+        try {
+          const userIds = [targetUser.id, userId].filter(Boolean);
+          const userEmail = targetUser.email?.toLowerCase();
+          const { data: staffConvs } = await supabaseAdmin
+            .from('conversations')
+            .select('id, customer_id, customer_email')
+            .limit(200);
+
+          const matchingConvs = (staffConvs || []).filter(
+            (c: any) =>
+              (c.customer_id && userIds.includes(c.customer_id)) ||
+              (c.customer_email && userEmail && c.customer_email.toLowerCase() === userEmail)
+          );
+
+          if (matchingConvs.length > 0) {
+            const ids = matchingConvs.map((c: any) => c.id);
+            await supabaseAdmin.from('messages').delete().in('conversation_id', ids);
+            await supabaseAdmin.from('conversations').delete().in('id', ids);
+          }
+        } catch (cleanupErr) {
+          console.warn('[Vercel Staff Inbox Guard Notice]:', cleanupErr);
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Role successfully updated to ${newRole.toUpperCase()} for ${targetUser.display_name}.`,
+        user: updated,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to update role' });
+    }
+  }
+
+  // 1c. Delete User Completely
+  const deleteUserMatch = url.match(/^\/api\/admin\/users\/([^/]+)$/);
+  if (deleteUserMatch && req.method === 'DELETE') {
+    try {
+      const userId = decodeURIComponent(deleteUserMatch[1]);
+      if (!userId) return res.status(400).json({ error: 'User ID is required' });
+
+      const { data: targetUser } = await supabaseAdmin.from('users').select('*').eq('id', userId).maybeSingle();
+      if (
+        targetUser?.email?.toLowerCase() === 'sachet61@gmail.com' ||
+        userId === 'usr_admin_master' ||
+        userId === 'usr_admin_1'
+      ) {
+        return res.status(403).json({ error: 'Cannot delete the protected Super/Parent Administrator.' });
+      }
+
+      const { data: convs } = await supabaseAdmin.from('conversations').select('id').eq('customer_id', userId);
+      if (convs && convs.length > 0) {
+        const convIds = convs.map((c: any) => c.id);
+        await supabaseAdmin.from('messages').delete().in('conversation_id', convIds);
+      }
+      await supabaseAdmin.from('messages').delete().eq('sender_id', userId);
+      await supabaseAdmin.from('conversations').delete().eq('customer_id', userId);
+      await supabaseAdmin.from('topups').delete().eq('customer_id', userId);
+      await supabaseAdmin.from('withdrawals').delete().eq('customer_id', userId);
+      await supabaseAdmin.from('game_accounts').delete().eq('customer_id', userId);
+      await supabaseAdmin.from('wallets').delete().eq('customer_id', userId);
+      await supabaseAdmin.from('users').delete().eq('id', userId);
+      await supabaseAdmin.auth.admin.deleteUser(userId).catch(() => {});
+
+      return res.status(200).json({ success: true, message: `User ${userId} and all related records deleted completely.` });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to delete user' });
+    }
+  }
 
   // 2. Password Reset Request Endpoint (Live Production Serverless)
   if (url.includes('/api/auth/request-reset') && req.method === 'POST') {
@@ -496,6 +645,84 @@ export default async function handler(req: any, res: any) {
     }
   }
 
+  // 4b. Check Email Verification Status
+  if (url.includes('/api/auth/check-verification') && req.method === 'POST') {
+    try {
+      const { email } = getBody(req);
+      if (!email) return res.status(400).json({ error: 'Email is required' });
+      const cleanEmail = String(email).trim().toLowerCase();
+
+      const { data: dbUser } = await supabaseAdmin
+        .from('users')
+        .select('id, email, email_verified, role')
+        .ilike('email', cleanEmail)
+        .maybeSingle();
+
+      let targetUser: any = null;
+      try {
+        const { data: userList } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+        targetUser = (userList?.users as any[])?.find((u: any) => u.email?.toLowerCase() === cleanEmail);
+      } catch {}
+
+      if (!targetUser && !dbUser) {
+        return res.status(200).json({
+          exists: false,
+          verified: false,
+          message: 'User not found in Supabase Auth or database directory.',
+        });
+      }
+
+      const isAuthVerified = Boolean(targetUser?.email_confirmed_at);
+      const isDbVerified = Boolean(dbUser?.email_verified);
+      const isVerified = isAuthVerified || isDbVerified;
+      const isParentAdminEmail = cleanEmail === 'sachet61@gmail.com';
+      const userId = targetUser?.id || dbUser?.id;
+
+      if (userId && isVerified) {
+        await supabaseAdmin
+          .from('users')
+          .update({
+            email_verified: true,
+            ...(isParentAdminEmail ? { role: 'admin' } : {}),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', userId);
+
+        if (targetUser && !isAuthVerified) {
+          await supabaseAdmin.auth.admin.updateUserById(targetUser.id, { email_confirm: true }).catch(() => {});
+        }
+      }
+
+      return res.status(200).json({
+        exists: true,
+        verified: isVerified,
+        emailConfirmedAt: targetUser?.email_confirmed_at || (isDbVerified ? new Date().toISOString() : null),
+        userId,
+        message: isVerified ? 'Email address is verified.' : 'Email address is unverified.',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Verification check failed' });
+    }
+  }
+
+  // 4c. Stateless Auth Session Sync & Reset Token Stubs (prevents client 404s; Supabase Auth owns sessions)
+  if (url.includes('/api/auth/verify-reset-token') && req.method === 'POST') {
+    return res.status(404).json({ valid: false, message: 'Reset token not found or invalid.' });
+  }
+
+  if ((url.includes('/api/auth/login') || url.includes('/api/auth/register')) && req.method === 'POST') {
+    const body = getBody(req);
+    if (body?.token) {
+      res.setHeader('Set-Cookie', `aetherpay_session=${encodeURIComponent(body.token)}; Path=/; SameSite=Lax; Max-Age=86400`);
+    }
+    return res.status(200).json({ success: true, userId: body?.userId });
+  }
+
+  if (url.includes('/api/auth/logout') && req.method === 'POST') {
+    res.setHeader('Set-Cookie', 'aetherpay_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax');
+    return res.status(200).json({ success: true });
+  }
+
   // 5. Storage Fallback Upload Endpoint (Uses Service Role for Production Serverless)
   if (url.includes('/api/storage/upload') && req.method === 'POST') {
     try {
@@ -551,6 +778,101 @@ export default async function handler(req: any, res: any) {
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Server storage upload failed' });
+    }
+  }
+
+  // 5b. Stateless QR & Catalog Icon Upload to Supabase Storage
+  if (url.includes('/api/upload-qr') && req.method === 'POST') {
+    try {
+      const { dataUrl, filename } = getBody(req);
+      if (!dataUrl) {
+        return res.status(400).json({ error: 'No image data provided' });
+      }
+
+      const matches = String(dataUrl).match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+      let buffer: Buffer;
+      let extension = 'png';
+      let contentType = 'image/png';
+
+      if (matches && matches.length === 3) {
+        contentType = matches[1];
+        if (contentType.includes('jpeg') || contentType.includes('jpg')) extension = 'jpg';
+        else if (contentType.includes('webp')) extension = 'webp';
+        else if (contentType.includes('gif')) extension = 'gif';
+        else if (contentType.includes('svg')) extension = 'svg';
+        buffer = Buffer.from(matches[2], 'base64');
+      } else {
+        buffer = Buffer.from(String(dataUrl), 'base64');
+      }
+
+      await ensureStorageBuckets(supabaseAdmin);
+
+      const cleanFilename = filename ? String(filename).replace(/[^a-zA-Z0-9_-]/g, '_') : 'qr_image';
+      const storagePath = `qr/${cleanFilename}_${Date.now()}.${extension}`;
+
+      const { data, error } = await supabaseAdmin.storage
+        .from('chat_attachments')
+        .upload(storagePath, buffer, {
+          contentType,
+          upsert: true,
+          cacheControl: '604800',
+        });
+
+      if (error) {
+        return res.status(500).json({ error: error.message || 'Failed to upload QR image' });
+      }
+
+      const { data: urlData } = supabaseAdmin.storage
+        .from('chat_attachments')
+        .getPublicUrl(data?.path || storagePath);
+
+      return res.status(200).json({
+        success: true,
+        url: urlData.publicUrl,
+        filename: `${cleanFilename}.${extension}`,
+        size: buffer.length,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to upload QR image' });
+    }
+  }
+
+  // 5c. Stateless Storage Streaming Proxy Fallback
+  if (url.includes('/api/storage/file') && req.method === 'GET') {
+    try {
+      const bucket = parsedUrl.searchParams.get('bucket') || 'chat_attachments';
+      const filePath = parsedUrl.searchParams.get('path') || '';
+      const rawFileUrl = parsedUrl.searchParams.get('url') || '';
+
+      let targetPath = filePath.replace(/^\/+/, '');
+      let targetBucket = bucket;
+
+      if (!targetPath && rawFileUrl) {
+        const match = rawFileUrl.match(/\/object\/public\/([^\/]+)\/(.+)$/);
+        if (match) {
+          targetBucket = match[1];
+          targetPath = match[2];
+        }
+      }
+
+      if (!targetPath) {
+        return res.status(400).json({ error: 'path or url parameter is required' });
+      }
+
+      const { data: blob, error } = await supabaseAdmin.storage.from(targetBucket).download(targetPath);
+      if (error || !blob) {
+        return res.status(404).json({ error: 'File not found' });
+      }
+
+      const buffer = Buffer.from(await blob.arrayBuffer());
+      const ext = targetPath.split('.').pop()?.toLowerCase() || '';
+      const mime = blob.type || (ext === 'webp' ? 'image/webp' : ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg');
+
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+      return res.status(200).send(buffer);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Error streaming file' });
     }
   }
 
@@ -627,7 +949,6 @@ export default async function handler(req: any, res: any) {
 
   if (url.includes('/api/push/status') && req.method === 'GET') {
     try {
-      const parsedUrl = new URL(url, 'http://localhost');
       const userId = parsedUrl.searchParams.get('userId');
       const email = parsedUrl.searchParams.get('email');
       const role = parsedUrl.searchParams.get('role');
@@ -733,7 +1054,6 @@ export default async function handler(req: any, res: any) {
 
   if (url.includes('/api/game-accounts') && req.method === 'GET') {
     try {
-      const parsedUrl = new URL(url, 'https://localhost');
       const customerId = parsedUrl.searchParams.get('customerId');
       let query = supabaseAdmin.from('game_accounts').select('*').order('created_at', { ascending: false });
       if (customerId) {
@@ -749,7 +1069,357 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  // 6. Support Desk Bot Greeting Purge Endpoint (Vercel Serverless)
+  // 7. Chat Consolidation & Guaranteed Parent Conversation Send
+  if (url.includes('/api/chat/messages') && req.method === 'GET') {
+    try {
+      const customerId = (parsedUrl.searchParams.get('customerId') || '').trim();
+      const conversationId = (parsedUrl.searchParams.get('conversationId') || '').trim();
+      if (!customerId && !conversationId) {
+        return res.status(400).json({ error: 'customerId or conversationId is required' });
+      }
+
+      const effectiveCustomerId = customerId || (conversationId.startsWith('conv_') ? conversationId.replace('conv_', '') : conversationId);
+      const canonicalConvId = `conv_${effectiveCustomerId}`;
+      const candidateIds = new Set<string>();
+      if (conversationId) candidateIds.add(conversationId);
+      if (canonicalConvId) candidateIds.add(canonicalConvId);
+      if (effectiveCustomerId) {
+        candidateIds.add(effectiveCustomerId);
+        candidateIds.add(`conv_cust_${effectiveCustomerId}`);
+        const { data: dbConvs } = await supabaseAdmin
+          .from('conversations')
+          .select('id')
+          .or(`customer_id.eq.${effectiveCustomerId},id.eq.${canonicalConvId}`)
+          .limit(20);
+        if (dbConvs?.length) {
+          dbConvs.forEach((c: any) => candidateIds.add(c.id));
+        }
+      }
+
+      const queryIds = Array.from(candidateIds);
+      let query = supabaseAdmin.from('messages').select('*');
+      query = queryIds.length === 1 ? query.eq('conversation_id', queryIds[0]) : query.in('conversation_id', queryIds);
+
+      const { data: messages, error: msgErr } = await query.order('created_at', { ascending: true }).limit(200);
+      if (msgErr) {
+        return res.status(500).json({ error: msgErr.message });
+      }
+
+      return res.status(200).json({
+        success: true,
+        canonicalId: canonicalConvId,
+        messages: messages || [],
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to fetch chat messages' });
+    }
+  }
+
+  if (url.includes('/api/chat/send') && req.method === 'POST') {
+    try {
+      const {
+        conversationId,
+        senderId,
+        senderName,
+        senderRole,
+        recipientId,
+        recipientName,
+        text,
+        attachmentUrl,
+        attachmentName,
+        transactionData,
+      } = getBody(req);
+
+      if (!senderId) {
+        return res.status(400).json({ error: 'senderId is required' });
+      }
+
+      const customerId = senderRole === 'customer'
+        ? senderId
+        : (recipientId || (conversationId ? String(conversationId).replace(/^conv_/, '') : ''));
+
+      if (!customerId) {
+        return res.status(400).json({ error: 'Cannot determine customer ID for conversation' });
+      }
+
+      const canonicalConvId = `conv_${customerId}`;
+      const now = new Date().toISOString();
+
+      const { data: existingConv } = await supabaseAdmin
+        .from('conversations')
+        .select('id, customer_name, status')
+        .eq('id', canonicalConvId)
+        .maybeSingle();
+
+      const customerDisplayName =
+        existingConv?.customer_name ||
+        (senderRole === 'customer' ? senderName : recipientName) ||
+        'Customer';
+
+      await supabaseAdmin.from('conversations').upsert(
+        {
+          id: canonicalConvId,
+          customer_id: customerId,
+          customer_name: customerDisplayName,
+          last_message: text || (attachmentUrl ? '[Photo Attachment]' : ''),
+          last_message_at: now,
+          status: existingConv?.status || 'open',
+        },
+        { onConflict: 'id' }
+      );
+
+      const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const txPayload = transactionData
+        ? {
+            ...transactionData,
+            attachmentUrl: attachmentUrl || transactionData.attachmentUrl || transactionData.proofUrl,
+            attachmentName: attachmentName || transactionData.attachmentName,
+          }
+        : (attachmentUrl ? { attachmentUrl, attachmentName } : null);
+
+      const messageRow: any = {
+        id: msgId,
+        conversation_id: canonicalConvId,
+        sender_id: senderId,
+        sender_name: senderName || 'User',
+        sender_role: senderRole || 'customer',
+        content: text || '',
+        transaction_data: txPayload,
+        created_at: now,
+      };
+      if (attachmentUrl) {
+        messageRow.attachment_url = attachmentUrl;
+      }
+
+      let savedMsg: any = null;
+      const { data, error: insertErr } = await supabaseAdmin.from('messages').insert(messageRow).select().single();
+      if (insertErr) {
+        delete messageRow.attachment_url;
+        const { data: fallbackMsg, error: retryErr } = await supabaseAdmin.from('messages').insert(messageRow).select().single();
+        if (retryErr) {
+          return res.status(500).json({ error: retryErr.message });
+        }
+        savedMsg = fallbackMsg;
+      } else {
+        savedMsg = data;
+      }
+
+      return res.status(200).json({ success: true, message: savedMsg, canonicalId: canonicalConvId });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to dispatch chat message' });
+    }
+  }
+
+  // 8. Stateless Telegram Zero-Egress Notification Endpoints (persisted in Supabase app_config)
+  if (url.startsWith('/api/telegram/')) {
+    const loadTelegramConfig = async () => {
+      const { data } = await supabaseAdmin
+        .from('app_config')
+        .select('data')
+        .eq('id', 'main')
+        .maybeSingle();
+      const tg = data?.data?.telegram || {};
+      const botToken = String(tg.botToken || '').trim();
+      const channelId = String(tg.channelId || '').trim();
+      return {
+        appData: data?.data || {},
+        botToken,
+        channelId,
+        enabled: tg.enabled !== false,
+        updatedAt: tg.updatedAt,
+        lastNotifiedByConv: (tg.lastNotifiedByConv || {}) as Record<string, number>,
+        tokenConfigured: Boolean(botToken),
+        maskedToken: botToken ? `${botToken.slice(0, 5)}...${botToken.slice(-6)}` : undefined,
+        mode: 'zero-egress-notification' as const,
+      };
+    };
+
+    const sendTelegramText = async (token: string, chatId: string, text: string) => {
+      const sendReq = async (targetChatId: string) => {
+        const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: targetChatId, text }),
+        });
+        return r.json();
+      };
+      let data = await sendReq(chatId);
+      const strId = String(chatId).trim();
+      if (!data.ok && data.description?.includes('chat not found') && strId.startsWith('-') && !strId.startsWith('-100')) {
+        data = await sendReq(`-100${strId.replace(/^-/, '')}`);
+      }
+      return data.ok ? { success: true } : { success: false, message: data.description };
+    };
+
+    if (url.includes('/api/telegram/status') && req.method === 'GET') {
+      try {
+        const cfg = await loadTelegramConfig();
+        let botUsername: string | undefined;
+        let lastError: string | undefined;
+        if (cfg.botToken) {
+          try {
+            const meRes = await fetch(`https://api.telegram.org/bot${cfg.botToken}/getMe`);
+            const meData = await meRes.json();
+            if (meData.ok) botUsername = meData.result?.username;
+            else lastError = meData.description;
+          } catch (e: any) {
+            lastError = e?.message;
+          }
+        }
+        return res.status(200).json({
+          running: false,
+          botUsername,
+          channelId: cfg.channelId,
+          updatesReceived: 0,
+          lastError,
+          tokenConfigured: cfg.tokenConfigured,
+          maskedToken: cfg.maskedToken,
+          mode: cfg.mode,
+        });
+      } catch (err: any) {
+        return res.status(500).json({ running: false, updatesReceived: 0, lastError: err?.message });
+      }
+    }
+
+    if (url.includes('/api/telegram/config') && req.method === 'GET') {
+      try {
+        const cfg = await loadTelegramConfig();
+        return res.status(200).json({
+          success: true,
+          botToken: cfg.botToken,
+          channelId: cfg.channelId,
+          enabled: cfg.enabled,
+          tokenConfigured: cfg.tokenConfigured,
+          maskedToken: cfg.maskedToken,
+          updatedAt: cfg.updatedAt,
+          mode: cfg.mode,
+        });
+      } catch (err: any) {
+        return res.status(500).json({ success: false, error: err?.message });
+      }
+    }
+
+    if (url.includes('/api/telegram/config') && req.method === 'POST') {
+      try {
+        const { botToken, channelId, enabled } = getBody(req);
+        const cfg = await loadTelegramConfig();
+        const updatedAt = new Date().toISOString();
+        const nextTg = {
+          botToken: (botToken || '').trim() || cfg.botToken,
+          channelId: (channelId || '').trim() || cfg.channelId,
+          enabled: enabled !== false,
+          mode: 'zero-egress-notification',
+          updatedAt,
+          lastNotifiedByConv: cfg.lastNotifiedByConv,
+        };
+        const { error: upsertErr } = await supabaseAdmin.from('app_config').upsert({
+          id: 'main',
+          data: { ...cfg.appData, telegram: nextTg },
+          updated_at: updatedAt,
+        });
+        if (upsertErr) {
+          return res.status(500).json({ error: upsertErr.message });
+        }
+        return res.status(200).json({
+          success: true,
+          status: {
+            running: false,
+            channelId: nextTg.channelId,
+            updatesReceived: 0,
+            tokenConfigured: Boolean(nextTg.botToken),
+            mode: 'zero-egress-notification',
+          },
+          config: nextTg,
+        });
+      } catch (err: any) {
+        return res.status(500).json({ error: err?.message || 'Failed to update Telegram configuration' });
+      }
+    }
+
+    if (url.includes('/api/telegram/test') && req.method === 'POST') {
+      try {
+        const { botToken, channelId } = getBody(req);
+        const cfg = await loadTelegramConfig();
+        const cleanToken = (botToken || '').trim() || cfg.botToken;
+        const cleanChatId = (channelId || '').trim() || cfg.channelId;
+
+        if (!cleanToken) return res.status(200).json({ success: false, message: 'Please provide a Telegram Bot Token.' });
+        if (!cleanChatId) return res.status(200).json({ success: false, message: 'Please provide a Target Chat / Channel ID.' });
+
+        const meRes = await fetch(`https://api.telegram.org/bot${cleanToken}/getMe`);
+        const meData = await meRes.json();
+        if (!meData.ok) {
+          return res.status(200).json({ success: false, message: `Invalid Bot Token: ${meData.description}` });
+        }
+
+        const botUser = meData.result?.username;
+        const testMsg = `Swift Sweeps Notification Bot Connected!\nBot: @${botUser}\nMode: Zero-Egress Notifications Active`;
+        const sendResult = await sendTelegramText(cleanToken, cleanChatId, testMsg);
+        return res.status(200).json(
+          sendResult.success
+            ? { success: true, message: `Connection successful! Test notification delivered to ${cleanChatId} from @${botUser}.` }
+            : { success: false, message: `Bot @${botUser} verified, but cannot send message to ${cleanChatId}: ${sendResult.message}` }
+        );
+      } catch (err: any) {
+        return res.status(500).json({ success: false, message: err?.message });
+      }
+    }
+
+    if (url.includes('/api/telegram/notify-message') && req.method === 'POST') {
+      try {
+        const { customerName, conversationId } = getBody(req);
+        const cfg = await loadTelegramConfig();
+        if (!cfg.botToken || !cfg.channelId || !cfg.enabled) {
+          return res.status(200).json({ success: false, message: 'Telegram bot not configured or disabled' });
+        }
+        const cleanName = (customerName || 'Customer').trim();
+        const cooldownKey = (conversationId || cleanName).toLowerCase();
+        const now = Date.now();
+        const lastSent = cfg.lastNotifiedByConv[cooldownKey] || 0;
+        if (now - lastSent < 60_000) {
+          const remainingSec = Math.ceil((60_000 - (now - lastSent)) / 1000);
+          return res.status(200).json({ success: true, debounced: true, message: `Cooldown active (${remainingSec}s)` });
+        }
+
+        const result = await sendTelegramText(cfg.botToken, cfg.channelId, `💬 New message from ${cleanName}`);
+        if (result.success) {
+          const prunedEntries = Object.entries(cfg.lastNotifiedByConv).filter(([, ts]) => now - ts < 600_000);
+          prunedEntries.push([cooldownKey, now]);
+          await supabaseAdmin.from('app_config').upsert({
+            id: 'main',
+            data: {
+              ...cfg.appData,
+              telegram: {
+                ...cfg.appData.telegram,
+                lastNotifiedByConv: Object.fromEntries(prunedEntries),
+              },
+            },
+            updated_at: new Date().toISOString(),
+          });
+        }
+        return res.status(200).json(result);
+      } catch (err: any) {
+        return res.status(500).json({ success: false, message: err?.message });
+      }
+    }
+
+    if (url.includes('/api/telegram/notify') && req.method === 'POST') {
+      try {
+        const payload = getBody(req);
+        const cfg = await loadTelegramConfig();
+        if (!cfg.botToken || !cfg.channelId || !cfg.enabled) {
+          return res.status(200).json({ success: false, message: 'Telegram bot not configured or disabled' });
+        }
+        const text = payload.text || payload.message || 'Notification';
+        const result = await sendTelegramText(cfg.botToken, cfg.channelId, text);
+        return res.status(200).json(result);
+      } catch (err: any) {
+        return res.status(500).json({ success: false, message: err?.message });
+      }
+    }
+  }
+
+  // 9. Support Desk Bot Greeting Purge Endpoint (Vercel Serverless)
   if (url.includes('/api/support/purge-bot-greetings') && (req.method === 'POST' || req.method === 'GET')) {
     try {
       const { data: botMsgs, error: queryErr } = await supabaseAdmin
@@ -776,8 +1446,8 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  // 7. Health & Status
-  if (url.includes('/api/status') || url.includes('/api/telegram/status') || url === '/api' || url === '/api/') {
+  // 10. Health & Status
+  if (url.includes('/api/status') || url === '/api' || url === '/api/') {
     return res.status(200).json({
       online: true,
       runtime: 'vercel-serverless',
