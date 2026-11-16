@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { UserProfile, ChatMessage, SupportConversation, GameCatalogItem } from '../../types';
 import { dataService } from '../../services/dataService';
-import { supabase } from '../../services/supabaseClient';
+import { realtimeChatHub } from '../../services/chatRealtime';
+import { mapDbMessageRowToChatMessage, sortAndDeduplicateMessages } from '../../services/chatOrderUtils';
 import { ChatTransactionCard } from '../../components/chat/ChatTransactionCard';
 import {
   Send,
@@ -68,7 +69,6 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
 
-  const channelRef = useRef<any>(null);
   const [soundEnabled, setSoundEnabled] = useState(() => notificationSoundService.isSoundEnabled());
   const [desktopEnabled, setDesktopEnabled] = useState(() => notificationSoundService.isDesktopEnabled());
   const [notifPermission, setNotifPermission] = useState(() => notificationSoundService.getPermissionStatus());
@@ -133,58 +133,33 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     window.addEventListener('aetherpay_state_changed', handleSync);
     window.addEventListener('storage', handleSync);
 
-    // Single Multiplexed Realtime Channel (Broadcast + PostgreSQL CDC stream in ONE connection)
-    const chatChannel = supabase
-      .channel(`chat_${canonicalConvId}`)
-      .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
-        if (payload && payload.id) {
-          dataService.appendIncomingMessage(payload);
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === payload.id)) return prev;
-            return [...prev, payload].sort((a, b) => {
-              const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-              return diff !== 0 ? diff : a.id.localeCompare(b.id);
-            });
-          });
-          if (payload.senderRole === 'agent' || payload.senderRole === 'admin') {
-            notificationSoundService.playIncomingMessageSound();
-          }
-        }
-      })
-      .on(
-        'postgres_changes',
-        {
+    // Single Ref-Counted Multiplexed Realtime Channel (prevents .on() after .subscribe())
+    const unsubRoom = realtimeChatHub.subscribeChatRoom(
+      `chat_${canonicalConvId}`,
+      {
+        postgresFilter: {
           event: 'INSERT',
           schema: 'public',
           table: 'messages',
           filter: `conversation_id=eq.${canonicalConvId}`,
         },
-        (payload) => {
-          const row: any = payload.new;
+      },
+      {
+        onBroadcast: (payload) => {
+          if (payload && payload.id) {
+            dataService.appendIncomingMessage(payload);
+            setMessages((prev) => sortAndDeduplicateMessages([...prev, payload], true));
+            if (payload.senderRole === 'agent' || payload.senderRole === 'admin') {
+              notificationSoundService.playIncomingMessageSound();
+            }
+          }
+        },
+        onPostgresChange: (payload) => {
+          const row: any = payload?.new;
           if (row && row.id) {
-            const incoming: ChatMessage = {
-              id: row.id,
-              conversationId: row.conversation_id,
-              senderId: row.sender_id,
-              senderName: row.sender_name,
-              senderRole: row.sender_role,
-              text: row.content || '',
-              attachmentUrl: row.attachment_url || row.transaction_data?.attachmentUrl || undefined,
-              attachmentName: row.attachment_name || row.transaction_data?.attachmentName || undefined,
-              isInternalNote: false,
-              transactionData: row.transaction_data,
-              createdAt: row.created_at,
-              isRead: true,
-            };
-
+            const incoming = mapDbMessageRowToChatMessage(row, canonicalConvId);
             dataService.appendIncomingMessage(incoming);
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === incoming.id)) return prev;
-              return [...prev, incoming].sort((a, b) => {
-                const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-                return diff !== 0 ? diff : a.id.localeCompare(b.id);
-              });
-            });
+            setMessages((prev) => sortAndDeduplicateMessages([...prev, incoming], true));
 
             if (incoming.senderRole === 'agent' || incoming.senderRole === 'admin') {
               notificationSoundService.playIncomingMessageSound();
@@ -196,18 +171,13 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               }
             }
           }
-        }
-      )
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          channelRef.current = chatChannel;
-        }
-      });
-
-    channelRef.current = chatChannel;
+        },
+      }
+    );
 
     let lastCatchUpTime = 0;
     const performCatchUp = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const now = Date.now();
       if (now - lastCatchUpTime < 800) return;
       lastCatchUpTime = now;
@@ -236,7 +206,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       window.removeEventListener('storage', handleSync);
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', handleFocus);
-      supabase.removeChannel(chatChannel);
+      unsubRoom();
     };
   }, [currentUser.id]);
 
@@ -260,20 +230,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       isInternalNote: false,
     });
 
-    if (channelRef.current) {
-      channelRef.current
-        .send({
-          type: 'broadcast',
-          event: 'new_chat_message',
-          payload: newMsg,
-        })
-        .catch(() => {});
-    }
-
-    setMessages((prev) => {
-      if (prev.some((m) => m.id === newMsg.id)) return prev;
-      return [...prev, newMsg];
-    });
+    setMessages((prev) => sortAndDeduplicateMessages([...prev, newMsg], true));
 
     setInputText('');
     setAttachmentName(null);
@@ -616,6 +573,21 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                       </div>
                     )}
                   </div>
+
+                  {isMe && msg.deliveryStatus === 'sending' && (
+                    <span className="text-[10px] text-slate-400 font-mono">Sending...</span>
+                  )}
+                  {isMe && msg.deliveryStatus === 'failed' && (
+                    <button
+                      type="button"
+                      onClick={() => dataService.retryChatMessage(`conv_${currentUser.id}`, msg.id)}
+                      className="text-[10px] font-semibold text-rose-400 hover:text-rose-300 flex items-center gap-1"
+                      title={msg.deliveryError || 'Message failed to save'}
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Failed to send · Tap to Retry</span>
+                    </button>
+                  )}
                 </div>
               );
             })

@@ -187,6 +187,341 @@ async function sendVercelPushNotification(
   }
 }
 
+function setNoStoreHeaders(res: any) {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+}
+
+function sortRawMessagesChronologically(rows: any[]): any[] {
+  const seen = new Map<string, any>();
+  for (const r of rows || []) {
+    if (!r || !r.id) continue;
+    seen.set(r.id, r);
+  }
+  return Array.from(seen.values()).sort((a, b) => {
+    const timeA = Date.parse(a.created_at || '') || 0;
+    const timeB = Date.parse(b.created_at || '') || 0;
+    if (timeA !== timeB) return timeA - timeB;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  });
+}
+
+export async function handleGetChatMessages(adminClient: any, parsedUrl: URL, res: any) {
+  setNoStoreHeaders(res);
+  try {
+    const customerId = (parsedUrl.searchParams.get('customerId') || '').trim();
+    const conversationId = (parsedUrl.searchParams.get('conversationId') || '').trim();
+    const beforeCreatedAt = (parsedUrl.searchParams.get('beforeCreatedAt') || '').trim();
+    const afterCreatedAt = (parsedUrl.searchParams.get('afterCreatedAt') || '').trim();
+    const rawLimit = Number.parseInt(parsedUrl.searchParams.get('limit') || '50', 10);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
+
+    if (!customerId && !conversationId) {
+      return res.status(400).json({ error: 'customerId or conversationId is required' });
+    }
+
+    const effectiveCustomerId =
+      customerId || conversationId.replace(/^conv_cust_/, '').replace(/^conv_/, '');
+    const canonicalConvId = `conv_${effectiveCustomerId}`;
+    const candidateIds = new Set<string>();
+    if (conversationId) candidateIds.add(conversationId);
+    if (canonicalConvId) candidateIds.add(canonicalConvId);
+    if (effectiveCustomerId) {
+      candidateIds.add(effectiveCustomerId);
+      candidateIds.add(`conv_cust_${effectiveCustomerId}`);
+      const { data: dbConvs } = await adminClient
+        .from('conversations')
+        .select('id')
+        .or(`customer_id.eq.${effectiveCustomerId},id.eq.${canonicalConvId}`)
+        .limit(20);
+      if (dbConvs?.length) {
+        dbConvs.forEach((c: any) => {
+          if (c?.id) candidateIds.add(c.id);
+        });
+      }
+    }
+
+    const queryIds = Array.from(candidateIds);
+    let query = adminClient.from('messages').select('*');
+    query = queryIds.length === 1 ? query.eq('conversation_id', queryIds[0]) : query.in('conversation_id', queryIds);
+
+    if (afterCreatedAt) {
+      query = query.gt('created_at', afterCreatedAt).order('created_at', { ascending: true }).limit(limit);
+    } else {
+      if (beforeCreatedAt) {
+        query = query.lt('created_at', beforeCreatedAt);
+      }
+      query = query.order('created_at', { ascending: false }).limit(limit);
+    }
+
+    const { data: messages, error: msgErr } = await query;
+    if (msgErr) {
+      return res.status(500).json({ error: msgErr.message, code: msgErr.code });
+    }
+
+    const sortedMessages = sortRawMessagesChronologically(messages || []);
+
+    return res.status(200).json({
+      success: true,
+      canonicalId: canonicalConvId,
+      messages: sortedMessages,
+      hasMore: (messages?.length || 0) >= limit,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to fetch chat messages' });
+  }
+}
+
+export async function handlePostChatSend(adminClient: any, body: any, res: any) {
+  setNoStoreHeaders(res);
+  try {
+    const {
+      id,
+      conversationId,
+      senderId,
+      senderName,
+      senderRole,
+      recipientId,
+      recipientName,
+      senderEmail,
+      recipientEmail,
+      text,
+      attachmentUrl,
+      attachmentName,
+      transactionData,
+      isInternalNote,
+      createdAt,
+    } = body || {};
+
+    if (!senderId) {
+      return res.status(400).json({ error: 'senderId is required' });
+    }
+
+    const textStr = typeof text === 'string' ? text : '';
+    if (!textStr.trim() && !attachmentUrl && !transactionData) {
+      return res.status(400).json({ error: 'Message text, attachmentUrl, or transactionData is required' });
+    }
+
+    const customerId =
+      senderRole === 'customer'
+        ? String(senderId).trim()
+        : String(
+            recipientId ||
+              (conversationId ? String(conversationId).replace(/^conv_cust_/, '').replace(/^conv_/, '') : '')
+          ).trim();
+
+    if (!customerId) {
+      return res.status(400).json({ error: 'Cannot determine customer ID for conversation' });
+    }
+
+    const canonicalConvId = `conv_${customerId}`;
+    const parsedCreatedAt = createdAt ? Date.parse(String(createdAt)) : NaN;
+    const now = !Number.isNaN(parsedCreatedAt) ? new Date(parsedCreatedAt).toISOString() : new Date().toISOString();
+
+    // 1. Guarantee parent public.users row exists before upserting conversations (prevents FK 23503)
+    const { data: existingUser, error: userLookupErr } = await adminClient
+      .from('users')
+      .select('id, display_name, email')
+      .eq('id', customerId)
+      .maybeSingle();
+
+    if (userLookupErr) {
+      return res.status(500).json({
+        error: userLookupErr.message || 'Failed to verify customer profile row',
+        code: userLookupErr.code,
+      });
+    }
+
+    let resolvedCustomerName = existingUser?.display_name || '';
+    if (!existingUser) {
+      let authUser: any = null;
+      try {
+        const authRes = await adminClient.auth?.admin?.getUserById?.(customerId);
+        authUser = authRes?.data?.user || null;
+      } catch {
+        authUser = null;
+      }
+
+      const candidateName =
+        authUser?.user_metadata?.display_name ||
+        authUser?.user_metadata?.full_name ||
+        (senderRole === 'customer' ? senderName : recipientName) ||
+        'Player';
+      const candidateEmail = (
+        authUser?.email ||
+        (senderRole === 'customer' ? senderEmail : recipientEmail) ||
+        `${customerId}@player.local`
+      )
+        .trim()
+        .toLowerCase();
+
+      resolvedCustomerName = candidateName;
+
+      const { error: userUpsertErr } = await adminClient
+        .from('users')
+        .upsert(
+          {
+            id: customerId,
+            email: candidateEmail,
+            display_name: candidateName,
+            role: 'customer',
+            status: 'active',
+            email_verified: Boolean(authUser?.email_confirmed_at ?? true),
+            created_at: now,
+            updated_at: now,
+          },
+          { onConflict: 'id' }
+        );
+
+      if (userUpsertErr) {
+        if (userUpsertErr.code === '23505') {
+          const { error: fallbackUserErr } = await adminClient.from('users').upsert(
+            {
+              id: customerId,
+              email: `${customerId}@player.local`,
+              display_name: candidateName,
+              role: 'customer',
+              status: 'active',
+              email_verified: true,
+              created_at: now,
+              updated_at: now,
+            },
+            { onConflict: 'id' }
+          );
+          if (fallbackUserErr) {
+            return res.status(500).json({ error: fallbackUserErr.message, code: fallbackUserErr.code });
+          }
+        } else {
+          return res.status(500).json({ error: userUpsertErr.message, code: userUpsertErr.code });
+        }
+      }
+    }
+
+    // 2. Guarantee parent public.conversations row exists BEFORE inserting into messages
+    const { data: existingConv, error: existingConvErr } = await adminClient
+      .from('conversations')
+      .select('id, customer_name, status, last_message')
+      .eq('id', canonicalConvId)
+      .maybeSingle();
+
+    if (existingConvErr) {
+      return res.status(500).json({
+        error: existingConvErr.message || 'Failed to verify conversation row',
+        code: existingConvErr.code,
+      });
+    }
+
+    const customerDisplayName =
+      existingConv?.customer_name ||
+      resolvedCustomerName ||
+      (senderRole === 'customer' ? senderName : recipientName) ||
+      'Customer';
+
+    const convPayload: any = {
+      id: canonicalConvId,
+      customer_id: customerId,
+      customer_name: customerDisplayName,
+      last_message: isInternalNote
+        ? existingConv?.last_message || ''
+        : textStr.trim() || (attachmentUrl ? '[Photo Attachment]' : ''),
+      last_message_at: now,
+      status: existingConv?.status || 'open',
+    };
+
+    const { error: convErr } = await adminClient
+      .from('conversations')
+      .upsert(convPayload, { onConflict: 'id' });
+
+    if (convErr) {
+      return res.status(500).json({
+        error: convErr.message || 'Failed to persist parent conversation',
+        code: convErr.code,
+      });
+    }
+
+    // 3. Persist message idempotently preserving client deterministic ID
+    const msgId =
+      typeof id === 'string' && id.trim()
+        ? id.trim()
+        : `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+    const txPayload =
+      transactionData || attachmentUrl || attachmentName || isInternalNote
+        ? {
+            ...(transactionData || {}),
+            ...(attachmentUrl
+              ? { attachmentUrl: attachmentUrl || transactionData?.attachmentUrl || transactionData?.proofUrl }
+              : {}),
+            ...(attachmentName
+              ? { attachmentName: attachmentName || transactionData?.attachmentName }
+              : {}),
+            ...(isInternalNote ? { isInternalNote: true } : {}),
+          }
+        : null;
+
+    const messageRow: any = {
+      id: msgId,
+      conversation_id: canonicalConvId,
+      sender_id: senderId,
+      sender_name: senderName || 'User',
+      sender_role: senderRole || 'customer',
+      content: textStr,
+      transaction_data: txPayload,
+      created_at: now,
+      is_internal_note: Boolean(isInternalNote),
+    };
+    if (attachmentUrl) {
+      messageRow.attachment_url = attachmentUrl;
+    }
+    if (attachmentName) {
+      messageRow.attachment_name = attachmentName;
+    }
+
+    let savedMsg: any = null;
+    const { data, error: upsertErr } = await adminClient
+      .from('messages')
+      .upsert(messageRow, { onConflict: 'id' })
+      .select()
+      .single();
+
+    if (upsertErr) {
+      const errText = `${upsertErr.code || ''} ${upsertErr.message || ''}`;
+      const isMissingColumnError =
+        upsertErr.code === '42703' ||
+        upsertErr.code === 'PGRST204' ||
+        errText.includes('attachment_url') ||
+        errText.includes('attachment_name') ||
+        errText.includes('is_internal_note');
+
+      if (!isMissingColumnError) {
+        return res.status(500).json({ error: upsertErr.message, code: upsertErr.code });
+      }
+
+      const fallbackRow = { ...messageRow };
+      delete fallbackRow.attachment_url;
+      delete fallbackRow.attachment_name;
+      delete fallbackRow.is_internal_note;
+
+      const { data: fallbackMsg, error: retryErr } = await adminClient
+        .from('messages')
+        .upsert(fallbackRow, { onConflict: 'id' })
+        .select()
+        .single();
+
+      if (retryErr) {
+        return res.status(500).json({ error: retryErr.message, code: retryErr.code });
+      }
+      savedMsg = fallbackMsg;
+    } else {
+      savedMsg = data;
+    }
+
+    return res.status(200).json({ success: true, message: savedMsg, canonicalId: canonicalConvId });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to dispatch chat message' });
+  }
+}
+
 export default async function handler(req: any, res: any) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -1071,143 +1406,11 @@ export default async function handler(req: any, res: any) {
 
   // 7. Chat Consolidation & Guaranteed Parent Conversation Send
   if (url.includes('/api/chat/messages') && req.method === 'GET') {
-    try {
-      const customerId = (parsedUrl.searchParams.get('customerId') || '').trim();
-      const conversationId = (parsedUrl.searchParams.get('conversationId') || '').trim();
-      if (!customerId && !conversationId) {
-        return res.status(400).json({ error: 'customerId or conversationId is required' });
-      }
-
-      const effectiveCustomerId = customerId || (conversationId.startsWith('conv_') ? conversationId.replace('conv_', '') : conversationId);
-      const canonicalConvId = `conv_${effectiveCustomerId}`;
-      const candidateIds = new Set<string>();
-      if (conversationId) candidateIds.add(conversationId);
-      if (canonicalConvId) candidateIds.add(canonicalConvId);
-      if (effectiveCustomerId) {
-        candidateIds.add(effectiveCustomerId);
-        candidateIds.add(`conv_cust_${effectiveCustomerId}`);
-        const { data: dbConvs } = await supabaseAdmin
-          .from('conversations')
-          .select('id')
-          .or(`customer_id.eq.${effectiveCustomerId},id.eq.${canonicalConvId}`)
-          .limit(20);
-        if (dbConvs?.length) {
-          dbConvs.forEach((c: any) => candidateIds.add(c.id));
-        }
-      }
-
-      const queryIds = Array.from(candidateIds);
-      let query = supabaseAdmin.from('messages').select('*');
-      query = queryIds.length === 1 ? query.eq('conversation_id', queryIds[0]) : query.in('conversation_id', queryIds);
-
-      const { data: messages, error: msgErr } = await query.order('created_at', { ascending: true }).limit(200);
-      if (msgErr) {
-        return res.status(500).json({ error: msgErr.message });
-      }
-
-      return res.status(200).json({
-        success: true,
-        canonicalId: canonicalConvId,
-        messages: messages || [],
-      });
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message || 'Failed to fetch chat messages' });
-    }
+    return handleGetChatMessages(supabaseAdmin, parsedUrl, res);
   }
 
   if (url.includes('/api/chat/send') && req.method === 'POST') {
-    try {
-      const {
-        conversationId,
-        senderId,
-        senderName,
-        senderRole,
-        recipientId,
-        recipientName,
-        text,
-        attachmentUrl,
-        attachmentName,
-        transactionData,
-      } = getBody(req);
-
-      if (!senderId) {
-        return res.status(400).json({ error: 'senderId is required' });
-      }
-
-      const customerId = senderRole === 'customer'
-        ? senderId
-        : (recipientId || (conversationId ? String(conversationId).replace(/^conv_/, '') : ''));
-
-      if (!customerId) {
-        return res.status(400).json({ error: 'Cannot determine customer ID for conversation' });
-      }
-
-      const canonicalConvId = `conv_${customerId}`;
-      const now = new Date().toISOString();
-
-      const { data: existingConv } = await supabaseAdmin
-        .from('conversations')
-        .select('id, customer_name, status')
-        .eq('id', canonicalConvId)
-        .maybeSingle();
-
-      const customerDisplayName =
-        existingConv?.customer_name ||
-        (senderRole === 'customer' ? senderName : recipientName) ||
-        'Customer';
-
-      await supabaseAdmin.from('conversations').upsert(
-        {
-          id: canonicalConvId,
-          customer_id: customerId,
-          customer_name: customerDisplayName,
-          last_message: text || (attachmentUrl ? '[Photo Attachment]' : ''),
-          last_message_at: now,
-          status: existingConv?.status || 'open',
-        },
-        { onConflict: 'id' }
-      );
-
-      const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      const txPayload = transactionData
-        ? {
-            ...transactionData,
-            attachmentUrl: attachmentUrl || transactionData.attachmentUrl || transactionData.proofUrl,
-            attachmentName: attachmentName || transactionData.attachmentName,
-          }
-        : (attachmentUrl ? { attachmentUrl, attachmentName } : null);
-
-      const messageRow: any = {
-        id: msgId,
-        conversation_id: canonicalConvId,
-        sender_id: senderId,
-        sender_name: senderName || 'User',
-        sender_role: senderRole || 'customer',
-        content: text || '',
-        transaction_data: txPayload,
-        created_at: now,
-      };
-      if (attachmentUrl) {
-        messageRow.attachment_url = attachmentUrl;
-      }
-
-      let savedMsg: any = null;
-      const { data, error: insertErr } = await supabaseAdmin.from('messages').insert(messageRow).select().single();
-      if (insertErr) {
-        delete messageRow.attachment_url;
-        const { data: fallbackMsg, error: retryErr } = await supabaseAdmin.from('messages').insert(messageRow).select().single();
-        if (retryErr) {
-          return res.status(500).json({ error: retryErr.message });
-        }
-        savedMsg = fallbackMsg;
-      } else {
-        savedMsg = data;
-      }
-
-      return res.status(200).json({ success: true, message: savedMsg, canonicalId: canonicalConvId });
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message || 'Failed to dispatch chat message' });
-    }
+    return handlePostChatSend(supabaseAdmin, getBody(req), res);
   }
 
   // 8. Stateless Telegram Zero-Egress Notification Endpoints (persisted in Supabase app_config)

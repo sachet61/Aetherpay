@@ -40,6 +40,12 @@ import { authSessionService, PREDEFINED_ADMINS } from './authSessionService';
 import { supabase, isSupabaseConfigured, testSupabaseConnection } from './supabaseClient';
 import { supabaseAuthService } from './supabaseAuthService';
 import { webPushClient } from './webPushClient';
+import { realtimeChatHub } from './chatRealtime';
+import {
+  mapDbMessageRowToChatMessage,
+  sortAndDeduplicateMessages,
+  mergeAuthoritativeMessages,
+} from './chatOrderUtils';
 
 export type RealtimeSyncStatus = 'connected' | 'syncing' | 'sleeping' | 'disconnected' | 'reconnecting';
 
@@ -652,10 +658,28 @@ class DataService {
           changed = true;
         }
       } else if (isAdmin) {
-        // Admin: refresh recent topups and withdrawals queue
-        const [topupsRes, withdrawalsRes] = await Promise.all([
+        // Admin: refresh recent topups, withdrawals, conversations, and delta chat messages
+        const querySince = this.lastSyncTimestamp
+          ? new Date(Math.max(0, Date.parse(this.lastSyncTimestamp) - 10000)).toISOString()
+          : null;
+        const adminMsgQuery = querySince
+          ? supabase
+              .from('messages')
+              .select('*')
+              .gt('created_at', querySince)
+              .order('created_at', { ascending: false })
+              .limit(50)
+          : supabase
+              .from('messages')
+              .select('*')
+              .order('created_at', { ascending: false })
+              .limit(50);
+
+        const [topupsRes, withdrawalsRes, convsRes, msgsRes] = await Promise.all([
           supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(15),
           supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(15),
+          supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
+          adminMsgQuery,
         ]);
 
         if (topupsRes.data && topupsRes.data.length > 0) {
@@ -664,6 +688,14 @@ class DataService {
         }
         if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
           this.applyWithdrawalRows(withdrawalsRes.data, false);
+          changed = true;
+        }
+        if (convsRes.data && convsRes.data.length > 0) {
+          this.applyConversationRows(convsRes.data, false);
+          changed = true;
+        }
+        if (msgsRes.data && msgsRes.data.length > 0) {
+          this.applyMessageRows(msgsRes.data);
           changed = true;
         }
       }
@@ -692,18 +724,14 @@ class DataService {
     return this.syncDelta();
   }
 
-  // Conversation-specific direct fetch for 100% reliable message hydration with query capping
+  // Conversation-specific direct fetch for reliable, ordered message hydration with cache-busting
   public async fetchMessagesForConversation(
     conversationId: string,
-    options?: { beforeCreatedAt?: string; limit?: number }
+    options?: { beforeCreatedAt?: string; afterCreatedAt?: string; limit?: number }
   ): Promise<ChatMessage[]> {
     if (!conversationId) return [];
     const targetConvId = this.resolveCanonicalConvId(conversationId);
     const localMsgs = this.getMessages(targetConvId);
-
-    if (!supabase || !isSupabaseConfigured()) {
-      return localMsgs;
-    }
 
     try {
       const limit = options?.limit || 50;
@@ -711,7 +739,7 @@ class DataService {
       // Identify all related conversation IDs for this customer to retrieve complete thread history
       const candidateIds = new Set<string>([conversationId, targetConvId].filter(Boolean));
       const conv = this.getConversations().find((c) => c.id === conversationId || c.id === targetConvId);
-      const customerId = conv?.customerId || (conversationId.startsWith('conv_') ? conversationId.replace('conv_', '') : undefined);
+      const customerId = conv?.customerId || (conversationId.startsWith('conv_') ? conversationId.replace(/^conv_/, '') : undefined);
       if (customerId) {
         candidateIds.add(`conv_${customerId}`);
         for (const c of this.getConversations()) {
@@ -721,19 +749,61 @@ class DataService {
         }
       }
 
-      // 1. Authoritative cross-browser fetch via server endpoint first
+      const persistAndReturnMerged = (remoteRows: any[]): ChatMessage[] => {
+        const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+        const existingPool: ChatMessage[] = [];
+        for (const cid of new Set([...Array.from(candidateIds), targetConvId, conversationId])) {
+          if (Array.isArray(all[cid])) {
+            existingPool.push(...all[cid]);
+          }
+        }
+        const remoteMsgs = (remoteRows || []).map((row) => mapDbMessageRowToChatMessage(row, targetConvId));
+        const merged = mergeAuthoritativeMessages(existingPool, remoteMsgs, targetConvId);
+
+        for (const cid of candidateIds) {
+          all[cid] = merged;
+        }
+        all[targetConvId] = merged;
+        all[conversationId] = merged;
+
+        this.cache[STORAGE_KEYS.MESSAGES] = all;
+        this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
+
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'conversation_messages_fetched', conversationId: targetConvId, count: merged.length },
+          })
+        );
+        return this.getMessages(targetConvId);
+      };
+
+      // 1. Authoritative cross-browser fetch via server endpoint (Service Role + Cache-Control: no-store)
       try {
-        const queryCustId = customerId || (targetConvId.startsWith('conv_') ? targetConvId.replace('conv_', '') : '');
-        const srvRes = await fetch(`/api/chat/messages?conversationId=${encodeURIComponent(targetConvId)}&customerId=${encodeURIComponent(queryCustId || '')}`);
+        const queryCustId = customerId || (targetConvId.startsWith('conv_') ? targetConvId.replace(/^conv_/, '') : '');
+        const params = new URLSearchParams({
+          conversationId: targetConvId,
+          customerId: queryCustId || '',
+          limit: String(limit),
+        });
+        if (options?.beforeCreatedAt) params.set('beforeCreatedAt', options.beforeCreatedAt);
+        if (options?.afterCreatedAt) params.set('afterCreatedAt', options.afterCreatedAt);
+
+        const srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' },
+        });
         if (srvRes.ok) {
           const srvData = await srvRes.json();
-          if (srvData.success && Array.isArray(srvData.messages) && srvData.messages.length > 0) {
-            this.applyMessageRows(srvData.messages);
-            return this.getMessages(targetConvId);
+          if (srvData.success && Array.isArray(srvData.messages)) {
+            return persistAndReturnMerged(srvData.messages);
           }
         }
       } catch (srvErr) {
         console.warn('[DataService] /api/chat/messages notice:', srvErr);
+      }
+
+      if (!supabase || !isSupabaseConfigured()) {
+        return localMsgs;
       }
 
       if (customerId) {
@@ -752,22 +822,21 @@ class DataService {
       }
       const queryIds = Array.from(candidateIds);
 
-      let query = supabase
-        .from('messages')
-        .select('*');
-
+      let query = supabase.from('messages').select('*');
       if (queryIds.length === 1) {
         query = query.eq('conversation_id', queryIds[0]);
       } else {
         query = query.in('conversation_id', queryIds);
       }
 
-      if (options?.beforeCreatedAt) {
-        query = query.lt('created_at', options.beforeCreatedAt);
+      if (options?.afterCreatedAt) {
+        query = query.gt('created_at', options.afterCreatedAt).order('created_at', { ascending: true }).limit(limit);
+      } else {
+        if (options?.beforeCreatedAt) {
+          query = query.lt('created_at', options.beforeCreatedAt);
+        }
+        query = query.order('created_at', { ascending: false }).limit(limit);
       }
-
-      // Order descending to fetch the newest records up to limit, capped strictly to prevent high egress
-      query = query.order('created_at', { ascending: false }).limit(limit);
 
       const { data, error } = await query;
 
@@ -776,105 +845,28 @@ class DataService {
         return localMsgs;
       }
 
-      if (data && data.length > 0) {
-        const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-        const msgMap = new Map<string, ChatMessage>();
+      const merged = persistAndReturnMerged(data || []);
 
-        for (const cid of queryIds) {
-          const currentList = all[cid] || [];
-          for (const m of currentList) {
-            msgMap.set(m.id, m);
+      // Consolidate legacy thread messages in PostgreSQL asynchronously
+      const legacyIds = queryIds.filter((id) => id !== targetConvId);
+      if (legacyIds.length > 0 && supabase && isSupabaseConfigured()) {
+        (async () => {
+          try {
+            await supabase
+              .from('messages')
+              .update({ conversation_id: targetConvId })
+              .in('conversation_id', legacyIds);
+            await supabase
+              .from('conversations')
+              .delete()
+              .in('id', legacyIds);
+          } catch (err) {
+            console.warn('Error consolidating legacy threads:', err);
           }
-        }
-
-        for (const row of data) {
-          const resolvedAttachmentUrl =
-            row.attachment_url ||
-            row.transaction_data?.attachmentUrl ||
-            row.transaction_data?.proofUrl ||
-            row.transaction_data?.proof_url ||
-            row.transaction_data?.receiptUrl ||
-            row.transaction_data?.receipt_url ||
-            row.transaction_data?.imageUrl ||
-            row.transaction_data?.image_url ||
-            row.proof_url ||
-            undefined;
-
-          const resolvedAttachmentName =
-            row.attachment_name ||
-            row.transaction_data?.attachmentName ||
-            row.transaction_data?.proofName ||
-            row.transaction_data?.fileName ||
-            (resolvedAttachmentUrl ? 'Attached image' : undefined);
-
-          const item: ChatMessage = {
-            id: row.id,
-            conversationId: targetConvId,
-            senderId: row.sender_id,
-            senderName: row.sender_name,
-            senderRole: row.sender_role || 'customer',
-            text: row.content || '',
-            attachmentUrl: resolvedAttachmentUrl,
-            attachmentName: resolvedAttachmentName,
-            isInternalNote: false,
-            transactionData: row.transaction_data || undefined,
-            createdAt: row.created_at || new Date().toISOString(),
-            isRead: true,
-          };
-          msgMap.set(item.id, item);
-        }
-
-        const sorted = Array.from(msgMap.values()).sort((a, b) => {
-          const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-          return diff !== 0 ? diff : a.id.localeCompare(b.id);
-        });
-
-        // Unconditionally filter out automated greetings and canned bot messages
-        const merged = sorted.filter((m) => {
-          if (!m.text) return true;
-          const text = m.text.toLowerCase();
-          const isBotGreeting =
-            text.includes('welcome to swift sweeps support') ||
-            text.includes('treasury and gaming care specialists assist you today') ||
-            (m.senderName === 'Sarah Lin' && text.includes('welcome'));
-          return !isBotGreeting;
-        });
-
-        for (const cid of queryIds) {
-          all[cid] = merged;
-        }
-        all[targetConvId] = merged;
-        all[conversationId] = merged;
-
-        this.cache[STORAGE_KEYS.MESSAGES] = all;
-        this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
-
-        // Consolidate legacy thread messages in PostgreSQL asynchronously
-        const legacyIds = queryIds.filter((id) => id !== targetConvId);
-        if (legacyIds.length > 0 && supabase && isSupabaseConfigured()) {
-          (async () => {
-            try {
-              await supabase
-                .from('messages')
-                .update({ conversation_id: targetConvId })
-                .in('conversation_id', legacyIds);
-              await supabase
-                .from('conversations')
-                .delete()
-                .in('id', legacyIds);
-            } catch (err) {
-              console.warn('Error consolidating legacy threads:', err);
-            }
-          })();
-        }
-
-        window.dispatchEvent(
-          new CustomEvent('aetherpay_state_changed', {
-            detail: { key: 'conversation_messages_fetched', conversationId: targetConvId, count: merged.length },
-          })
-        );
-        return merged;
+        })();
       }
+
+      return merged;
     } catch (e) {
       console.warn('fetchMessagesForConversation exception:', e);
     }
@@ -911,62 +903,21 @@ class DataService {
       const filteredData = beforeId ? data.filter((row: any) => row.id !== beforeId) : data;
 
       if (filteredData.length > 0) {
+        const canonicalId = this.resolveCanonicalConvId(conversationId);
         const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-        const currentList = all[conversationId] || [];
-        const msgMap = new Map<string, ChatMessage>();
+        const currentList = all[canonicalId] || all[conversationId] || [];
+        const remoteMapped = filteredData.map((row: any) => mapDbMessageRowToChatMessage(row, canonicalId));
+        const merged = mergeAuthoritativeMessages(currentList, remoteMapped, canonicalId);
 
-        for (const m of currentList) {
-          msgMap.set(m.id, m);
+        all[canonicalId] = merged;
+        if (conversationId !== canonicalId) {
+          all[conversationId] = merged;
         }
-
-        for (const row of filteredData) {
-          const resolvedAttachmentUrl =
-            row.attachment_url ||
-            row.transaction_data?.attachmentUrl ||
-            row.transaction_data?.proofUrl ||
-            row.transaction_data?.proof_url ||
-            row.transaction_data?.receiptUrl ||
-            row.transaction_data?.receipt_url ||
-            row.transaction_data?.imageUrl ||
-            row.transaction_data?.image_url ||
-            row.proof_url ||
-            undefined;
-
-          const resolvedAttachmentName =
-            row.attachment_name ||
-            row.transaction_data?.attachmentName ||
-            row.transaction_data?.proofName ||
-            row.transaction_data?.fileName ||
-            (resolvedAttachmentUrl ? 'Attached image' : undefined);
-
-          const item: ChatMessage = {
-            id: row.id,
-            conversationId: row.conversation_id,
-            senderId: row.sender_id,
-            senderName: row.sender_name,
-            senderRole: row.sender_role || 'customer',
-            text: row.content || '',
-            attachmentUrl: resolvedAttachmentUrl,
-            attachmentName: resolvedAttachmentName,
-            isInternalNote: false,
-            transactionData: row.transaction_data || undefined,
-            createdAt: row.created_at || new Date().toISOString(),
-            isRead: true,
-          };
-          msgMap.set(item.id, item);
-        }
-
-        const merged = Array.from(msgMap.values()).sort((a, b) => {
-          const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-          return diff !== 0 ? diff : a.id.localeCompare(b.id);
-        });
-
-        all[conversationId] = merged;
         this.cache[STORAGE_KEYS.MESSAGES] = all;
         this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
         window.dispatchEvent(
           new CustomEvent('aetherpay_state_changed', {
-            detail: { key: 'conversation_messages_fetched', conversationId, count: filteredData.length },
+            detail: { key: 'conversation_messages_fetched', conversationId: canonicalId, count: filteredData.length },
           })
         );
       }
@@ -1458,54 +1409,28 @@ class DataService {
   private applyMessageRows(rows: any[]): void {
     const currentMsgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
     const msgMap: Record<string, ChatMessage[]> = { ...currentMsgs };
+    const touchedIds = new Set<string>();
 
     for (const m of rows) {
-      const resolvedAttachmentUrl =
-        m.attachment_url ||
-        m.transaction_data?.attachmentUrl ||
-        m.transaction_data?.proofUrl ||
-        m.transaction_data?.proof_url ||
-        m.transaction_data?.receiptUrl ||
-        m.transaction_data?.receipt_url ||
-        m.transaction_data?.imageUrl ||
-        m.transaction_data?.image_url ||
-        m.proof_url ||
-        undefined;
-
-      const resolvedAttachmentName =
-        m.attachment_name ||
-        m.transaction_data?.attachmentName ||
-        m.transaction_data?.proofName ||
-        m.transaction_data?.fileName ||
-        (resolvedAttachmentUrl ? 'Attached image' : undefined);
-
-      const item: ChatMessage = {
-        id: m.id,
-        conversationId: m.conversation_id,
-        senderId: m.sender_id,
-        senderName: m.sender_name,
-        senderRole: m.sender_role || 'customer',
-        text: m.content || '',
-        isInternalNote: Boolean(m.is_internal_note),
-        isRead: true,
-        attachmentUrl: resolvedAttachmentUrl,
-        attachmentName: resolvedAttachmentName,
-        transactionData: m.transaction_data || undefined,
-        createdAt: m.created_at || new Date().toISOString(),
-      };
+      if (!m || !m.id) continue;
       const canonicalId = this.resolveCanonicalConvId(m.conversation_id);
+      const item = mapDbMessageRowToChatMessage(m, canonicalId);
       const targetIds = Array.from(new Set([m.conversation_id, canonicalId].filter(Boolean)));
       for (const tid of targetIds) {
-        if (!msgMap[tid]) {
-          msgMap[tid] = [];
-        }
-        const idx = msgMap[tid].findIndex((x) => x.id === item.id);
+        const list = msgMap[tid] ? [...msgMap[tid]] : [];
+        const idx = list.findIndex((x) => x.id === item.id);
         if (idx >= 0) {
-          msgMap[tid][idx] = item;
+          list[idx] = { ...list[idx], ...item, deliveryStatus: 'sent', deliveryError: undefined };
         } else {
-          msgMap[tid].push(item);
+          list.push(item);
         }
+        msgMap[tid] = list;
+        touchedIds.add(tid);
       }
+    }
+
+    for (const tid of touchedIds) {
+      msgMap[tid] = sortAndDeduplicateMessages(msgMap[tid] || [], true);
     }
 
     this.cache[STORAGE_KEYS.MESSAGES] = msgMap;
@@ -5072,18 +4997,258 @@ class DataService {
   public getMessages(conversationId: string): ChatMessage[] {
     const targetId = this.resolveCanonicalConvId(conversationId);
     const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-    const rawList = all[targetId] || all[conversationId] || [];
+    const combined = [
+      ...(targetId && Array.isArray(all[targetId]) ? all[targetId] : []),
+      ...(conversationId && conversationId !== targetId && Array.isArray(all[conversationId]) ? all[conversationId] : []),
+    ];
+    return sortAndDeduplicateMessages(combined, true);
+  }
 
-    // Unconditionally filter out automated greetings and canned bot messages
-    return rawList.filter((m) => {
-      if (!m.text) return true;
-      const text = m.text.toLowerCase();
-      const isBotGreeting =
-        text.includes('welcome to swift sweeps support') ||
-        text.includes('treasury and gaming care specialists assist you today') ||
-        (m.senderName === 'Sarah Lin' && text.includes('welcome'));
-      return !isBotGreeting;
+  private updateCachedMessageDelivery(
+    targetConvId: string,
+    msgId: string,
+    updater: (existing: ChatMessage) => ChatMessage
+  ): ChatMessage | null {
+    const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+    const list = all[targetConvId] ? [...all[targetConvId]] : [];
+    const idx = list.findIndex((m) => m.id === msgId);
+    if (idx < 0) return null;
+    const updated = updater(list[idx]);
+    list[idx] = updated;
+    all[targetConvId] = sortAndDeduplicateMessages(list, true);
+    this.cache[STORAGE_KEYS.MESSAGES] = all;
+    this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
+    window.dispatchEvent(
+      new CustomEvent('aetherpay_state_changed', {
+        detail: { key: 'chat_message', message: updated, conversationId: targetConvId },
+      })
+    );
+    return updated;
+  }
+
+  private inFlightMessageDeliveries = new Map<string, Promise<ChatMessage>>();
+
+  private dispatchMessageDelivery(newMsg: ChatMessage, conv?: SupportConversation): Promise<ChatMessage> {
+    const existingPromise = this.inFlightMessageDeliveries.get(newMsg.id);
+    if (existingPromise) {
+      return existingPromise;
+    }
+
+    const promise = this.executeMessageDelivery(newMsg, conv).finally(() => {
+      this.inFlightMessageDeliveries.delete(newMsg.id);
     });
+    this.inFlightMessageDeliveries.set(newMsg.id, promise);
+    return promise;
+  }
+
+  private async executeMessageDelivery(newMsg: ChatMessage, conv?: SupportConversation): Promise<ChatMessage> {
+    const targetConvId = this.resolveCanonicalConvId(newMsg.conversationId || '');
+    const customerId =
+      conv?.customerId ||
+      (newMsg.senderRole === 'customer'
+        ? newMsg.senderId
+        : targetConvId.startsWith('conv_')
+        ? targetConvId.replace(/^conv_/, '')
+        : '');
+    const customerUser = customerId ? this.getUserById(customerId) : undefined;
+
+    const txPayload =
+      newMsg.transactionData || newMsg.attachmentUrl || newMsg.attachmentName || newMsg.isInternalNote
+        ? {
+            ...(newMsg.transactionData || {}),
+            ...(newMsg.attachmentUrl
+              ? { attachmentUrl: newMsg.attachmentUrl || (newMsg.transactionData as any)?.attachmentUrl }
+              : {}),
+            ...(newMsg.attachmentName
+              ? { attachmentName: newMsg.attachmentName || (newMsg.transactionData as any)?.attachmentName }
+              : {}),
+            ...(newMsg.isInternalNote ? { isInternalNote: true } : {}),
+          }
+        : null;
+
+    let confirmedMsg: ChatMessage | null = null;
+    let lastErrorMessage = '';
+
+    // 1. Authoritative server write with deterministic client ID (guarantees parent users + conversations FK)
+    try {
+      const srvRes = await fetch('/api/chat/send', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: newMsg.id,
+          conversationId: targetConvId,
+          senderId: newMsg.senderId,
+          senderName: newMsg.senderName,
+          senderRole: newMsg.senderRole,
+          recipientId: customerId,
+          recipientName: conv?.customerName || customerUser?.displayName,
+          senderEmail: newMsg.senderRole === 'customer' ? customerUser?.email : undefined,
+          recipientEmail: customerUser?.email || conv?.customerEmail,
+          text: newMsg.text,
+          attachmentUrl: newMsg.attachmentUrl,
+          attachmentName: newMsg.attachmentName,
+          transactionData: txPayload,
+          isInternalNote: newMsg.isInternalNote,
+          createdAt: newMsg.createdAt,
+        }),
+      });
+
+      const srvJson = await srvRes.json().catch(() => ({}));
+      if (srvRes.ok && srvJson?.success && srvJson?.message) {
+        const mapped = mapDbMessageRowToChatMessage(srvJson.message, targetConvId);
+        confirmedMsg = {
+          ...newMsg,
+          ...mapped,
+          intentAction: newMsg.intentAction,
+          deliveryStatus: 'sent',
+          deliveryError: undefined,
+        };
+      } else {
+        lastErrorMessage = srvJson?.error || `Server rejected message (${srvRes.status})`;
+      }
+    } catch (apiErr: any) {
+      lastErrorMessage = apiErr?.message || 'Network error reaching chat server';
+      console.warn('[DataService] /api/chat/send notice:', apiErr);
+    }
+
+    // 2. Fallback to ordered direct Supabase write only if /api/chat/send did not confirm persistence
+    if (!confirmedMsg && supabase && isSupabaseConfigured()) {
+      try {
+        if (customerId) {
+          await supabase.from('conversations').upsert(
+            {
+              id: targetConvId,
+              customer_id: customerId,
+              customer_name: conv?.customerName || customerUser?.displayName || 'Customer',
+              status: conv?.status || 'open',
+              last_message: newMsg.isInternalNote ? conv?.lastMessageText || '' : newMsg.text || (newMsg.attachmentUrl ? '[Photo Attachment]' : ''),
+              last_message_at: newMsg.createdAt || new Date().toISOString(),
+            },
+            { onConflict: 'id' }
+          );
+        }
+
+        const directRow: any = {
+          id: newMsg.id,
+          conversation_id: targetConvId,
+          sender_id: newMsg.senderId,
+          sender_name: newMsg.senderName,
+          sender_role: newMsg.senderRole,
+          content: newMsg.text,
+          attachment_url: newMsg.attachmentUrl || null,
+          attachment_name: newMsg.attachmentName || null,
+          transaction_data: txPayload,
+          created_at: newMsg.createdAt,
+        };
+
+        let { data: directData, error: directErr } = await supabase
+          .from('messages')
+          .upsert(directRow, { onConflict: 'id' })
+          .select()
+          .single();
+
+        if (
+          directErr &&
+          (directErr.code === '42703' ||
+            directErr.code === 'PGRST204' ||
+            String(directErr.message || '').includes('attachment_url') ||
+            String(directErr.message || '').includes('attachment_name'))
+        ) {
+          delete directRow.attachment_url;
+          delete directRow.attachment_name;
+          const retryRes = await supabase
+            .from('messages')
+            .upsert(directRow, { onConflict: 'id' })
+            .select()
+            .single();
+          directData = retryRes.data;
+          directErr = retryRes.error;
+        }
+
+        if (!directErr && directData) {
+          const mapped = mapDbMessageRowToChatMessage(directData, targetConvId);
+          confirmedMsg = {
+            ...newMsg,
+            ...mapped,
+            intentAction: newMsg.intentAction,
+            deliveryStatus: 'sent',
+            deliveryError: undefined,
+          };
+        } else if (directErr) {
+          lastErrorMessage = lastErrorMessage || directErr.message;
+        }
+      } catch (fbErr: any) {
+        lastErrorMessage = lastErrorMessage || fbErr?.message || 'Failed to save message';
+      }
+    }
+
+    if (confirmedMsg) {
+      const updated =
+        this.updateCachedMessageDelivery(targetConvId, newMsg.id, (existing) => ({
+          ...existing,
+          ...confirmedMsg!,
+          deliveryStatus: 'sent',
+          deliveryError: undefined,
+        })) || confirmedMsg;
+
+      // Broadcast via ref-counted, collision-free Realtime hub on aligned topics
+      if (supabase && isSupabaseConfigured()) {
+        void realtimeChatHub.broadcastMessage(`chat_${targetConvId}`, updated);
+        void realtimeChatHub.broadcastMessage('room_admin_support', updated);
+      }
+
+      // Zero-Egress Telegram Alert for customer messages
+      if (updated.senderRole === 'customer' && typeof fetch === 'function') {
+        fetch('/api/telegram/notify-message', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            customerName: updated.senderName || 'Customer',
+            conversationId: targetConvId,
+          }),
+        }).catch(() => {});
+      }
+
+      // Instant Web Push Notification
+      if (!updated.isInternalNote && typeof window !== 'undefined') {
+        try {
+          const recipientRole = updated.senderRole === 'customer' ? 'agent' : 'customer';
+          const recipientId =
+            updated.senderRole === 'customer'
+              ? conv?.assignedAgentId || 'staff'
+              : conv?.customerId || customerId || '';
+
+          if (recipientId) {
+            webPushClient
+              .notifyRecipientViaPush({
+                recipientId,
+                recipientRole,
+                senderName: updated.senderName || 'Support',
+                messageText: updated.text || '',
+                conversationId: targetConvId,
+              })
+              .catch(() => {});
+          }
+        } catch {}
+      }
+
+      return updated;
+    }
+
+    // Fail explicitly in UI cache so user can click Retry rather than silently dropping on reload
+    const failed =
+      this.updateCachedMessageDelivery(targetConvId, newMsg.id, (existing) => ({
+        ...existing,
+        deliveryStatus: 'failed',
+        deliveryError: lastErrorMessage || 'Message failed to save. Tap retry.',
+      })) || {
+        ...newMsg,
+        deliveryStatus: 'failed' as const,
+        deliveryError: lastErrorMessage || 'Message failed to save. Tap retry.',
+      };
+
+    return failed;
   }
 
   public sendChatMessage(params: {
@@ -5107,7 +5272,6 @@ class DataService {
     let intentAction: ChatMessage['intentAction'] = undefined;
     if (params.senderRole === 'customer') {
       const lower = params.text.toLowerCase();
-      // Look for numbers like "$500" or "500"
       const numberMatch = lower.match(/(?:\$|\s|^)(\d+(?:\.\d{1,2})?)/);
       const matchedAmount = numberMatch ? parseFloat(numberMatch[1]) : undefined;
 
@@ -5136,6 +5300,7 @@ class DataService {
       }
     }
 
+    const nowIso = new Date().toISOString();
     const newMsg: ChatMessage = {
       id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       conversationId: targetConvId,
@@ -5148,199 +5313,31 @@ class DataService {
       isInternalNote: !!params.isInternalNote,
       intentAction,
       transactionData: params.transactionData,
-      createdAt: new Date().toISOString(),
+      createdAt: nowIso,
       isRead: false,
+      deliveryStatus: 'sending',
     };
 
-    all[targetConvId].push(newMsg);
-    this.save(STORAGE_KEYS.MESSAGES, all);
+    all[targetConvId] = sortAndDeduplicateMessages([...all[targetConvId], newMsg], true);
+    this.cache[STORAGE_KEYS.MESSAGES] = all;
+    this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
 
-    // Update conversation summary
+    // Update conversation summary locally
     const conversations = this.getConversations();
     const conv = conversations.find((c) => c.id === targetConvId);
     if (conv) {
       if (!params.isInternalNote) {
-        conv.lastMessageText = params.text;
+        conv.lastMessageText = params.text || (params.attachmentUrl ? '[Photo Attachment]' : conv.lastMessageText);
+        conv.lastMessageTimestamp = nowIso;
       }
-      conv.lastMessageTimestamp = new Date().toISOString();
       if (params.senderRole === 'customer') {
         conv.unreadCountStaff += 1;
       } else if (!params.isInternalNote) {
         conv.unreadCountCustomer += 1;
       }
-      conv.updatedAt = new Date().toISOString();
-      this.save(STORAGE_KEYS.CONVERSATIONS, conversations);
-    }
-
-    // Broadcast live via Supabase Realtime (both room-specific and staff channel)
-    try {
-      if (supabase && isSupabaseConfigured()) {
-        // 1. Room specific broadcast (multiplexed channel)
-        const channel = supabase.channel(`chat_${targetConvId}`);
-        if ((channel as any).state === 'joined') {
-          channel
-            .send({
-              type: 'broadcast',
-              event: 'new_chat_message',
-              payload: newMsg,
-            })
-            .catch((err) => console.warn('Realtime broadcast notice:', err));
-        } else {
-          channel.subscribe((status) => {
-            if (status === 'SUBSCRIBED') {
-              channel
-                .send({
-                  type: 'broadcast',
-                  event: 'new_chat_message',
-                  payload: newMsg,
-                })
-                .catch(() => {});
-            }
-          });
-        }
-
-        // 2. Global staff admin notification channel
-        const staffChannel = supabase.channel('room_admin_support');
-        if ((staffChannel as any).state === 'joined') {
-          staffChannel
-            .send({
-              type: 'broadcast',
-              event: 'new_chat_message',
-              payload: newMsg,
-            })
-            .catch(() => {});
-        } else {
-          staffChannel.subscribe((status) => {
-            if (status === 'SUBSCRIBED') {
-              staffChannel
-                .send({
-                  type: 'broadcast',
-                  event: 'new_chat_message',
-                  payload: newMsg,
-                })
-                .catch(() => {});
-            }
-          });
-        }
-
-        // 3. Persist to messages table with dual-resilient attachment storage (columns + transaction_data JSONB)
-        const txPayload = newMsg.transactionData
-          ? {
-              ...newMsg.transactionData,
-              attachmentUrl: newMsg.attachmentUrl || (newMsg.transactionData as any).attachmentUrl,
-              attachmentName: newMsg.attachmentName || (newMsg.transactionData as any).attachmentName,
-            }
-          : (newMsg.attachmentUrl
-            ? {
-                attachmentUrl: newMsg.attachmentUrl,
-                attachmentName: newMsg.attachmentName || null,
-              }
-            : null);
-
-        // Authoritative server dispatch with Service Role to guarantee parent conversation existence in PostgreSQL
-        fetch('/api/chat/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            conversationId: targetConvId,
-            senderId: newMsg.senderId,
-            senderName: newMsg.senderName,
-            senderRole: newMsg.senderRole,
-            recipientId: conv?.customerId || (targetConvId.startsWith('conv_') ? targetConvId.replace(/^conv_/, '') : ''),
-            recipientName: conv?.customerName,
-            text: newMsg.text,
-            attachmentUrl: newMsg.attachmentUrl,
-            attachmentName: newMsg.attachmentName,
-            transactionData: txPayload,
-            isInternalNote: newMsg.isInternalNote,
-          }),
-        }).catch((apiErr) => console.warn('[DataService] Server chat send notice:', apiErr));
-
-        supabase
-          .from('messages')
-          .upsert({
-            id: newMsg.id,
-            conversation_id: newMsg.conversationId,
-            sender_id: newMsg.senderId,
-            sender_name: newMsg.senderName,
-            sender_role: newMsg.senderRole,
-            content: newMsg.text,
-            attachment_url: newMsg.attachmentUrl || null,
-            attachment_name: newMsg.attachmentName || null,
-            transaction_data: txPayload,
-            created_at: newMsg.createdAt,
-          })
-          .then(
-            ({ error }: any) => {
-              if (error) {
-                // If column attachment_url does not exist yet on unmigrated database (PostgreSQL 42703), retry without columns
-                if (error.code === '42703' || String(error.message || '').includes('attachment_url')) {
-                  supabase
-                    .from('messages')
-                    .upsert({
-                      id: newMsg.id,
-                      conversation_id: newMsg.conversationId,
-                      sender_id: newMsg.senderId,
-                      sender_name: newMsg.senderName,
-                      sender_role: newMsg.senderRole,
-                      content: newMsg.text,
-                      transaction_data: txPayload,
-                      created_at: newMsg.createdAt,
-                    })
-                    .then(({ error: retryErr }: any) => {
-                      if (retryErr) console.warn('Supabase message persist fallback notice:', retryErr);
-                    });
-                } else {
-                  console.warn('Supabase message persist notice:', error);
-                }
-              }
-            },
-            (err: any) => console.warn('Supabase message persist notice:', err)
-          );
-      }
-    } catch (e) {
-      console.warn('Realtime chat dispatch notice:', e);
-    }
-
-    // Zero-Egress Telegram Alert: send customer name when a customer posts a message (debounced on server)
-    if (params.senderRole === 'customer') {
-      try {
-        fetch('/api/telegram/notify-message', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            customerName: params.senderName || 'Customer',
-            conversationId: targetConvId,
-          }),
-        }).catch((err) => console.warn('Telegram notify-message notice:', err));
-      } catch (err) {
-        console.warn('Telegram notify dispatch notice:', err);
-      }
-    }
-
-    // Instant Web Push Notification: delivers alerts even when browser is minimized or app is closed
-    if (!params.isInternalNote && typeof window !== 'undefined') {
-      try {
-        const recipientRole = params.senderRole === 'customer' ? 'agent' : 'customer';
-        const recipientId =
-          params.senderRole === 'customer'
-            ? conv?.assignedAgentId || 'staff'
-            : conv?.customerId || '';
-
-        if (recipientId) {
-          webPushClient
-            .notifyRecipientViaPush({
-              recipientId,
-              recipientRole,
-              senderName: params.senderName,
-              messageText: params.text,
-              conversationId: targetConvId,
-            })
-            .catch((err) => console.warn('Background push dispatch notice:', err));
-        }
-      } catch (err) {
-        console.warn('Push notify dispatch notice:', err);
-      }
+      conv.updatedAt = nowIso;
+      this.cache[STORAGE_KEYS.CONVERSATIONS] = conversations;
+      this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, conversations);
     }
 
     window.dispatchEvent(
@@ -5349,50 +5346,94 @@ class DataService {
       })
     );
 
+    void this.dispatchMessageDelivery(newMsg, conv);
+
     return newMsg;
+  }
+
+  public async sendChatMessageConfirmed(params: {
+    conversationId: string;
+    senderId: string;
+    senderName: string;
+    senderRole: 'customer' | 'agent' | 'admin' | 'system';
+    text: string;
+    attachmentUrl?: string;
+    attachmentName?: string;
+    isInternalNote?: boolean;
+    transactionData?: ChatTransactionData;
+  }): Promise<ChatMessage> {
+    const newMsg = this.sendChatMessage(params);
+    const inFlight = this.inFlightMessageDeliveries.get(newMsg.id);
+    if (inFlight) return inFlight;
+    const targetConvId = this.resolveCanonicalConvId(params.conversationId);
+    const conv = this.getConversations().find((c) => c.id === targetConvId);
+    return this.dispatchMessageDelivery(newMsg, conv);
+  }
+
+  public async retryChatMessage(conversationId: string, messageId: string): Promise<ChatMessage | null> {
+    const targetConvId = this.resolveCanonicalConvId(conversationId);
+    const existing = this.updateCachedMessageDelivery(targetConvId, messageId, (m) => ({
+      ...m,
+      deliveryStatus: 'sending',
+      deliveryError: undefined,
+    }));
+    if (!existing) return null;
+    const conv = this.getConversations().find((c) => c.id === targetConvId);
+    return this.dispatchMessageDelivery(existing, conv);
   }
 
   public appendIncomingMessage(msg: ChatMessage): void {
     if (!msg || !msg.conversationId || !msg.id) return;
     const targetConvId = this.resolveCanonicalConvId(msg.conversationId);
-    msg.conversationId = targetConvId;
+    const normalizedMsg: ChatMessage = {
+      ...msg,
+      conversationId: targetConvId,
+      deliveryStatus: 'sent',
+      deliveryError: undefined,
+    };
 
-    if (!msg.attachmentUrl && (msg.transactionData as any)?.attachmentUrl) {
-      msg.attachmentUrl = (msg.transactionData as any).attachmentUrl;
+    if (!normalizedMsg.attachmentUrl && (normalizedMsg.transactionData as any)?.attachmentUrl) {
+      normalizedMsg.attachmentUrl = (normalizedMsg.transactionData as any).attachmentUrl;
     }
-    if (!msg.attachmentName && (msg.transactionData as any)?.attachmentName) {
-      msg.attachmentName = (msg.transactionData as any).attachmentName;
+    if (!normalizedMsg.attachmentName && (normalizedMsg.transactionData as any)?.attachmentName) {
+      normalizedMsg.attachmentName = (normalizedMsg.transactionData as any).attachmentName;
     }
 
     const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-    if (!all[targetConvId]) {
-      all[targetConvId] = [];
-    }
-    if (!all[targetConvId].some((m) => m.id === msg.id)) {
-      all[targetConvId].push(msg);
-      this.cache[STORAGE_KEYS.MESSAGES] = all;
-      this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
+    const existingList = all[targetConvId] || [];
+    const alreadyPresent = existingList.some((m) => m.id === normalizedMsg.id);
+    const existingEntry = existingList.find((m) => m.id === normalizedMsg.id);
 
-      // Also ensure conversation summary has latest message and increment unread counts
+    all[targetConvId] = sortAndDeduplicateMessages([...existingList, normalizedMsg], true);
+    this.cache[STORAGE_KEYS.MESSAGES] = all;
+    this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
+
+    if (!alreadyPresent || existingEntry?.deliveryStatus !== 'sent') {
+      // Also ensure conversation summary has latest message and increment unread counts when new
       const conversations = this.getConversations();
       const conv = conversations.find((c) => c.id === targetConvId);
-      if (conv) {
-        if (!msg.isInternalNote) {
-          conv.lastMessageText = msg.text;
+      if (conv && !alreadyPresent) {
+        const msgTime = Date.parse(normalizedMsg.createdAt || '') || 0;
+        const convTime = Date.parse(conv.lastMessageTimestamp || '') || 0;
+        if (msgTime >= convTime) {
+          if (!normalizedMsg.isInternalNote) {
+            conv.lastMessageText = normalizedMsg.text || (normalizedMsg.attachmentUrl ? '[Photo Attachment]' : conv.lastMessageText);
+            conv.lastMessageTimestamp = normalizedMsg.createdAt || new Date().toISOString();
+          }
+          conv.updatedAt = normalizedMsg.createdAt || new Date().toISOString();
         }
-        conv.lastMessageTimestamp = msg.createdAt;
-        conv.updatedAt = msg.createdAt;
-        if (msg.senderRole === 'customer') {
+        if (normalizedMsg.senderRole === 'customer') {
           conv.unreadCountStaff = (conv.unreadCountStaff || 0) + 1;
-        } else if (!msg.isInternalNote) {
+        } else if (!normalizedMsg.isInternalNote) {
           conv.unreadCountCustomer = (conv.unreadCountCustomer || 0) + 1;
         }
-        this.save(STORAGE_KEYS.CONVERSATIONS, conversations);
+        this.cache[STORAGE_KEYS.CONVERSATIONS] = conversations;
+        this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, conversations);
       }
 
       window.dispatchEvent(
         new CustomEvent('aetherpay_state_changed', {
-          detail: { key: 'chat_incoming', message: msg, conversationId: targetConvId },
+          detail: { key: alreadyPresent ? 'chat_message' : 'chat_incoming', message: normalizedMsg, conversationId: targetConvId },
         })
       );
     }

@@ -230,6 +230,8 @@ export interface ChatMessage {
   transactionData?: ChatTransactionData;
   createdAt?: string;
   read?: boolean;
+  deliveryStatus?: 'sending' | 'sent' | 'failed';
+  deliveryError?: string;
   [key: string]: any;
 }
 

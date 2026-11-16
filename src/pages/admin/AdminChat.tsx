@@ -9,7 +9,8 @@ import {
   WithdrawalRequest,
 } from '../../types';
 import { dataService } from '../../services/dataService';
-import { supabase } from '../../services/supabaseClient';
+import { realtimeChatHub } from '../../services/chatRealtime';
+import { mapDbMessageRowToChatMessage, sortAndDeduplicateMessages } from '../../services/chatOrderUtils';
 import { ChatTransactionCard } from '../../components/chat/ChatTransactionCard';
 import {
   Search,
@@ -228,7 +229,6 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     };
   }, [selectedConvId]);
 
-  const channelRef = useRef<any>(null);
   const [soundEnabled, setSoundEnabled] = useState(() => notificationSoundService.isSoundEnabled());
   const [desktopEnabled, setDesktopEnabled] = useState(() => notificationSoundService.isDesktopEnabled());
   const [notifPermission, setNotifPermission] = useState(() => notificationSoundService.getPermissionStatus());
@@ -260,111 +260,147 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     }
   };
 
-  // Realtime subscription via Supabase Channel
+  // Active conversation Realtime subscription on aligned canonical topic via ref-counted hub
   useEffect(() => {
     if (!selectedConvId) return;
-    const channel = supabase.channel(`room_${selectedConvId}`)
-      .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
-        if (payload && payload.id) {
-          dataService.appendIncomingMessage(payload);
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === payload.id)) return prev;
-            return [...prev, payload];
-          });
-          if (payload.senderRole === 'customer') {
-            notificationSoundService.playIncomingMessageSound();
+    const canonicalConvId = dataService.resolveCanonicalConvId(selectedConvId);
+    const unsubRoom = realtimeChatHub.subscribeChatRoom(
+      `chat_${canonicalConvId}`,
+      {
+        postgresFilter: {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `conversation_id=eq.${canonicalConvId}`,
+        },
+      },
+      {
+        onBroadcast: (payload) => {
+          if (payload && payload.id) {
+            dataService.appendIncomingMessage(payload);
+            setMessages((prev) => sortAndDeduplicateMessages([...prev, payload], true));
+            if (payload.senderRole === 'customer') {
+              notificationSoundService.playIncomingMessageSound();
+            }
           }
-        }
-      })
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          channelRef.current = channel;
-        }
-      });
-
-    channelRef.current = channel;
+        },
+        onPostgresChange: (payload) => {
+          const row: any = payload?.new;
+          if (row && row.id) {
+            const incoming = mapDbMessageRowToChatMessage(row, canonicalConvId);
+            dataService.appendIncomingMessage(incoming);
+            setMessages((prev) => sortAndDeduplicateMessages([...prev, incoming], true));
+            if (incoming.senderRole === 'customer') {
+              notificationSoundService.playIncomingMessageSound();
+            }
+          }
+        },
+      }
+    );
 
     return () => {
-      supabase.removeChannel(channel);
+      unsubRoom();
     };
   }, [selectedConvId]);
 
-  // Global staff broadcast channel to hear incoming messages across all conversations in real time
+  // Global staff Realtime subscriptions + tab visibility catch-up via ref-counted hub
   useEffect(() => {
-    const staffChannel = supabase.channel('room_admin_support')
-      .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
-        if (payload && payload.id) {
-          dataService.appendIncomingMessage(payload);
-          syncFromMemory();
-          const currentActive = selectedConvIdRef.current;
-          if (currentActive && (payload.conversationId === currentActive || dataService.resolveCanonicalConvId(payload.conversationId) === dataService.resolveCanonicalConvId(currentActive))) {
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === payload.id)) return prev;
-              return [...prev, payload];
-            });
-          }
-          if (payload.senderRole === 'customer') {
-            notificationSoundService.playIncomingMessageSound();
-          }
-        }
-      })
-      .subscribe();
+    const handleGlobalIncoming = (incoming: ChatMessage) => {
+      if (!incoming || !incoming.id) return;
+      dataService.appendIncomingMessage(incoming);
+      syncFromMemory();
 
-    // Persistent Supabase Database Changes stream across all player messages (Zero-Polling WebSocket)
-    const dbAllMessagesChannel = supabase.channel('db_admin_live_messages')
-      .on(
-        'postgres_changes',
-        {
+      const currentActive = selectedConvIdRef.current;
+      if (
+        currentActive &&
+        (incoming.conversationId === currentActive ||
+          dataService.resolveCanonicalConvId(incoming.conversationId) === dataService.resolveCanonicalConvId(currentActive))
+      ) {
+        setMessages((prev) => sortAndDeduplicateMessages([...prev, incoming], true));
+      }
+
+      if (incoming.senderRole === 'customer') {
+        notificationSoundService.playIncomingMessageSound();
+        if (document.hidden) {
+          notificationSoundService.showDesktopNotification(
+            `New message from ${incoming.senderName}`,
+            { body: incoming.text }
+          );
+        }
+      }
+    };
+
+    const unsubStaff = realtimeChatHub.subscribeChatRoom(
+      'room_admin_support',
+      {},
+      {
+        onBroadcast: (payload) => {
+          if (payload && payload.id) {
+            handleGlobalIncoming(payload);
+          }
+        },
+      }
+    );
+
+    const unsubDbAll = realtimeChatHub.subscribeChatRoom(
+      'db_admin_live_messages',
+      {
+        postgresFilter: {
           event: 'INSERT',
           schema: 'public',
           table: 'messages',
         },
-        (payload) => {
-          const row: any = payload.new;
+      },
+      {
+        onPostgresChange: (payload) => {
+          const row: any = payload?.new;
           if (row && row.id) {
-            const incoming: ChatMessage = {
-              id: row.id,
-              conversationId: row.conversation_id,
-              senderId: row.sender_id,
-              senderName: row.sender_name,
-              senderRole: row.sender_role,
-              text: row.content || '',
-              attachmentUrl: row.attachment_url || row.transaction_data?.attachmentUrl || undefined,
-              attachmentName: row.attachment_name || row.transaction_data?.attachmentName || undefined,
-              isInternalNote: false,
-              transactionData: row.transaction_data,
-              createdAt: row.created_at,
-              isRead: true,
-            };
-
-            dataService.appendIncomingMessage(incoming);
-            syncFromMemory();
-
-            const currentActive = selectedConvIdRef.current;
-            if (currentActive && (incoming.conversationId === currentActive || dataService.resolveCanonicalConvId(incoming.conversationId) === dataService.resolveCanonicalConvId(currentActive))) {
-              setMessages((prev) => {
-                if (prev.some((m) => m.id === incoming.id)) return prev;
-                return [...prev, incoming];
-              });
-            }
-
-            if (incoming.senderRole === 'customer') {
-              notificationSoundService.playIncomingMessageSound();
-              if (document.hidden) {
-                notificationSoundService.showDesktopNotification(
-                  `New message from ${incoming.senderName}`,
-                  { body: incoming.text }
-                );
-              }
-            }
+            const incoming = mapDbMessageRowToChatMessage(row);
+            handleGlobalIncoming(incoming);
           }
-        }
-      )
-      .subscribe();
+        },
+      }
+    );
+
+    let lastAdminCatchUpAt = 0;
+    const performAdminCatchUp = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - lastAdminCatchUpAt < 800) return;
+      lastAdminCatchUpAt = now;
+
+      dataService.fetchConversations().then(() => {
+        syncFromMemory();
+      });
+
+      const currentActive = selectedConvIdRef.current;
+      if (currentActive) {
+        const canonicalActive = dataService.resolveCanonicalConvId(currentActive);
+        dataService.fetchMessagesForConversation(canonicalActive, { limit: 50 }).then((fresh) => {
+          if (fresh && fresh.length > 0 && selectedConvIdRef.current) {
+            setMessages(fresh);
+          }
+        });
+      }
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        performAdminCatchUp();
+      }
+    };
+    const handleFocus = () => {
+      performAdminCatchUp();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleFocus);
 
     return () => {
-      supabase.removeChannel(staffChannel);
-      supabase.removeChannel(dbAllMessagesChannel);
+      unsubStaff();
+      unsubDbAll();
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleFocus);
     };
   }, []);
 
@@ -512,20 +548,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       isInternalNote,
     });
 
-    if (channelRef.current) {
-      channelRef.current
-        .send({
-          type: 'broadcast',
-          event: 'new_chat_message',
-          payload: newMsg,
-        })
-        .catch(() => {});
-    }
-
-    setMessages((prev) => {
-      if (prev.some((m) => m.id === newMsg.id)) return prev;
-      return [...prev, newMsg];
-    });
+    setMessages((prev) => sortAndDeduplicateMessages([...prev, newMsg], true));
 
     setInputText('');
     setAttachmentUrl(null);
@@ -1192,6 +1215,21 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                             );
                           })()}
                         </div>
+
+                        {isStaff && msg.deliveryStatus === 'sending' && (
+                          <span className="text-[10px] text-slate-400 font-mono">Sending...</span>
+                        )}
+                        {isStaff && msg.deliveryStatus === 'failed' && (
+                          <button
+                            type="button"
+                            onClick={() => dataService.retryChatMessage(activeConv.id, msg.id)}
+                            className="text-[10px] font-semibold text-rose-400 hover:text-rose-300 flex items-center gap-1"
+                            title={msg.deliveryError || 'Message failed to save'}
+                          >
+                            <RefreshCw className="w-3 h-3" />
+                            <span>Failed to send · Tap to Retry</span>
+                          </button>
+                        )}
                       </div>
                     );
                   })

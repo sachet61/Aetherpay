@@ -2,7 +2,9 @@ import React, { useEffect, useState, useRef } from 'react';
 import { UserProfile, ChatMessage } from '../../types';
 import { dataService } from '../../services/dataService';
 import { notificationSoundService } from '../../services/notificationSoundService';
-import { supabase, isSupabaseConfigured } from '../../services/supabaseClient';
+import { isSupabaseConfigured } from '../../services/supabaseClient';
+import { realtimeChatHub } from '../../services/chatRealtime';
+import { mapDbMessageRowToChatMessage } from '../../services/chatOrderUtils';
 import { Headphones, MessageSquare, X, ArrowRight, Bell } from 'lucide-react';
 
 interface GlobalChatNotificationManagerProps {
@@ -48,7 +50,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
     if (msg.senderId === currentUser.id) return;
 
     // Check if relevant for this user
-    if (isCustomer && msg.senderRole === 'customer') return;
+    if (isCustomer && (msg.senderRole === 'customer' || msg.isInternalNote)) return;
     if (!isCustomer && msg.senderRole !== 'customer') return;
 
     // 1. Play real-time synthesized Web Audio API notification chime
@@ -71,10 +73,10 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
 
       setActiveToast({
         id: msg.id,
-        senderName: msg.senderName,
-        senderRole: msg.senderRole,
-        text: msg.text,
-        conversationId: msg.conversationId,
+        senderName: msg.senderName || 'Support',
+        senderRole: String(msg.senderRole || ''),
+        text: msg.text || (msg.attachmentUrl ? '[Photo Attachment]' : ''),
+        conversationId: msg.conversationId || '',
       });
 
       toastTimeoutRef.current = setTimeout(() => {
@@ -83,7 +85,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
     }
   };
 
-  // Global Realtime Listeners (Supabase Realtime + local event dispatch)
+  // Global Realtime Listeners (Shared Ref-Counted Hub + local event dispatch)
   useEffect(() => {
     if (!currentUser) return;
 
@@ -97,99 +99,92 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
 
     window.addEventListener('aetherpay_state_changed', handleLocalState);
 
-    // 2. Supabase Realtime Channels
-    if (!supabase || !isSupabaseConfigured()) {
+    if (!isSupabaseConfigured()) {
       return () => {
         window.removeEventListener('aetherpay_state_changed', handleLocalState);
+        if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
       };
     }
 
-    let activeChannel: any = null;
+    const unsubs: Array<() => void> = [];
 
     if (isCustomer && currentUser.role === 'customer') {
-      // Customer: listen to their personal support room and message updates in single multiplexed channel
       const canonicalConvId = `conv_${currentUser.id}`;
       const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
       if (conv && conv.status !== 'closed') {
-        activeChannel = supabase
-          .channel(`global_chat_${canonicalConvId}`)
-          .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
-            if (payload && payload.id) {
-              dataService.appendIncomingMessage(payload);
-              handleIncomingMessage(payload);
-            }
-          })
-          .on(
-            'postgres_changes',
+        unsubs.push(
+          realtimeChatHub.subscribeChatRoom(
+            `chat_${canonicalConvId}`,
             {
+              postgresFilter: {
+                event: 'INSERT',
+                schema: 'public',
+                table: 'messages',
+                filter: `conversation_id=eq.${canonicalConvId}`,
+              },
+            },
+            {
+              onBroadcast: (payload) => {
+                if (payload && payload.id) {
+                  dataService.appendIncomingMessage(payload);
+                  handleIncomingMessage(payload);
+                }
+              },
+              onPostgresChange: (payload) => {
+                const raw = payload?.new;
+                if (raw && raw.id && raw.sender_id !== currentUser.id) {
+                  const formattedMsg = mapDbMessageRowToChatMessage(raw, canonicalConvId);
+                  dataService.appendIncomingMessage(formattedMsg);
+                  handleIncomingMessage(formattedMsg);
+                }
+              },
+            }
+          )
+        );
+      }
+    } else {
+      unsubs.push(
+        realtimeChatHub.subscribeChatRoom(
+          'room_admin_support',
+          {},
+          {
+            onBroadcast: (payload) => {
+              if (payload && payload.id) {
+                dataService.appendIncomingMessage(payload);
+                handleIncomingMessage(payload);
+              }
+            },
+          }
+        )
+      );
+
+      unsubs.push(
+        realtimeChatHub.subscribeChatRoom(
+          'db_admin_live_messages',
+          {
+            postgresFilter: {
               event: 'INSERT',
               schema: 'public',
               table: 'messages',
-              filter: `conversation_id=eq.${canonicalConvId}`,
             },
-            (payload: any) => {
-              const raw = payload.new;
-              if (raw && raw.id && raw.sender_id !== currentUser.id) {
-                const formattedMsg: ChatMessage = {
-                  id: raw.id,
-                  conversationId: raw.conversation_id,
-                  senderId: raw.sender_id,
-                  senderName: raw.sender_name || 'Support Agent',
-                  senderRole: raw.sender_role || 'agent',
-                  text: raw.content || '',
-                  transactionData: raw.transaction_data,
-                  createdAt: raw.created_at || new Date().toISOString(),
-                  isRead: false,
-                };
+          },
+          {
+            onPostgresChange: (payload) => {
+              const raw = payload?.new;
+              if (raw && raw.id && raw.sender_role === 'customer' && raw.sender_id !== currentUser.id) {
+                const formattedMsg = mapDbMessageRowToChatMessage(raw);
                 dataService.appendIncomingMessage(formattedMsg);
                 handleIncomingMessage(formattedMsg);
               }
-            }
-          )
-          .subscribe();
-      }
-    } else {
-      // Staff / Admin: listen to the global admin support feed in single multiplexed channel
-      activeChannel = supabase
-        .channel('global_bg_admin_channel')
-        .on('broadcast', { event: 'new_chat_message' }, ({ payload }) => {
-          if (payload && payload.id) {
-            dataService.appendIncomingMessage(payload);
-            handleIncomingMessage(payload);
-          }
-        })
-        .on(
-          'postgres_changes',
-          {
-            event: 'INSERT',
-            schema: 'public',
-            table: 'messages',
-          },
-          (payload: any) => {
-            const raw = payload.new;
-            if (raw && raw.id && raw.sender_role === 'customer' && raw.sender_id !== currentUser.id) {
-              const formattedMsg: ChatMessage = {
-                id: raw.id,
-                conversationId: raw.conversation_id,
-                senderId: raw.sender_id,
-                senderName: raw.sender_name || 'Customer',
-                senderRole: 'customer',
-                text: raw.content || '',
-                transactionData: raw.transaction_data,
-                createdAt: raw.created_at || new Date().toISOString(),
-                isRead: false,
-              };
-              dataService.appendIncomingMessage(formattedMsg);
-              handleIncomingMessage(formattedMsg);
-            }
+            },
           }
         )
-        .subscribe();
+      );
     }
 
     return () => {
       window.removeEventListener('aetherpay_state_changed', handleLocalState);
-      if (activeChannel) supabase.removeChannel(activeChannel);
+      for (const unsub of unsubs) unsub();
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     };
   }, [currentUser.id, currentUser.role, activeTab]);
