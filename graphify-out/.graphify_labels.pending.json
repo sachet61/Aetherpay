@@ -14,11 +14,14 @@
   "12": "compilerOptions",
   "13": "lucide-react",
   "14": "UserProfile",
-  "15": "useVerificationResolution.ts",
+  "15": "SupabaseAuthService",
   "16": "react",
   "17": "StartupSplash.tsx",
-  "18": "react",
+  "18": "authSessionService.ts",
   "19": "CustomerProfile.tsx",
+  "20": "dependencies",
   "21": "vercel.json",
-  "22": "sw.js"
+  "22": "sw.js",
+  "23": "vite.config.ts",
+  "24": "scripts"
 }
