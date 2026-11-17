@@ -9,6 +9,7 @@ export function useDataService() {
     currentUser ? dataService.getWallet(currentUser.id) : null
   );
   const [config, setConfig] = useState<AppConfig>(dataService.getAppConfig());
+  const [hydrationState, setHydrationState] = useState(() => dataService.getHydrationState());
 
   const refresh = useCallback(() => {
     setTick((prev) => prev + 1);
@@ -24,6 +25,7 @@ export function useDataService() {
       setCurrentUser(u);
       setWallet(u ? dataService.getWallet(u.id) : null);
       setConfig(dataService.getAppConfig());
+      setHydrationState(dataService.getHydrationState());
       setTick((prev) => prev + 1);
     };
 
@@ -50,18 +52,21 @@ export function useDataService() {
     const u = dataService.getUserById(userId) || null;
     setCurrentUser(u);
     setWallet(u ? dataService.getWallet(u.id) : null);
+    setHydrationState(dataService.getHydrationState());
   };
 
   const logout = () => {
     dataService.logout();
     setCurrentUser(null);
     setWallet(null);
+    setHydrationState(dataService.getHydrationState());
   };
 
   return {
     currentUser,
     wallet,
     config,
+    hydrationState,
     switchUser,
     logout,
     refresh,

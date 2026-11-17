@@ -13,37 +13,38 @@ import { LegalContent } from './components/common/LegalContent';
 import { AuthPage } from './pages/auth/AuthPage';
 import { SessionTimeoutWarningModal } from './components/common/SessionTimeoutWarningModal';
 import { StartupSplash } from './components/common/StartupSplash';
+import { SessionHydrationScreen } from './components/common/SessionHydrationScreen';
+import { LazyPageFallback } from './components/common/LazyPageFallback';
 import { LiveCashoutTicker } from './components/common/LiveCashoutTicker';
 import { GlobalChatNotificationManager } from './components/common/GlobalChatNotificationManager';
 import { BackgroundNotificationPrompt } from './components/common/BackgroundNotificationPrompt';
-
-
-// Customer Pages
-import { CustomerHome } from './pages/customer/CustomerHome';
-import { CustomerWallet } from './pages/customer/CustomerWallet';
-import { CustomerTopUp } from './pages/customer/CustomerTopUp';
-import { CustomerWithdrawal } from './pages/customer/CustomerWithdrawal';
-import { CustomerGameAccounts } from './pages/customer/CustomerGameAccounts';
-import { CustomerChat } from './pages/customer/CustomerChat';
-import { CustomerReferrals } from './pages/customer/CustomerReferrals';
-import { CustomerRules } from './pages/customer/CustomerRules';
-import { CustomerProfile } from './pages/customer/CustomerProfile';
+import { shouldShowSessionHydrationGate } from './services/sessionHydrationUtils';
+import {
+  LazyCustomerHome,
+  LazyCustomerWallet,
+  LazyCustomerTopUp,
+  LazyCustomerWithdrawal,
+  LazyCustomerGameAccounts,
+  LazyCustomerChat,
+  LazyCustomerReferrals,
+  LazyCustomerRules,
+  LazyCustomerProfile,
+  LazyAdminDashboard,
+  LazyAdminRequests,
+  LazyAdminChat,
+  LazyAdminGameCatalog,
+  LazyAdminGameCredentials,
+  LazyAdminConfig,
+  LazyAdminAudit,
+  LazyAdminUsers,
+  prefetchPagesForSession,
+} from './routes/lazyPages';
 
 const LazyEmailVerificationBanner = React.lazy(() =>
   import('./components/common/EmailVerificationBanner').then((mod) => ({
     default: mod.EmailVerificationBanner,
   }))
 );
-
-// Staff / Operations Pages
-import { AdminDashboard } from './pages/admin/AdminDashboard';
-import { AdminRequests } from './pages/admin/AdminRequests';
-import { AdminChat } from './pages/admin/AdminChat';
-import { AdminGameCatalog } from './pages/admin/AdminGameCatalog';
-import { AdminGameCredentials } from './pages/admin/AdminGameCredentials';
-import { AdminConfig } from './pages/admin/AdminConfig';
-import { AdminAudit } from './pages/admin/AdminAudit';
-import { AdminUsers } from './pages/admin/AdminUsers';
 
 import {
   Gamepad2,
@@ -55,8 +56,9 @@ import {
 } from 'lucide-react';
 
 export default function App() {
-  const { currentUser, wallet, switchUser, logout } = useDataService();
+  const { currentUser, wallet, hydrationState, switchUser, logout } = useDataService();
   const verificationUi = useVerificationResolution(currentUser);
+  const [bypassedHydrationUserId, setBypassedHydrationUserId] = useState<string | null>(null);
 
   const [currentHash, setCurrentHash] = useState<string>(window.location.hash);
 
@@ -139,6 +141,7 @@ export default function App() {
   const [timeoutNotice, setTimeoutNotice] = useState<string | null>(null);
 
   const handleLogout = (reason?: string) => {
+    setBypassedHydrationUserId(null);
     logout();
     if (reason === 'inactivity') {
       setTimeoutNotice('Your session has timed out due to 15 minutes of inactivity. Please enter your credentials to resume.');
@@ -147,19 +150,22 @@ export default function App() {
     }
   };
 
-  // Sync tab when user changes (e.g. login/switch)
+  // Sync tab and prefetch lazy page chunks when user or active tab changes
   useEffect(() => {
     if (currentUser) {
+      let nextTab = activeTab;
       if (currentUser.role === 'customer' && activeTab.startsWith('ops_')) {
+        nextTab = 'dashboard';
         setActiveTab('dashboard');
         window.history.replaceState({ tab: 'dashboard' }, '', '#dashboard');
       } else if (currentUser.role !== 'customer' && !activeTab.startsWith('ops_')) {
-        const next = currentUser.role === 'agent' ? 'ops_chat' : 'ops_dashboard';
-        setActiveTab(next);
-        window.history.replaceState({ tab: next }, '', `#${next}`);
+        nextTab = currentUser.role === 'agent' ? 'ops_chat' : 'ops_dashboard';
+        setActiveTab(nextTab);
+        window.history.replaceState({ tab: nextTab }, '', `#${nextTab}`);
       }
+      prefetchPagesForSession(currentUser.role, nextTab);
     }
-  }, [currentUser?.id, currentUser?.role]);
+  }, [currentUser?.id, currentUser?.role, activeTab]);
 
   if (currentHash === '#privacy') {
     return <LegalContent initialTab="privacy" onBack={() => { window.location.hash = ''; setCurrentHash(''); }} />;
@@ -180,10 +186,12 @@ export default function App() {
         <AuthPage
           key="auth"
           onLoginSuccess={(user) => {
+            setBypassedHydrationUserId(null);
             void dataService.hydrateForSession(user);
             setTimeoutNotice(null);
             const defaultTab = getDefaultTab(user.role);
             setActiveTab(defaultTab);
+            prefetchPagesForSession(user.role, defaultTab);
             window.history.replaceState({ tab: defaultTab }, '', `#${defaultTab}`);
             tabHistoryRef.current = [defaultTab];
           }}
@@ -193,15 +201,44 @@ export default function App() {
     );
   }
 
+  const showHydrationGate = shouldShowSessionHydrationGate({
+    currentUserId: currentUser.id,
+    isHydrating: hydrationState.isHydrating,
+    hydratedUserId: hydrationState.hydratedUserId,
+    bypassedUserId: bypassedHydrationUserId,
+    hydrationError: hydrationState.error,
+    supabaseConfigured: hydrationState.isConfigured,
+  });
+
+  if (showHydrationGate) {
+    return (
+      <>
+        <StartupSplash />
+        <SessionHydrationScreen
+          role={currentUser.role}
+          displayName={currentUser.displayName}
+          errorMessage={hydrationState.error}
+          onRetry={() => {
+            setBypassedHydrationUserId(null);
+            void dataService.hydrateForSession(currentUser, { force: true });
+          }}
+          onContinueAnyway={() => setBypassedHydrationUserId(currentUser.id)}
+        />
+      </>
+    );
+  }
+
   const activeWallet = wallet || dataService.getWallet(currentUser.id);
 
   const handleSwitchUser = (userId: string) => {
+    setBypassedHydrationUserId(null);
     switchUser(userId);
     const targetUser = dataService.getUserById(userId);
     if (targetUser) {
       setIsMobileChatActive(false);
       const defaultTab = getDefaultTab(targetUser.role);
       setActiveTab(defaultTab);
+      prefetchPagesForSession(targetUser.role, defaultTab);
       window.history.replaceState({ tab: defaultTab }, '', `#${defaultTab}`);
       tabHistoryRef.current = [defaultTab];
     }
@@ -336,168 +373,170 @@ export default function App() {
             </Suspense>
           )}
 
-        {/* CUSTOMER PORTAL VIEWS */}
-        {isCustomer && (
-          <>
-            {activeTab === 'dashboard' && (
-              <CustomerHome
-                currentUser={currentUser}
-                wallet={activeWallet}
-                onNavigateTab={handleNavigateTab}
-              />
-            )}
+        <Suspense fallback={<LazyPageFallback />}>
+          {/* CUSTOMER PORTAL VIEWS */}
+          {isCustomer && (
+            <>
+              {activeTab === 'dashboard' && (
+                <LazyCustomerHome
+                  currentUser={currentUser}
+                  wallet={activeWallet}
+                  onNavigateTab={handleNavigateTab}
+                />
+              )}
 
-            {activeTab === 'wallet' && (
-              <CustomerWallet
-                currentUser={currentUser}
-                wallet={activeWallet}
-                onNavigateTab={handleNavigateTab}
-              />
-            )}
+              {activeTab === 'wallet' && (
+                <LazyCustomerWallet
+                  currentUser={currentUser}
+                  wallet={activeWallet}
+                  onNavigateTab={handleNavigateTab}
+                />
+              )}
 
-            {activeTab === 'topup' && (
-              <CustomerTopUp
-                currentUser={currentUser}
-                wallet={activeWallet}
-                onNavigateTab={handleNavigateTab}
-                prefilledAmount={tabMeta?.prefilledAmount}
-                preselectedGameCatalogId={tabMeta?.gameCatalogId}
-              />
-            )}
+              {activeTab === 'topup' && (
+                <LazyCustomerTopUp
+                  currentUser={currentUser}
+                  wallet={activeWallet}
+                  onNavigateTab={handleNavigateTab}
+                  prefilledAmount={tabMeta?.prefilledAmount}
+                  preselectedGameCatalogId={tabMeta?.gameCatalogId}
+                />
+              )}
 
-            {activeTab === 'withdrawal' && (
-              <CustomerWithdrawal
-                currentUser={currentUser}
-                wallet={activeWallet}
-                onNavigateTab={handleNavigateTab}
-                prefilledAmount={tabMeta?.prefilledAmount}
-                preselectedGameCatalogId={tabMeta?.gameCatalogId}
-              />
-            )}
+              {activeTab === 'withdrawal' && (
+                <LazyCustomerWithdrawal
+                  currentUser={currentUser}
+                  wallet={activeWallet}
+                  onNavigateTab={handleNavigateTab}
+                  prefilledAmount={tabMeta?.prefilledAmount}
+                  preselectedGameCatalogId={tabMeta?.gameCatalogId}
+                />
+              )}
 
-            {activeTab === 'game_accounts' && (
-              <CustomerGameAccounts
-                currentUser={currentUser}
-                wallet={activeWallet}
-                onNavigateTab={handleNavigateTab}
-              />
-            )}
+              {activeTab === 'game_accounts' && (
+                <LazyCustomerGameAccounts
+                  currentUser={currentUser}
+                  wallet={activeWallet}
+                  onNavigateTab={handleNavigateTab}
+                />
+              )}
 
-            {activeTab === 'chat' && (
-              <CustomerChat
-                currentUser={currentUser}
-                onNavigateTab={handleNavigateTab}
-                onGoBack={handleGoBack}
-              />
-            )}
+              {activeTab === 'chat' && (
+                <LazyCustomerChat
+                  currentUser={currentUser}
+                  onNavigateTab={handleNavigateTab}
+                  onGoBack={handleGoBack}
+                />
+              )}
 
-            {activeTab === 'referrals' && (
-              <CustomerReferrals
-                currentUser={currentUser}
-                wallet={activeWallet}
-                onNavigateTab={handleNavigateTab}
-              />
-            )}
+              {activeTab === 'referrals' && (
+                <LazyCustomerReferrals
+                  currentUser={currentUser}
+                  wallet={activeWallet}
+                  onNavigateTab={handleNavigateTab}
+                />
+              )}
 
-            {activeTab === 'rules' && (
-              <CustomerRules onNavigateTab={handleNavigateTab} />
-            )}
+              {activeTab === 'rules' && (
+                <LazyCustomerRules onNavigateTab={handleNavigateTab} />
+              )}
 
-            {activeTab === 'privacy' && (
-              <LegalContent initialTab="privacy" onBack={handleGoBack} />
-            )}
+              {activeTab === 'privacy' && (
+                <LegalContent initialTab="privacy" onBack={handleGoBack} />
+              )}
 
-            {activeTab === 'data_deletion' && (
-              <LegalContent initialTab="deletion" onBack={handleGoBack} />
-            )}
+              {activeTab === 'data_deletion' && (
+                <LegalContent initialTab="deletion" onBack={handleGoBack} />
+              )}
 
-            {activeTab === 'profile' && (
-              <CustomerProfile
-                currentUser={currentUser}
-                wallet={activeWallet}
-                onNavigateTab={handleNavigateTab}
-                onSwitchUser={handleSwitchUser}
-                onLogout={logout}
-              />
-            )}
-          </>
-        )}
+              {activeTab === 'profile' && (
+                <LazyCustomerProfile
+                  currentUser={currentUser}
+                  wallet={activeWallet}
+                  onNavigateTab={handleNavigateTab}
+                  onSwitchUser={handleSwitchUser}
+                  onLogout={logout}
+                />
+              )}
+            </>
+          )}
 
-        {/* CUSTOMER SUPPORT AGENT & ADMIN OPERATIONS */}
-        {!isCustomer && (
-          <>
-            {activeTab === 'ops_dashboard' && (
-              <AdminDashboard
-                currentUser={currentUser}
-                onNavigateTab={handleNavigateTab}
-              />
-            )}
+          {/* CUSTOMER SUPPORT AGENT & ADMIN OPERATIONS */}
+          {!isCustomer && (
+            <>
+              {activeTab === 'ops_dashboard' && (
+                <LazyAdminDashboard
+                  currentUser={currentUser}
+                  onNavigateTab={handleNavigateTab}
+                />
+              )}
 
-            {/* Master Game Catalog - Handled by Admin Account */}
-            {activeTab === 'ops_game_catalog' && (
-              <AdminGameCatalog currentUser={currentUser} />
-            )}
+              {/* Master Game Catalog - Handled by Admin Account */}
+              {activeTab === 'ops_game_catalog' && (
+                <LazyAdminGameCatalog currentUser={currentUser} />
+              )}
 
-            {/* Player Game IDs & Passwords - Handled by Customer Support & Admin */}
-            {activeTab === 'ops_game_credentials' && (
-              <AdminGameCredentials currentUser={currentUser} />
-            )}
+              {/* Player Game IDs & Passwords - Handled by Customer Support & Admin */}
+              {activeTab === 'ops_game_credentials' && (
+                <LazyAdminGameCredentials currentUser={currentUser} />
+              )}
 
-            {/* Requests Queue */}
-            {activeTab === 'ops_requests' && (
-              <AdminRequests
-                currentUser={currentUser}
-                initialFilter={tabMeta?.filter}
-                highlightId={tabMeta?.highlight}
-              />
-            )}
+              {/* Requests Queue */}
+              {activeTab === 'ops_requests' && (
+                <LazyAdminRequests
+                  currentUser={currentUser}
+                  initialFilter={tabMeta?.filter}
+                  highlightId={tabMeta?.highlight}
+                />
+              )}
 
-            {/* Customer Support Inbox */}
-            {activeTab === 'ops_chat' && (
-              <AdminChat
-                currentUser={currentUser}
-                onNavigateTab={handleNavigateTab}
-                onGoBack={handleGoBack}
-                highlightConvId={tabMeta?.highlightConvId}
-                onActiveChatChange={(isOpen) => setIsMobileChatActive(isOpen)}
-              />
-            )}
+              {/* Customer Support Inbox */}
+              {activeTab === 'ops_chat' && (
+                <LazyAdminChat
+                  currentUser={currentUser}
+                  onNavigateTab={handleNavigateTab}
+                  onGoBack={handleGoBack}
+                  highlightConvId={tabMeta?.highlightConvId}
+                  onActiveChatChange={(isOpen) => setIsMobileChatActive(isOpen)}
+                />
+              )}
 
-            {/* User Directory & Staff Governance */}
-            {activeTab === 'ops_users' && (
-              <AdminUsers
-                currentUser={currentUser}
-                onNavigateTab={handleNavigateTab}
-              />
-            )}
+              {/* User Directory & Staff Governance */}
+              {activeTab === 'ops_users' && (
+                <LazyAdminUsers
+                  currentUser={currentUser}
+                  onNavigateTab={handleNavigateTab}
+                />
+              )}
 
-            {/* Admin Exclusive: Fees & Bonuses */}
-            {activeTab === 'ops_config' && (
-              isAdmin ? (
-                <AdminConfig currentUser={currentUser} />
-              ) : (
-                <div className="p-8 text-center rounded-2xl border border-amber-800 bg-amber-950/30 text-amber-300 space-y-2">
-                  <ShieldAlert className="w-8 h-8 mx-auto text-amber-400" />
-                  <h3 className="font-bold text-base">Admin Exclusive Area</h3>
-                  <p className="text-xs text-amber-400/80">Only Platform Administrators have permission to modify system fees, bonus rates, and payment gateways.</p>
-                </div>
-              )
-            )}
+              {/* Admin Exclusive: Fees & Bonuses */}
+              {activeTab === 'ops_config' && (
+                isAdmin ? (
+                  <LazyAdminConfig currentUser={currentUser} />
+                ) : (
+                  <div className="p-8 text-center rounded-2xl border border-amber-800 bg-amber-950/30 text-amber-300 space-y-2">
+                    <ShieldAlert className="w-8 h-8 mx-auto text-amber-400" />
+                    <h3 className="font-bold text-base">Admin Exclusive Area</h3>
+                    <p className="text-xs text-amber-400/80">Only Platform Administrators have permission to modify system fees, bonus rates, and payment gateways.</p>
+                  </div>
+                )
+              )}
 
-            {/* Admin Exclusive: Audit Logs */}
-            {activeTab === 'ops_audit' && (
-              isAdmin ? (
-                <AdminAudit currentUser={currentUser} />
-              ) : (
-                <div className="p-8 text-center rounded-2xl border border-amber-800 bg-amber-950/30 text-amber-300 space-y-2">
-                  <ShieldAlert className="w-8 h-8 mx-auto text-amber-400" />
-                  <h3 className="font-bold text-base">Admin Exclusive Area</h3>
-                  <p className="text-xs text-amber-400/80">Only Platform Administrators have permission to review full system security audit logs.</p>
-                </div>
-              )
-            )}
-          </>
-        )}
+              {/* Admin Exclusive: Audit Logs */}
+              {activeTab === 'ops_audit' && (
+                isAdmin ? (
+                  <LazyAdminAudit currentUser={currentUser} />
+                ) : (
+                  <div className="p-8 text-center rounded-2xl border border-amber-800 bg-amber-950/30 text-amber-300 space-y-2">
+                    <ShieldAlert className="w-8 h-8 mx-auto text-amber-400" />
+                    <h3 className="font-bold text-base">Admin Exclusive Area</h3>
+                    <p className="text-xs text-amber-400/80">Only Platform Administrators have permission to review full system security audit logs.</p>
+                  </div>
+                )
+              )}
+            </>
+          )}
+        </Suspense>
       </main>
 
       {/* Persistent Android-Style Bottom Navigation for Customer */}

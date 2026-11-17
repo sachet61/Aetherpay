@@ -133,6 +133,7 @@ class DataService {
   private activeHydrationPromise: Promise<void> | null = null;
   private lastHydratedUserId: string | null = null;
   private lastHydratedAt = 0;
+  private lastHydrationError: string | null = null;
   private authoritativelyLoadedTopupsForUser: Set<string> = new Set();
   private conversationAliasMap: Map<string, string> = new Map();
 
@@ -512,6 +513,7 @@ class DataService {
 
   public async initialCompactLoad(): Promise<void> {
     if (!supabase || !isSupabaseConfigured()) return;
+    this.lastHydrationError = null;
     this.syncStatus = 'syncing';
     window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
 
@@ -568,6 +570,9 @@ class DataService {
           }
         }
         if (gameAccsRes?.data) this.applyGameAccountRows(gameAccsRes.data, false);
+        if (topupsRes.error && withdrawalsRes.error && walletsRes.error) {
+          this.lastHydrationError = topupsRes.error.message || 'Unable to load staff operations data.';
+        }
       } else if (currentUserId) {
         // Customer session: strictly scoped to CURRENT user only (no global table downloads)
         const [
@@ -694,6 +699,9 @@ class DataService {
         } else {
           this.reconcileCustomerWallet(currentUserId);
         }
+        if (walletRes.error && topupsRes.error && withdrawalsRes.error) {
+          this.lastHydrationError = walletRes.error.message || 'Unable to load wallet and transaction history.';
+        }
 
         // Game Accounts hydration with authenticated server fallback
         if (!gameAccsRes.error && Array.isArray(gameAccsRes.data) && gameAccsRes.data.length > 0) {
@@ -764,8 +772,9 @@ class DataService {
       this.syncStatus = 'connected';
       window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'initial_compact_load' } }));
       window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
-    } catch (e) {
+    } catch (e: any) {
       console.warn('Initial compact load notice:', e);
+      this.lastHydrationError = e?.message || 'Unable to sync account data from server.';
       this.syncStatus = 'connected';
       window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
     }
@@ -2336,6 +2345,7 @@ class DataService {
     this.activeHydrationPromise = null;
     this.lastHydratedUserId = null;
     this.lastHydratedAt = 0;
+    this.lastHydrationError = null;
     this.clearUserScopedCache();
     authSessionService.destroySession();
     supabaseAuthService.logout().catch(() => {});
@@ -5894,6 +5904,23 @@ class DataService {
     return this.isHydratingSession;
   }
 
+  public getHydrationState(): {
+    isHydrating: boolean;
+    hydratedUserId: string | null;
+    activeUserId: string | null;
+    error: string | null;
+    isConfigured: boolean;
+  } {
+    const activeUserId = this.currentUserId || this.getCurrentUser()?.id || null;
+    return {
+      isHydrating: this.isHydratingSession,
+      hydratedUserId: this.lastHydratedUserId,
+      activeUserId,
+      error: this.lastHydrationError,
+      isConfigured: Boolean(supabase && isSupabaseConfigured()),
+    };
+  }
+
   public async hydrateForSession(user?: UserProfile, options?: { force?: boolean }): Promise<void> {
     const activeSession = authSessionService.getActiveSession();
     const sessionUser = activeSession ? ({
@@ -5908,6 +5935,7 @@ class DataService {
     // Clear stale cross-user caches whenever switching accounts
     if (this.currentUserId && this.currentUserId !== target.id) {
       this.clearUserScopedCache();
+      this.lastHydratedUserId = null;
     }
     this.currentUserId = target.id;
 
@@ -5917,6 +5945,7 @@ class DataService {
     }
     if (
       !options?.force &&
+      !this.lastHydrationError &&
       this.lastHydratedUserId === target.id &&
       Date.now() - this.lastHydratedAt < 2500
     ) {
@@ -5925,12 +5954,18 @@ class DataService {
 
     this.hydrationUserId = target.id;
     this.isHydratingSession = true;
+    this.lastHydrationError = null;
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'hydration_started', userId: target.id } }));
 
     const run = this.initialCompactLoad()
       .then(() => {
-        this.lastHydratedUserId = target.id;
-        this.lastHydratedAt = Date.now();
+        if (!this.lastHydrationError) {
+          this.lastHydratedUserId = target.id;
+          this.lastHydratedAt = Date.now();
+        }
+      })
+      .catch((err: any) => {
+        this.lastHydrationError = err?.message || 'Unable to sync account data.';
       })
       .finally(() => {
         if (this.activeHydrationPromise === run) {
