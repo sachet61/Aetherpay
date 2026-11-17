@@ -47,6 +47,11 @@ import {
   mergeAuthoritativeMessages,
   mergeSingleMessage,
 } from './chatOrderUtils';
+import {
+  mergeWithdrawalRequests,
+  mergeTopupRequests,
+  findRequestById,
+} from './requestSyncUtils';
 import { toProxyStorageUrl } from './storageUrlUtils';
 
 export type RealtimeSyncStatus = 'connected' | 'syncing' | 'sleeping' | 'disconnected' | 'reconnecting';
@@ -1054,6 +1059,156 @@ class DataService {
     }
   }
 
+  // On-demand authoritative lookup for a single withdrawal request (prevents stale cache "not found" errors)
+  public async ensureWithdrawalRequest(
+    requestId: string,
+    options?: { forceRefresh?: boolean }
+  ): Promise<{ request: WithdrawalRequest | null; error?: string }> {
+    const normalizedId = (requestId || '').trim();
+    if (!normalizedId) return { request: null, error: 'Missing withdrawal request ID' };
+
+    const cachedList = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
+    const cached = findRequestById(cachedList, normalizedId) || null;
+    if (cached && !options?.forceRefresh) {
+      return { request: cached };
+    }
+
+    if (!supabase || !isSupabaseConfigured()) {
+      return { request: cached };
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('withdrawals')
+        .select('*')
+        .eq('id', normalizedId)
+        .maybeSingle();
+
+      if (error) {
+        console.warn('ensureWithdrawalRequest error:', error);
+        return { request: cached, error: error.message };
+      }
+
+      if (!data) {
+        return { request: cached };
+      }
+
+      this.applyWithdrawalRows([data], false);
+      const refreshedList = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
+      const hydrated = findRequestById(refreshedList, normalizedId) || null;
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'withdrawal_hydrated', requestId: normalizedId },
+        })
+      );
+      return { request: hydrated };
+    } catch (e: any) {
+      console.warn('ensureWithdrawalRequest exception:', e);
+      return { request: cached, error: e?.message || 'Failed to query withdrawal request' };
+    }
+  }
+
+  // On-demand authoritative lookup for a single top-up request
+  public async ensureTopUpRequest(
+    requestId: string,
+    options?: { forceRefresh?: boolean }
+  ): Promise<{ request: TopUpRequest | null; error?: string }> {
+    const normalizedId = (requestId || '').trim();
+    if (!normalizedId) return { request: null, error: 'Missing top-up request ID' };
+
+    const cachedList = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
+    const cached = findRequestById(cachedList, normalizedId) || null;
+    if (cached && !options?.forceRefresh) {
+      return { request: cached };
+    }
+
+    if (!supabase || !isSupabaseConfigured()) {
+      return { request: cached };
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('topups')
+        .select('*')
+        .eq('id', normalizedId)
+        .maybeSingle();
+
+      if (error) {
+        console.warn('ensureTopUpRequest error:', error);
+        return { request: cached, error: error.message };
+      }
+
+      if (!data) {
+        return { request: cached };
+      }
+
+      this.applyTopupRows([data], false);
+      const refreshedList = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
+      const hydrated = findRequestById(refreshedList, normalizedId) || null;
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'topup_hydrated', requestId: normalizedId },
+        })
+      );
+      return { request: hydrated };
+    } catch (e: any) {
+      console.warn('ensureTopUpRequest exception:', e);
+      return { request: cached, error: e?.message || 'Failed to query top-up request' };
+    }
+  }
+
+  // Bounded per-customer request hydration (keeps AdminChat customer sidebar & transaction cards fresh)
+  public async syncCustomerRequests(customerId: string): Promise<void> {
+    const cleanCustomerId = (customerId || '').trim();
+    if (!cleanCustomerId || !supabase || !isSupabaseConfigured()) return;
+
+    try {
+      const [topupsRes, withdrawalsRes, accountsRes] = await Promise.all([
+        supabase
+          .from('topups')
+          .select('*')
+          .eq('customer_id', cleanCustomerId)
+          .order('created_at', { ascending: false })
+          .limit(20),
+        supabase
+          .from('withdrawals')
+          .select('*')
+          .eq('customer_id', cleanCustomerId)
+          .order('created_at', { ascending: false })
+          .limit(20),
+        supabase
+          .from('game_accounts')
+          .select('*')
+          .eq('customer_id', cleanCustomerId)
+          .limit(25),
+      ]);
+
+      let changed = false;
+      if (!topupsRes.error && Array.isArray(topupsRes.data) && topupsRes.data.length > 0) {
+        this.applyTopupRows(topupsRes.data, false);
+        changed = true;
+      }
+      if (!withdrawalsRes.error && Array.isArray(withdrawalsRes.data) && withdrawalsRes.data.length > 0) {
+        this.applyWithdrawalRows(withdrawalsRes.data, false);
+        changed = true;
+      }
+      if (!accountsRes.error && Array.isArray(accountsRes.data) && accountsRes.data.length > 0) {
+        this.applyGameAccountRows(accountsRes.data, false);
+        changed = true;
+      }
+
+      if (changed) {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'customer_requests_synced', customerId: cleanCustomerId },
+          })
+        );
+      }
+    } catch (e) {
+      console.warn('syncCustomerRequests exception:', e);
+    }
+  }
+
   // Row application helpers supporting soft-delete tracking
   private applyUserRows(rows: any[]): void {
     const currentUsers = this.getUsers();
@@ -1094,82 +1249,15 @@ class DataService {
   }
 
   private applyTopupRows(rows: any[], replaceAll: boolean = false): void {
-    const current = replaceAll ? [] : (this.cache[STORAGE_KEYS.TOPUPS] as TopUpRequest[]) || [];
-    const topupMap = new Map<string, TopUpRequest>();
-    for (const t of current) {
-      topupMap.set(t.id, t);
-    }
-    for (const t of rows) {
-      if (t.deleted_at) {
-        topupMap.delete(t.id);
-        continue;
-      }
-      topupMap.set(t.id, {
-        id: t.id,
-        customerId: t.customer_id,
-        customerName: t.customer_name,
-        amount: Number(t.amount),
-        currency: 'USD',
-        bonusAmount: Number(t.bonus_amount || 0),
-        bonusPercentage: 0,
-        feeAmount: 0,
-        finalWalletCredit: Number(t.amount) + Number(t.bonus_amount || 0),
-        method: (t.payment_method_id as any) || 'payment_link',
-        methodName: t.payment_method_name || 'Payment Link',
-        status: t.status || 'submitted',
-        receiptUrl: t.proof_url || undefined,
-        targetGameName: t.target_game_name || undefined,
-        targetGameCatalogId: t.target_game_account_id || undefined,
-        reviewerId: t.reviewer_id || undefined,
-        reviewerName: t.reviewer_name || undefined,
-        reviewNotes: t.review_notes || undefined,
-        createdAt: t.created_at,
-        updatedAt: t.updated_at || t.created_at,
-      });
-    }
-    const updated = Array.from(topupMap.values()).sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
+    const current = (this.cache[STORAGE_KEYS.TOPUPS] as TopUpRequest[]) || [];
+    const updated = mergeTopupRequests(current, rows, replaceAll);
     this.cache[STORAGE_KEYS.TOPUPS] = updated;
     this.saveToLocalStorage(STORAGE_KEYS.TOPUPS, updated);
   }
 
   private applyWithdrawalRows(rows: any[], replaceAll: boolean = false): void {
-    const current = replaceAll ? [] : (this.cache[STORAGE_KEYS.WITHDRAWALS] as WithdrawalRequest[]) || [];
-    const withMap = new Map<string, WithdrawalRequest>();
-    for (const w of current) {
-      withMap.set(w.id, w);
-    }
-    for (const w of rows) {
-      if (w.deleted_at) {
-        withMap.delete(w.id);
-        continue;
-      }
-      withMap.set(w.id, {
-        id: w.id,
-        customerId: w.customer_id,
-        customerName: w.customer_name,
-        amount: Number(w.amount),
-        currency: 'USD',
-        feeAmount: Number(w.fee || 0),
-        netPayout: Number(w.net_amount || w.amount),
-        reservedAmount: Number(w.amount),
-        method: w.payout_method_id || 'bank_transfer',
-        methodName: w.payout_method_name || 'Bank Transfer',
-        payoutDetails: w.payout_details || {},
-        status: w.status || 'submitted',
-        reviewerId: w.reviewer_id || undefined,
-        reviewerName: w.reviewer_name || undefined,
-        reviewNotes: w.review_notes || undefined,
-        payoutReference: w.transaction_hash || undefined,
-        timeline: [],
-        createdAt: w.created_at,
-        updatedAt: w.updated_at || w.created_at,
-      });
-    }
-    const updated = Array.from(withMap.values()).sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
+    const current = (this.cache[STORAGE_KEYS.WITHDRAWALS] as WithdrawalRequest[]) || [];
+    const updated = mergeWithdrawalRequests(current, rows, replaceAll);
     this.cache[STORAGE_KEYS.WITHDRAWALS] = updated;
     this.saveToLocalStorage(STORAGE_KEYS.WITHDRAWALS, updated);
   }
@@ -3372,7 +3460,7 @@ class DataService {
     verifiedAmount?: number;
   }): { success: boolean; message: string } {
     const allReqs = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
-    const req = allReqs.find((r) => r.id === params.requestId);
+    const req = findRequestById(allReqs, params.requestId);
     if (!req) return { success: false, message: 'Request not found' };
     if (req.status === 'completed') return { success: false, message: 'Request is already completed (Double credit prevented).' };
 
@@ -3620,6 +3708,107 @@ class DataService {
     return { success: true, message: 'Deposit rejected.' };
   }
 
+  public async approveTopUpAsync(params: {
+    requestId: string;
+    reviewerId: string;
+    reviewerName: string;
+    notes?: string;
+    verifiedAmount?: number;
+  }): Promise<{ success: boolean; message: string }> {
+    const lookup = await this.ensureTopUpRequest(params.requestId, { forceRefresh: true });
+    if (!lookup.request) {
+      return {
+        success: false,
+        message: lookup.error
+          ? `Unable to verify deposit request from database: ${lookup.error}`
+          : 'Request not found',
+      };
+    }
+
+    const res = this.approveTopUp(params);
+    if (!res.success) return res;
+
+    if (supabase && isSupabaseConfigured()) {
+      const updatedReq = findRequestById(
+        this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS),
+        params.requestId
+      );
+      if (updatedReq) {
+        const { error } = await supabase
+          .from('topups')
+          .update({
+            status: 'completed',
+            amount: updatedReq.amount,
+            bonus_amount: updatedReq.bonusAmount,
+            reviewer_id: params.reviewerId,
+            reviewer_name: params.reviewerName,
+            review_notes: updatedReq.reviewNotes,
+            updated_at: updatedReq.updatedAt,
+          })
+          .eq('id', updatedReq.id);
+        if (error) {
+          console.warn('approveTopUpAsync Supabase update error:', error);
+          return {
+            success: false,
+            message: `Failed to save top-up approval to database: ${error.message}`,
+          };
+        }
+        await this.persistChatTransactionStatusInSupabase(updatedReq.id, updatedReq.customerId);
+      }
+    }
+
+    return res;
+  }
+
+  public async rejectTopUpAsync(params: {
+    requestId: string;
+    reviewerId: string;
+    reviewerName: string;
+    reason: string;
+  }): Promise<{ success: boolean; message: string }> {
+    const lookup = await this.ensureTopUpRequest(params.requestId, { forceRefresh: true });
+    if (!lookup.request) {
+      return {
+        success: false,
+        message: lookup.error
+          ? `Unable to verify deposit request from database: ${lookup.error}`
+          : 'Request not found',
+      };
+    }
+
+    const res = this.rejectTopUp(params);
+    if (!res.success) return res;
+
+    if (supabase && isSupabaseConfigured()) {
+      const updatedReq = findRequestById(
+        this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS),
+        params.requestId
+      );
+      if (updatedReq) {
+        const { error } = await supabase
+          .from('topups')
+          .update({
+            status: 'rejected',
+            reviewer_id: params.reviewerId,
+            reviewer_name: params.reviewerName,
+            review_notes: params.reason,
+            updated_at: updatedReq.updatedAt,
+          })
+          .eq('id', updatedReq.id);
+        if (error) {
+          console.warn('rejectTopUpAsync Supabase update error:', error);
+          return {
+            success: false,
+            message: `Failed to save top-up rejection to database: ${error.message}`,
+          };
+        }
+        await this.persistChatTransactionStatusInSupabase(updatedReq.id, updatedReq.customerId);
+      }
+    }
+
+    return res;
+  }
+
   // Cashout / Withdrawal Workflow
   public getWithdrawalRequests(customerId?: string): WithdrawalRequest[] {
     const reqs = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
@@ -3672,7 +3861,14 @@ class DataService {
       sourceGameName: params.sourceGameName,
       sourceGameUsername: params.sourceGameUsername,
       playerNotes: params.playerNotes,
-      payoutDetails: params.payoutDetails || { collectedBySupport: false },
+      payoutDetails: {
+        ...(params.payoutDetails || { collectedBySupport: false }),
+        ...(params.sourceGameCatalogId ? { sourceGameCatalogId: params.sourceGameCatalogId } : {}),
+        ...(params.sourceGameName ? { sourceGameName: params.sourceGameName } : {}),
+        ...(params.sourceGameUsername ? { sourceGameUsername: params.sourceGameUsername } : {}),
+        ...(params.playerNotes ? { playerNotes: params.playerNotes } : {}),
+        reservedAmount: params.amount,
+      },
       reservedAmount: params.amount,
       status: 'submitted',
       timeline: [
@@ -3774,11 +3970,11 @@ class DataService {
     payoutReference?: string;
   }): { success: boolean; message: string } {
     const allReqs = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
-    const req = allReqs.find((r) => r.id === params.requestId);
+    const req = findRequestById(allReqs, params.requestId);
     if (!req) return { success: false, message: 'Withdrawal request not found' };
 
     const oldStatus = req.status;
-    if (oldStatus === 'completed' || oldStatus === 'rejected') {
+    if (oldStatus === 'completed' || oldStatus === 'rejected' || oldStatus === 'cancelled') {
       return { success: false, message: `Cannot change status of an already ${oldStatus} withdrawal.` };
     }
 
@@ -3942,6 +4138,60 @@ class DataService {
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'withdrawal_updated', requestId: req.id } }));
 
     return { success: true, message: `Withdrawal status updated to ${params.newStatus}.` };
+  }
+
+  public async updateWithdrawalStatusAsync(params: {
+    requestId: string;
+    newStatus: WithdrawalStatus;
+    reviewerId: string;
+    reviewerName: string;
+    note?: string;
+    payoutReference?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    const lookup = await this.ensureWithdrawalRequest(params.requestId, { forceRefresh: true });
+    if (!lookup.request) {
+      return {
+        success: false,
+        message: lookup.error
+          ? `Unable to load withdrawal request from database: ${lookup.error}`
+          : 'Withdrawal request not found',
+      };
+    }
+
+    const res = this.updateWithdrawalStatus(params);
+    if (!res.success) return res;
+
+    if (supabase && isSupabaseConfigured()) {
+      const updatedReq = findRequestById(
+        this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS),
+        params.requestId
+      );
+      if (updatedReq) {
+        const { error } = await supabase
+          .from('withdrawals')
+          .update({
+            status: updatedReq.status,
+            reviewer_id: params.reviewerId,
+            reviewer_name: params.reviewerName,
+            review_notes: updatedReq.reviewNotes || null,
+            transaction_hash: updatedReq.payoutReference || null,
+            updated_at: updatedReq.updatedAt,
+          })
+          .eq('id', updatedReq.id);
+
+        if (error) {
+          console.warn('updateWithdrawalStatusAsync Supabase update error:', error);
+          return {
+            success: false,
+            message: `Failed to save withdrawal status to database: ${error.message}`,
+          };
+        }
+
+        await this.persistChatTransactionStatusInSupabase(updatedReq.id, updatedReq.customerId);
+      }
+    }
+
+    return res;
   }
 
   // Master Game Catalog (Admin Account Managed)
@@ -5512,6 +5762,93 @@ class DataService {
     }
   }
 
+  private async persistChatTransactionStatusInSupabase(
+    requestId: string,
+    customerId?: string
+  ): Promise<void> {
+    if (!supabase || !isSupabaseConfigured()) return;
+
+    const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
+    const matchedMessages: ChatMessage[] = [];
+    for (const convId in all) {
+      for (const msg of all[convId] || []) {
+        if (msg.transactionData && msg.transactionData.requestId === requestId) {
+          matchedMessages.push(msg);
+        }
+      }
+    }
+
+    // Fallback: if this browser didn't have the chat thread cached yet (e.g. approved from AdminRequests), fetch customer messages
+    if (matchedMessages.length === 0 && customerId) {
+      const canonicalConvId = this.resolveCanonicalConvId(`conv_${customerId}`);
+      try {
+        const { data } = await supabase
+          .from('messages')
+          .select('id, conversation_id, transaction_data')
+          .in('conversation_id', Array.from(new Set([canonicalConvId, `conv_${customerId}`, customerId])))
+          .order('created_at', { ascending: false })
+          .limit(50);
+
+        if (Array.isArray(data)) {
+          const withdrawalReq = findRequestById(
+            this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS),
+            requestId
+          );
+          const topUpReq = findRequestById(
+            this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS),
+            requestId
+          );
+          const derivedStatus: 'completed' | 'rejected' =
+            withdrawalReq?.status === 'completed' || topUpReq?.status === 'completed'
+              ? 'completed'
+              : 'rejected';
+          const reviewerName = withdrawalReq?.reviewerName || topUpReq?.reviewerName || 'Customer Support';
+          const reviewNotes = withdrawalReq?.reviewNotes || topUpReq?.reviewNotes;
+
+          for (const row of data) {
+            const rawTx =
+              typeof row.transaction_data === 'string'
+                ? (() => {
+                    try {
+                      return JSON.parse(row.transaction_data);
+                    } catch {
+                      return null;
+                    }
+                  })()
+                : row.transaction_data;
+            if (rawTx && rawTx.requestId === requestId) {
+              const updatedTx = {
+                ...rawTx,
+                status: derivedStatus,
+                approvedBy: reviewerName,
+                approvedAt: new Date().toISOString(),
+                ...(reviewNotes ? { notes: reviewNotes } : {}),
+              };
+              await supabase
+                .from('messages')
+                .update({ transaction_data: updatedTx })
+                .eq('id', row.id);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Fallback chat transaction card DB sync error:', e);
+      }
+      return;
+    }
+
+    for (const msg of matchedMessages) {
+      try {
+        await supabase
+          .from('messages')
+          .update({ transaction_data: msg.transactionData })
+          .eq('id', msg.id);
+      } catch (e) {
+        console.warn('Supabase message transaction_data update error:', e);
+      }
+    }
+  }
+
   public updateChatTransactionStatus(
     requestId: string,
     status: 'completed' | 'rejected',
@@ -5523,6 +5860,7 @@ class DataService {
     let updated = false;
     let targetConvId: string | null = null;
     let txData: ChatTransactionData | null = null;
+    const updatedMessages: ChatMessage[] = [];
 
     for (const convId in all) {
       for (const msg of all[convId]) {
@@ -5539,12 +5877,25 @@ class DataService {
           updated = true;
           targetConvId = convId;
           txData = msg.transactionData;
+          updatedMessages.push(msg);
         }
       }
     }
 
     if (updated) {
       this.save(STORAGE_KEYS.MESSAGES, all);
+      if (supabase && isSupabaseConfigured()) {
+        for (const m of updatedMessages) {
+          supabase
+            .from('messages')
+            .update({ transaction_data: m.transactionData })
+            .eq('id', m.id)
+            .then(
+              () => {},
+              (err) => console.warn('Supabase chat transaction card update error:', err)
+            );
+        }
+      }
       if (targetConvId && txData) {
         const isCompleted = status === 'completed';
         const typeLabel = txData.transactionType === 'topup' ? 'Top-Up' : 'Cashout';

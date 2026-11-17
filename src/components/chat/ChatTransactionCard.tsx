@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Gamepad2,
   ArrowUpFromLine,
@@ -53,6 +53,8 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
   const [rejectReason, setRejectReason] = useState('');
   const [showRejectInput, setShowRejectInput] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [, setSyncTick] = useState(0);
 
   const isStaff = currentUserRole === 'agent' || currentUserRole === 'admin';
   const isTopUp = transaction.transactionType === 'topup';
@@ -64,6 +66,20 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
   const topUpReq = isTopUp
     ? dataService.getTopUpRequests().find((r) => r.id === transaction.requestId)
     : undefined;
+
+  // Hydrate missing top-up request metadata on demand when staff opens or views a pending card
+  useEffect(() => {
+    if (!isStaff || !isTopUp || topUpReq || !transaction.requestId) return;
+    let active = true;
+    dataService.ensureTopUpRequest(transaction.requestId).then((res) => {
+      if (active && res.request) {
+        setSyncTick((t) => t + 1);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [isStaff, isTopUp, Boolean(topUpReq), transaction.requestId]);
 
   // Determine bonus percentage robustly from top-up request or method type
   const methodLower = (topUpReq?.methodName || transaction.methodName || '').toLowerCase();
@@ -95,12 +111,19 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
   const liveTotalCredit = parsedAmt + liveBonusAmt;
 
   const handleOpenReviewModal = () => {
+    setActionError(null);
     setVerifiedAmount(transaction.amount > 0 ? String(transaction.amount) : '');
+    if (isTopUp && !topUpReq && transaction.requestId) {
+      dataService.ensureTopUpRequest(transaction.requestId).then((res) => {
+        if (res.request) setSyncTick((t) => t + 1);
+      });
+    }
     setShowReviewModal(true);
   };
 
-  const handleApprove = () => {
+  const handleApprove = async () => {
     if (!isStaff || isProcessing) return;
+    setActionError(null);
 
     // For Top-Ups: Always open the Review & Amount Entry modal so staff can inspect proof and enter amount
     if (isTopUp) {
@@ -111,7 +134,7 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
     // For Withdrawals (cashouts have predefined amounts)
     setIsProcessing(true);
     try {
-      const res = dataService.updateWithdrawalStatus({
+      const res = await dataService.updateWithdrawalStatusAsync({
         requestId: transaction.requestId,
         newStatus: 'completed',
         reviewerId: currentUserId,
@@ -123,27 +146,28 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
         setActionFeedback('Cashout marked as completed!');
         if (onStatusChanged) onStatusChanged();
       } else {
-        alert(res.message);
+        setActionError(res.message);
       }
     } catch (e: any) {
-      alert(e.message || 'Error updating transaction');
+      setActionError(e?.message || 'Error updating transaction');
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const handleConfirmTopUpApproval = () => {
+  const handleConfirmTopUpApproval = async () => {
     if (!isStaff || isProcessing) return;
+    setActionError(null);
 
     const num = parseFloat(verifiedAmount);
     if (isNaN(num) || num <= 0) {
-      alert('Please enter a valid deposit amount greater than $0 based on the payment receipt.');
+      setActionError('Please enter a valid deposit amount greater than $0 based on the payment receipt.');
       return;
     }
 
     setIsProcessing(true);
     try {
-      const res = dataService.approveTopUp({
+      const res = await dataService.approveTopUpAsync({
         requestId: transaction.requestId,
         reviewerId: currentUserId,
         reviewerName: currentUserName,
@@ -159,23 +183,24 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
         );
         if (onStatusChanged) onStatusChanged();
       } else {
-        alert(res.message);
+        setActionError(res.message);
       }
     } catch (err: any) {
-      alert(err.message || 'Error approving top-up');
+      setActionError(err?.message || 'Error approving top-up');
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const handleConfirmReject = (e: React.FormEvent) => {
+  const handleConfirmReject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isStaff || isProcessing) return;
+    setActionError(null);
     setIsProcessing(true);
 
     try {
       if (isTopUp) {
-        const res = dataService.rejectTopUp({
+        const res = await dataService.rejectTopUpAsync({
           requestId: transaction.requestId,
           reviewerId: currentUserId,
           reviewerName: currentUserName,
@@ -187,10 +212,10 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
           setActionFeedback('Transaction declined.');
           if (onStatusChanged) onStatusChanged();
         } else {
-          alert(res.message);
+          setActionError(res.message);
         }
       } else {
-        const res = dataService.updateWithdrawalStatus({
+        const res = await dataService.updateWithdrawalStatusAsync({
           requestId: transaction.requestId,
           newStatus: 'rejected',
           reviewerId: currentUserId,
@@ -203,11 +228,11 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
           setActionFeedback('Cashout request rejected.');
           if (onStatusChanged) onStatusChanged();
         } else {
-          alert(res.message);
+          setActionError(res.message);
         }
       }
     } catch (e: any) {
-      alert(e.message || 'Error declining transaction');
+      setActionError(e?.message || 'Error declining transaction');
     } finally {
       setIsProcessing(false);
     }
@@ -392,10 +417,15 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
           </div>
         )}
 
-        {/* Action feedback banner */}
+        {/* Action feedback & error banners */}
         {actionFeedback && (
-          <div className="mt-2 text-center text-[10px] font-semibold text-emerald-400 py-1 bg-emerald-950/60 rounded-lg">
+          <div className="mt-2 text-center text-[10px] font-semibold text-emerald-400 py-1.5 px-2 bg-emerald-950/60 border border-emerald-800/40 rounded-lg">
             {actionFeedback}
+          </div>
+        )}
+        {actionError && (
+          <div className="mt-2 text-center text-[10px] font-semibold text-rose-300 py-1.5 px-2 bg-rose-950/60 border border-rose-800/50 rounded-lg">
+            {actionError}
           </div>
         )}
 

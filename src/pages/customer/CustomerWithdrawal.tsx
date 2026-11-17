@@ -142,16 +142,20 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
     }, 600);
   };
 
-  const handleCancelSubmitted = (reqId: string) => {
-    dataService.updateWithdrawalStatus({
+  const handleCancelSubmitted = async (reqId: string) => {
+    const res = await dataService.updateWithdrawalStatusAsync({
       requestId: reqId,
       newStatus: 'cancelled',
       reviewerId: currentUser.id,
       reviewerName: currentUser.displayName,
       note: 'Customer cancelled cashout request before processing commenced.',
     });
-    setSelectedTrackingReq(null);
-    setSuccessMessage('Withdrawal request cancelled successfully.');
+    if (res.success) {
+      setSelectedTrackingReq(null);
+      setSuccessMessage('Withdrawal request cancelled successfully.');
+    } else {
+      setErrorMessage(res.message);
+    }
   };
 
   return (

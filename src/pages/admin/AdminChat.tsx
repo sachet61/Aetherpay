@@ -118,7 +118,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   // Form states for Cashout Assist inside chat
   const [cashoutActionNote, setCashoutActionNote] = useState('');
 
-  const [feedbackToast, setFeedbackToast] = useState<{ text: string; type: 'success' | 'info' } | null>(null);
+  const [feedbackToast, setFeedbackToast] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [requestsVersion, setRequestsVersion] = useState(0);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -206,11 +206,15 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     // 1. Initial in-memory render
     syncFromMemory();
 
-    // 2. Fetch latest messages from Supabase ONCE when conversation selection changes
+    // 2. Fetch latest messages & customer requests from Supabase ONCE when conversation selection changes
     if (selectedConvId) {
       dataService.fetchMessagesForConversation(selectedConvId, { limit: 40 }).then((fresh) => {
         setMessages(fresh || []);
       });
+      const conv = dataService.getConversations().find((c) => c.id === selectedConvId);
+      if (conv?.customerId) {
+        dataService.syncCustomerRequests(conv.customerId).catch(() => {});
+      }
     }
 
     // 3. Reactive updates from Realtime events: purely read from memory cache, ZERO REST calls!
@@ -232,6 +236,10 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       dataService.fetchMessagesForConversation(selectedConvId, { limit: 40 }).then((fresh) => {
         setMessages(fresh || []);
       });
+      const conv = dataService.getConversations().find((c) => c.id === selectedConvId);
+      if (conv?.customerId) {
+        dataService.syncCustomerRequests(conv.customerId).catch(() => {});
+      }
     };
 
     const handleVisibility = () => {
@@ -332,6 +340,14 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       if (!incoming || !incoming.id) return;
       dataService.appendIncomingMessage(incoming);
       syncFromMemory();
+
+      if (incoming.transactionData?.requestId) {
+        if (incoming.transactionData.transactionType === 'withdrawal') {
+          dataService.ensureWithdrawalRequest(incoming.transactionData.requestId).catch(() => {});
+        } else if (incoming.transactionData.transactionType === 'topup') {
+          dataService.ensureTopUpRequest(incoming.transactionData.requestId).catch(() => {});
+        }
+      }
 
       const currentActive = selectedConvIdRef.current;
       if (
@@ -513,6 +529,10 @@ export const AdminChat: React.FC<AdminChatProps> = ({
         setMessages(fresh);
       }
     });
+    const conv = dataService.getConversations().find((c) => c.id === canonicalId);
+    if (conv?.customerId) {
+      dataService.syncCustomerRequests(conv.customerId).catch(() => {});
+    }
   };
 
   const handleBackToCustomerList = () => {
@@ -717,8 +737,8 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     setShowCashoutModal(true);
   };
 
-  const handleApprovePendingCashoutInChat = (req: WithdrawalRequest) => {
-    const res = dataService.updateWithdrawalStatus({
+  const handleApprovePendingCashoutInChat = async (req: WithdrawalRequest) => {
+    const res = await dataService.updateWithdrawalStatusAsync({
       requestId: req.id,
       newStatus: 'completed',
       reviewerId: currentUser.id,
@@ -745,7 +765,8 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       });
       setTimeout(() => setFeedbackToast(null), 4000);
     } else {
-      alert(res.message);
+      setFeedbackToast({ text: res.message, type: 'error' });
+      setTimeout(() => setFeedbackToast(null), 5000);
     }
   };
 
@@ -767,9 +788,19 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     >
       {/* Toast Feedback */}
       {feedbackToast && (
-        <div className="mb-2 p-3 rounded-xl bg-emerald-950/90 border border-emerald-700 text-emerald-200 text-xs flex items-center justify-between shadow-xl animate-in fade-in duration-200">
+        <div
+          className={`mb-2 p-3 rounded-xl text-xs flex items-center justify-between shadow-xl animate-in fade-in duration-200 border ${
+            feedbackToast.type === 'error'
+              ? 'bg-rose-950/90 border-rose-700 text-rose-200'
+              : 'bg-emerald-950/90 border-emerald-700 text-emerald-200'
+          }`}
+        >
           <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <CheckCircle2
+              className={`w-4 h-4 shrink-0 ${
+                feedbackToast.type === 'error' ? 'text-rose-400' : 'text-emerald-400'
+              }`}
+            />
             <span>{feedbackToast.text}</span>
           </div>
           <button onClick={() => setFeedbackToast(null)} className="text-[11px] underline">

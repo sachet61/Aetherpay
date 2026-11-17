@@ -68,6 +68,7 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
   const [syncVersion, setSyncVersion] = useState(0);
 
   useEffect(() => {
+    dataService.syncDelta().catch(() => {});
     const handleStateChange = () => setSyncVersion((v) => v + 1);
     window.addEventListener('aetherpay_state_changed', handleStateChange);
     window.addEventListener('storage', handleStateChange);
@@ -203,7 +204,7 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   // Top-Up Handlers
-  const handleApproveTopUp = (req: TopUpRequest) => {
+  const handleApproveTopUp = async (req: TopUpRequest) => {
     const customAmt = verifiedAmount.trim() ? parseFloat(verifiedAmount) : undefined;
     const customerAccounts = dataService.getGameAccounts(req.customerId);
     const targetAcc = customerAccounts.find(
@@ -211,7 +212,7 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
     );
     const hasActiveCredentials = Boolean(targetAcc && targetAcc.status === 'active' && targetAcc.username);
 
-    const res = dataService.approveTopUp({
+    const res = await dataService.approveTopUpAsync({
       requestId: req.id,
       reviewerId: currentUser.id,
       reviewerName: currentUser.displayName,
@@ -239,12 +240,12 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
     }
   };
 
-  const handleRejectTopUp = (req: TopUpRequest) => {
+  const handleRejectTopUp = async (req: TopUpRequest) => {
     if (!rejectReason.trim()) {
-      alert('Please enter a rejection reason.');
+      setFeedbackMsg({ text: 'Please enter a rejection reason.', type: 'error' });
       return;
     }
-    const res = dataService.rejectTopUp({
+    const res = await dataService.rejectTopUpAsync({
       requestId: req.id,
       reviewerId: currentUser.id,
       reviewerName: currentUser.displayName,
@@ -261,13 +262,13 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
   };
 
   // Withdrawal Handlers
-  const handleUpdateWithdrawalStatus = (req: WithdrawalRequest, newStatus: WithdrawalStatus) => {
+  const handleUpdateWithdrawalStatus = async (req: WithdrawalRequest, newStatus: WithdrawalStatus) => {
     if ((newStatus === 'rejected' || newStatus === 'cancelled') && !rejectReason.trim()) {
-      alert('Please provide a reason for rejecting the cashout.');
+      setFeedbackMsg({ text: 'Please provide a reason for rejecting the cashout.', type: 'error' });
       return;
     }
 
-    const res = dataService.updateWithdrawalStatus({
+    const res = await dataService.updateWithdrawalStatusAsync({
       requestId: req.id,
       newStatus,
       reviewerId: currentUser.id,
