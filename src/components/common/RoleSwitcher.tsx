@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { UserProfile, UserRole, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
+import { useVerificationResolution } from '../../hooks/useVerificationResolution';
 import {
   Shield,
   Headphones,
@@ -29,6 +30,7 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
   onNavigateTab,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const verificationUi = useVerificationResolution(currentUser);
 
   const activeWallet = wallet || dataService.getWallet(currentUser.id);
 
@@ -58,20 +60,30 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
           </span>
         );
       default:
-        return currentUser.emailVerified ? (
-          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
-            Verified Player
-          </span>
-        ) : (
-          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800 flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
-            Unverified Player
+        if (verificationUi.isVerified) {
+          return (
+            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
+              Verified Player
+            </span>
+          );
+        }
+        if (verificationUi.showProfileUnverifiedAlert) {
+          return (
+            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+              Unverified Player
+            </span>
+          );
+        }
+        return (
+          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-slate-900 text-slate-300 border border-slate-700">
+            Syncing Status
           </span>
         );
     }
   };
 
-  const isVerified = currentUser.role !== 'customer' || Boolean(currentUser.emailVerified);
+  const isVerified = currentUser.role !== 'customer' || verificationUi.isVerified;
 
   return (
     <div className="relative inline-block text-left z-50">

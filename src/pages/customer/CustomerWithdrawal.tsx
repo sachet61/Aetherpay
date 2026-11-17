@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { UserProfile, UserWallet, WithdrawalRequest } from '../../types';
 import { dataService } from '../../services/dataService';
+import { useVerificationResolution } from '../../hooks/useVerificationResolution';
 import { LiveCashoutFeedList } from '../../components/common/LiveCashoutFeedList';
 import {
   ArrowUpFromLine,
@@ -17,6 +18,7 @@ import {
   ExternalLink,
   MessageCircle,
   Sparkles,
+  Loader2,
 } from 'lucide-react';
 
 interface CustomerWithdrawalProps {
@@ -34,6 +36,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
   prefilledAmount,
   preselectedGameCatalogId,
 }) => {
+  const verificationUi = useVerificationResolution(currentUser);
   const gameCatalog = dataService.getGameCatalog();
   const registeredGameAccounts = dataService
     .getGameAccounts(currentUser.id)
@@ -83,8 +86,12 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
       return;
     }
 
-    if (!currentUser.emailVerified) {
-      setErrorMessage('Email verification required. Please verify your email before requesting a cashout.');
+    if (!verificationUi.isVerified) {
+      setErrorMessage(
+        verificationUi.showCashoutButtonSpinner
+          ? 'Checking your account verification status. Please wait a moment.'
+          : 'Email verification required. Please verify your email before requesting a cashout.'
+      );
       return;
     }
 
@@ -329,8 +336,8 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
               </div>
             </div>
 
-            {/* Email Verification Warning for Cashouts */}
-            {!currentUser.emailVerified && (
+            {/* Email Verification Warning for Cashouts (only shown once confirmed unverified) */}
+            {verificationUi.showCashoutWarning && (
               <div className="p-3.5 rounded-xl bg-amber-950/60 border border-amber-800 text-xs text-amber-200 flex items-start gap-2.5">
                 <AlertCircle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
                 <div className="leading-relaxed text-[11px]">
@@ -357,19 +364,28 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
             {/* Submit Button */}
             <button
               type="submit"
-              disabled={isSubmitting || !lastPaymentMethod || !currentUser.emailVerified || !cashtagAcknowledged}
+              disabled={isSubmitting || !lastPaymentMethod || !verificationUi.isVerified || !cashtagAcknowledged}
               className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
             >
-              <ArrowUpFromLine className="w-4 h-4" />
-              <span>
-                {!currentUser.emailVerified
-                  ? 'Verify Email to Request Cashout'
-                  : !cashtagAcknowledged
-                  ? 'Confirm Cashtag Warning to Continue'
-                  : isSubmitting
-                  ? 'Initiating Support Cashout...'
-                  : `Request Cashout ($${parsedAmount.toFixed(2)}) & Open Support Chat`}
-              </span>
+              {verificationUi.showCashoutButtonSpinner ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Checking Verification Status...</span>
+                </>
+              ) : (
+                <>
+                  <ArrowUpFromLine className="w-4 h-4" />
+                  <span>
+                    {verificationUi.showCashoutWarning
+                      ? 'Verify Email to Request Cashout'
+                      : !cashtagAcknowledged
+                      ? 'Confirm Cashtag Warning to Continue'
+                      : isSubmitting
+                      ? 'Initiating Support Cashout...'
+                      : `Request Cashout ($${parsedAmount.toFixed(2)}) & Open Support Chat`}
+                  </span>
+                </>
+              )}
             </button>
           </form>
         </div>

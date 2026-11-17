@@ -42,6 +42,11 @@ import { supabaseAuthService } from './supabaseAuthService';
 import { webPushClient } from './webPushClient';
 import { realtimeChatHub } from './chatRealtime';
 import {
+  mergeVerifiedStatus,
+  readVerifiedCache,
+  writeVerifiedCache,
+} from './verificationStateUtils';
+import {
   mapDbMessageRowToChatMessage,
   sortAndDeduplicateMessages,
   mergeAuthoritativeMessages,
@@ -540,9 +545,16 @@ class DataService {
         if (catRes?.data && catRes.data.length > 0) this.applyCatalogRows(catRes.data);
         if (userRes?.data) {
           const dbUser = userRes.data;
-          const isConfirmed = Boolean(dbUser.email_verified);
           const users = this.getUsers();
           let local = users.find((u) => u.id === dbUser.id || u.email.toLowerCase() === dbUser.email?.toLowerCase());
+          const isConfirmed = mergeVerifiedStatus({
+            dbVerified: Boolean(dbUser.email_verified),
+            existingVerified: Boolean(local?.emailVerified),
+            cachedVerified: readVerifiedCache(dbUser.id, dbUser.email),
+          });
+          if (isConfirmed) {
+            writeVerifiedCache(dbUser.id, dbUser.email, true);
+          }
           if (local) {
             local.emailVerified = isConfirmed;
             if (dbUser.display_name) local.displayName = dbUser.display_name;
@@ -1224,6 +1236,14 @@ class DataService {
       const existing =
         userMap.get(dbU.id) ||
         currentUsers.find((u) => u.email.toLowerCase() === (dbU.email || '').toLowerCase());
+      const isVerifiedMerged = mergeVerifiedStatus({
+        dbVerified: Boolean(dbU.email_verified),
+        existingVerified: Boolean(existing?.emailVerified),
+        cachedVerified: readVerifiedCache(dbU.id, dbU.email),
+      });
+      if (isVerifiedMerged) {
+        writeVerifiedCache(dbU.id, dbU.email, true);
+      }
       const merged: UserProfile = {
         id: dbU.id,
         email: dbU.email,
@@ -1232,7 +1252,7 @@ class DataService {
         phone: dbU.phone || existing?.phone,
         avatarUrl: dbU.avatar_url || existing?.avatarUrl,
         status: dbU.status || 'active',
-        emailVerified: Boolean(dbU.email_verified),
+        emailVerified: isVerifiedMerged,
         referralCode: existing?.referralCode || `REF_${dbU.id.slice(-5).toUpperCase()}`,
         referredBy: dbU.referred_by || existing?.referredBy,
         createdAt: dbU.created_at || existing?.createdAt || new Date().toISOString(),
@@ -2068,6 +2088,7 @@ class DataService {
     this.currentUserId = session.userId;
     const users = this.getUsers();
     let user = users.find((u) => u.id === session.userId || u.email.toLowerCase() === session.email.toLowerCase());
+    const cachedVerified = readVerifiedCache(session.userId, session.email);
     if (!user) {
       user = {
         id: session.userId,
@@ -2076,12 +2097,12 @@ class DataService {
         role: session.role,
         referralCode: `REF_${session.userId.slice(-5)}`,
         status: 'active',
-        emailVerified: Boolean(session.emailVerified),
+        emailVerified: Boolean(session.emailVerified || cachedVerified),
         createdAt: new Date(session.createdAt).toISOString(),
         lastLoginAt: new Date(session.lastActiveAt).toISOString(),
       };
       this.registerUser(user);
-    } else if (session.emailVerified && !user.emailVerified) {
+    } else if ((session.emailVerified || cachedVerified) && !user.emailVerified) {
       user.emailVerified = true;
     }
     return user;
@@ -2251,13 +2272,15 @@ class DataService {
       if (resp.ok) {
         const data = await resp.json();
         if (data.exists) {
-          user.emailVerified = Boolean(data.verified);
+          const isVerified = Boolean(data.verified);
+          user.emailVerified = isVerified;
+          writeVerifiedCache(user.id, user.email, isVerified);
           this.registerUser(user);
           authSessionService.updateUserProfile(user);
           window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
           return {
-            verified: Boolean(data.verified),
-            message: data.verified
+            verified: isVerified,
+            message: isVerified
               ? 'Email address confirmed and verified in Supabase! Cashouts and referral bonuses are now unlocked.'
               : 'Email address is still unconfirmed in Supabase. Check your inbox or click Instant Verify.',
             user,
@@ -2283,6 +2306,7 @@ class DataService {
 
         if (isConfirmed) {
           user.emailVerified = true;
+          writeVerifiedCache(user.id, user.email, true);
           this.registerUser(user);
           authSessionService.updateUserProfile(user);
           window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
@@ -2316,12 +2340,14 @@ class DataService {
       const u = this.getUsers().find((usr) => usr.email.toLowerCase() === targetEmail);
       if (u) {
         u.emailVerified = true;
+        writeVerifiedCache(u.id, u.email, true);
         this.registerUser(u);
         authSessionService.updateUserProfile(u);
       }
       const cur = this.getCurrentUser();
       if (cur && cur.email.toLowerCase() === targetEmail) {
         cur.emailVerified = true;
+        writeVerifiedCache(cur.id, cur.email, true);
         this.registerUser(cur);
         authSessionService.updateUserProfile(cur);
       }

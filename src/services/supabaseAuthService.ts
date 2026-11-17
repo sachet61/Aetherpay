@@ -2,6 +2,11 @@ import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { UserProfile, UserRole } from '../types';
 import { authSessionService } from './authSessionService';
 import { dataService } from './dataService';
+import {
+  mergeVerifiedStatus,
+  readVerifiedCache,
+  writeVerifiedCache,
+} from './verificationStateUtils';
 
 export interface SupabaseAuthResult {
   success: boolean;
@@ -92,6 +97,16 @@ class SupabaseAuthService {
             ? 'admin'
             : (dbUser?.role || (user.user_metadata?.role as UserRole) || 'customer');
 
+          const mergedVerified = mergeVerifiedStatus({
+            authConfirmed: isConfirmed,
+            dbVerified: Boolean(dbUser?.email_verified),
+            existingVerified: Boolean(userProfile?.emailVerified),
+            cachedVerified: readVerifiedCache(dbUser?.id || user.id, cleanEmail),
+          });
+          if (mergedVerified) {
+            writeVerifiedCache(dbUser?.id || user.id, cleanEmail, true);
+          }
+
           if (!userProfile) {
             userProfile = {
               id: dbUser?.id || user.id,
@@ -103,7 +118,7 @@ class SupabaseAuthService {
                 cleanEmail.split('@')[0],
               role: authoritativeRole,
               status: dbUser?.status || 'active',
-              emailVerified: isConfirmed || Boolean(dbUser?.email_verified),
+              emailVerified: mergedVerified,
               avatarUrl: dbUser?.avatar_url || user.user_metadata?.avatar_url,
               referralCode: dbUser?.referral_code || `REF_${user.id.slice(-5).toUpperCase()}`,
               createdAt: dbUser?.created_at || user.created_at || nowIso,
@@ -123,7 +138,7 @@ class SupabaseAuthService {
               dataService.migrateUserEntityIds(oldId, user.id);
             }
             // Update emailVerified dynamically from active Supabase session
-            userProfile.emailVerified = isConfirmed || Boolean(dbUser?.email_verified);
+            userProfile.emailVerified = mergedVerified;
             userProfile.role = authoritativeRole;
             if (dbUser?.display_name) userProfile.displayName = dbUser.display_name;
             if (dbUser?.avatar_url) userProfile.avatarUrl = dbUser.avatar_url;
@@ -178,6 +193,16 @@ class SupabaseAuthService {
                 ? 'admin'
                 : (dbUser?.role || (session.user.user_metadata?.role as UserRole) || 'customer');
 
+              const mergedVerified = mergeVerifiedStatus({
+                authConfirmed: isConfirmed,
+                dbVerified: Boolean(dbUser?.email_verified),
+                existingVerified: Boolean(userProfile?.emailVerified),
+                cachedVerified: readVerifiedCache(dbUser?.id || session.user.id, cleanEmail),
+              });
+              if (mergedVerified) {
+                writeVerifiedCache(dbUser?.id || session.user.id, cleanEmail, true);
+              }
+
               if (!userProfile) {
                 userProfile = {
                   id: dbUser?.id || session.user.id,
@@ -189,7 +214,7 @@ class SupabaseAuthService {
                     cleanEmail.split('@')[0],
                   role: authoritativeRole,
                   status: dbUser?.status || 'active',
-                  emailVerified: isConfirmed || Boolean(dbUser?.email_verified),
+                  emailVerified: mergedVerified,
                   avatarUrl: dbUser?.avatar_url || session.user.user_metadata?.avatar_url,
                   referralCode: dbUser?.referral_code || `REF_${session.user.id.slice(-5).toUpperCase()}`,
                   createdAt: dbUser?.created_at || session.user.created_at || new Date().toISOString(),
@@ -203,7 +228,7 @@ class SupabaseAuthService {
                   userProfile.id = session.user.id;
                   dataService.migrateUserEntityIds(oldId, session.user.id);
                 }
-                userProfile.emailVerified = isConfirmed || Boolean(dbUser?.email_verified);
+                userProfile.emailVerified = mergedVerified;
                 userProfile.role = authoritativeRole;
                 if (dbUser?.display_name) userProfile.displayName = dbUser.display_name;
                 if (dbUser?.avatar_url) userProfile.avatarUrl = dbUser.avatar_url;
@@ -402,6 +427,16 @@ class SupabaseAuthService {
         ? 'admin'
         : (dbUser?.role || (data.user.user_metadata?.role as UserRole) || 'customer');
 
+      const mergedVerified = mergeVerifiedStatus({
+        authConfirmed: isConfirmed,
+        dbVerified: Boolean(dbUser?.email_verified),
+        existingVerified: Boolean(userProfile?.emailVerified),
+        cachedVerified: readVerifiedCache(dbUser?.id || data.user.id, cleanEmail),
+      });
+      if (mergedVerified) {
+        writeVerifiedCache(dbUser?.id || data.user.id, cleanEmail, true);
+      }
+
       if (!userProfile) {
         const nowIso = new Date().toISOString();
         userProfile = {
@@ -413,7 +448,7 @@ class SupabaseAuthService {
             cleanEmail.split('@')[0],
           role: authoritativeRole,
           status: dbUser?.status || 'active',
-          emailVerified: isConfirmed || Boolean(dbUser?.email_verified),
+          emailVerified: mergedVerified,
           referralCode: dbUser?.referral_code || `REF_${data.user.id.slice(-5).toUpperCase()}`,
           createdAt: dbUser?.created_at || data.user.created_at || nowIso,
           lastLoginAt: nowIso,
@@ -430,7 +465,7 @@ class SupabaseAuthService {
           userProfile.id = data.user.id;
           dataService.migrateUserEntityIds(oldId, data.user.id);
         }
-        userProfile.emailVerified = isConfirmed || Boolean(dbUser?.email_verified);
+        userProfile.emailVerified = mergedVerified;
         userProfile.role = authoritativeRole;
         if (dbUser?.display_name) userProfile.displayName = dbUser.display_name;
         if (isParentAdminEmail && userProfile.role !== 'admin') {

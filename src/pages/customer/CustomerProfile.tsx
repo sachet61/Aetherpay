@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { UserProfile, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
 import { authSessionService } from '../../services/authSessionService';
+import { useVerificationResolution } from '../../hooks/useVerificationResolution';
 import { EmailOtpModal } from '../../components/auth/EmailOtpModal';
 import { IOSPwaInstallModal } from '../../components/common/IOSPwaInstallModal';
 import { webPushClient } from '../../services/webPushClient';
@@ -39,6 +40,7 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
   onSwitchUser,
   onLogout,
 }) => {
+  const verificationUi = useVerificationResolution(currentUser);
   const [successNote, setSuccessNote] = useState<string | null>(null);
   const [showOtpModal, setShowOtpModal] = useState(false);
   const [isPushActive, setIsPushActive] = useState<boolean>(false);
@@ -192,13 +194,17 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
               <div className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">
                 <span className="font-mono text-indigo-400">ID: {currentUser.id}</span>
                 <span aria-hidden="true" className="text-slate-600">·</span>
-                {currentUser.emailVerified ? (
+                {verificationUi.isVerified ? (
                   <span className="text-emerald-400 flex items-center gap-1">
                     <Shield className="w-3 h-3" /> Tier-2 KYC Verified
                   </span>
-                ) : (
+                ) : verificationUi.showProfileUnverifiedAlert ? (
                   <span className="text-amber-400 flex items-center gap-1 font-semibold">
                     <ShieldAlert className="w-3 h-3" /> Unverified Player (Email Pending)
+                  </span>
+                ) : (
+                  <span className="text-slate-400 flex items-center gap-1">
+                    <Shield className="w-3 h-3" /> Account Status Syncing
                   </span>
                 )}
               </div>
@@ -221,19 +227,23 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
                 <Mail className="w-3.5 h-3.5 text-indigo-400" />
                 <span>Registered Email</span>
               </div>
-              {currentUser.emailVerified ? (
+              {verificationUi.isVerified ? (
                 <span className="text-[10px] text-emerald-400 font-bold flex items-center gap-1 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-800">
                   <CheckCircle2 className="w-3 h-3" /> Verified User
                 </span>
-              ) : (
+              ) : verificationUi.showProfileUnverifiedAlert ? (
                 <span className="text-[10px] text-amber-400 font-bold flex items-center gap-1 bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-800">
                   <AlertCircle className="w-3 h-3" /> Unverified Player
+                </span>
+              ) : (
+                <span className="text-[10px] text-slate-400 font-medium">
+                  Checking status
                 </span>
               )}
             </div>
             <div className="font-medium text-white font-mono">{currentUser.email}</div>
 
-            {!currentUser.emailVerified && (
+            {verificationUi.showProfileUnverifiedAlert && (
               <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-2">
                 <button
                   type="button"

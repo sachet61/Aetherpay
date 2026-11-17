@@ -30,8 +30,14 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
     return () => clearInterval(interval);
   }, [cooldown]);
 
-  // Automatic background reconciliation: verify if user was already confirmed in Supabase
+  const initialMountedUserIdRef = React.useRef<string | undefined>(currentUser?.id);
+
+  // Automatic background reconciliation if active user changes while banner remains mounted
   useEffect(() => {
+    if (initialMountedUserIdRef.current === currentUser?.id) {
+      return;
+    }
+    initialMountedUserIdRef.current = currentUser?.id;
     if (currentUser && !currentUser.emailVerified) {
       dataService.reloadAndCheckEmailVerification().then((res) => {
         if (res.verified && onStatusChanged) {

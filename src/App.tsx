@@ -1,5 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense } from 'react';
 import { useDataService } from './hooks/useDataService';
+import { useVerificationResolution } from './hooks/useVerificationResolution';
+import { writeVerifiedCache } from './services/verificationStateUtils';
 import { dataService } from './services/dataService';
 import { authSessionService } from './services/authSessionService';
 import { TopNavbar } from './components/layout/TopNavbar';
@@ -26,7 +28,12 @@ import { CustomerChat } from './pages/customer/CustomerChat';
 import { CustomerReferrals } from './pages/customer/CustomerReferrals';
 import { CustomerRules } from './pages/customer/CustomerRules';
 import { CustomerProfile } from './pages/customer/CustomerProfile';
-import { EmailVerificationBanner } from './components/common/EmailVerificationBanner';
+
+const LazyEmailVerificationBanner = React.lazy(() =>
+  import('./components/common/EmailVerificationBanner').then((mod) => ({
+    default: mod.EmailVerificationBanner,
+  }))
+);
 
 // Staff / Operations Pages
 import { AdminDashboard } from './pages/admin/AdminDashboard';
@@ -49,6 +56,7 @@ import {
 
 export default function App() {
   const { currentUser, wallet, switchUser, logout } = useDataService();
+  const verificationUi = useVerificationResolution(currentUser);
 
   const [currentHash, setCurrentHash] = useState<string>(window.location.hash);
 
@@ -311,17 +319,20 @@ export default function App() {
 
         {/* Main Content Viewport */}
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 w-full max-w-7xl mx-auto">
-          {/* Prominent Email Verification Banner for Unverified Customers */}
-          {isCustomer && (
-            <EmailVerificationBanner
-              currentUser={currentUser}
-              onStatusChanged={(verified) => {
-                const updated = { ...currentUser, emailVerified: verified };
-                dataService.registerUser(updated);
-                authSessionService.updateUserProfile(updated);
-                window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
-              }}
-            />
+          {/* Lazy-Loaded Email Verification Banner for Confirmed Unverified Customers Only */}
+          {isCustomer && verificationUi.shouldLoadBannerChunk && (
+            <Suspense fallback={null}>
+              <LazyEmailVerificationBanner
+                currentUser={currentUser}
+                onStatusChanged={(verified) => {
+                  writeVerifiedCache(currentUser.id, currentUser.email, verified);
+                  const updated = { ...currentUser, emailVerified: verified };
+                  dataService.registerUser(updated);
+                  authSessionService.updateUserProfile(updated);
+                  window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
+                }}
+              />
+            </Suspense>
           )}
 
         {/* CUSTOMER PORTAL VIEWS */}
