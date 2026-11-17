@@ -110,8 +110,10 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
 
     if (isCustomer && currentUser.role === 'customer') {
       const canonicalConvId = `conv_${currentUser.id}`;
-      const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
-      if (conv && conv.status !== 'closed') {
+      const conv = dataService
+        .getConversations()
+        .find((c) => c.id === canonicalConvId || c.customerId === currentUser.id);
+      if (!conv || conv.status !== 'closed') {
         unsubs.push(
           realtimeChatHub.subscribeChatRoom(
             `chat_${canonicalConvId}`,

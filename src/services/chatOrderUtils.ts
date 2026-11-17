@@ -158,12 +158,34 @@ export function sortAndDeduplicateMessages(messages: ChatMessage[], filterBots: 
 export function mergeAuthoritativeMessages(
   localMsgs: ChatMessage[],
   remoteMsgs: ChatMessage[],
-  canonicalConvId?: string
+  canonicalConvId?: string,
+  options?: { pruneToServerSnapshot?: boolean; pageLimit?: number }
 ): ChatMessage[] {
   const map = new Map<string, ChatMessage>();
+  const shouldPrune = Boolean(options?.pruneToServerSnapshot);
+  const pageLimit = options?.pageLimit;
+  const isCompleteHistory = shouldPrune && (pageLimit ? remoteMsgs.length < pageLimit : remoteMsgs.length === 0);
+
+  let oldestRemoteTime = Infinity;
+  if (shouldPrune && !isCompleteHistory && remoteMsgs.length > 0) {
+    for (const remote of remoteMsgs) {
+      const ts = Date.parse(remote?.createdAt || '');
+      if (Number.isFinite(ts) && ts < oldestRemoteTime) {
+        oldestRemoteTime = ts;
+      }
+    }
+  }
 
   for (const local of localMsgs) {
     if (!local || !local.id) continue;
+    if (shouldPrune) {
+      const isPendingOrFailed = local.deliveryStatus === 'sending' || local.deliveryStatus === 'failed';
+      const localTs = Date.parse(local.createdAt || '') || 0;
+      const isOlderPaginated = !isCompleteHistory && oldestRemoteTime < Infinity && localTs < oldestRemoteTime;
+      if (!isPendingOrFailed && !isOlderPaginated) {
+        continue;
+      }
+    }
     const normalized: ChatMessage = canonicalConvId
       ? { ...local, conversationId: canonicalConvId }
       : local;

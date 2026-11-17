@@ -209,11 +209,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     // 2. Fetch latest messages from Supabase ONCE when conversation selection changes
     if (selectedConvId) {
       dataService.fetchMessagesForConversation(selectedConvId, { limit: 40 }).then((fresh) => {
-        if (fresh && fresh.length > 0) {
-          setMessages(fresh);
-        } else {
-          setMessages(dataService.getMessages(selectedConvId));
-        }
+        setMessages(fresh || []);
       });
     }
 
@@ -234,9 +230,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       if (now - lastCatchUpTime < 800) return;
       lastCatchUpTime = now;
       dataService.fetchMessagesForConversation(selectedConvId, { limit: 40 }).then((fresh) => {
-        if (fresh && fresh.length > 0) {
-          setMessages(fresh);
-        }
+        setMessages(fresh || []);
       });
     };
 

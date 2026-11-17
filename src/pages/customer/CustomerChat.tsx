@@ -116,11 +116,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
     // Asynchronously hydrate messages directly from PostgreSQL capped strictly to 50 records
     dataService.fetchMessagesForConversation(canonicalConvId, { limit: 50 }).then((freshMsgs) => {
-      if (freshMsgs && freshMsgs.length > 0) {
-        setMessages(freshMsgs);
-      } else {
-        setMessages(dataService.getMessages(canonicalConvId));
-      }
+      setMessages(freshMsgs || []);
     });
 
     const handleSync = () => {

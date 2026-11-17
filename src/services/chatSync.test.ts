@@ -132,3 +132,59 @@ test('mergeAuthoritativeMessages preserves failed local messages, paginated olde
   assert.equal(merged[3].deliveryStatus, 'failed');
   assert.equal(merged[3].deliveryError, 'Network down');
 });
+
+test('mergeAuthoritativeMessages with pruneToServerSnapshot clears stale sent local messages on empty server response while keeping sending/failed', () => {
+  const local: ChatMessage[] = [
+    { id: 'stale_1', conversationId: 'conv_1', text: 'deleted on server', createdAt: '2026-11-16T09:00:00.000Z', deliveryStatus: 'sent' },
+    { id: 'pending_1', conversationId: 'conv_1', text: 'still sending', createdAt: '2026-11-17T10:00:00.000Z', deliveryStatus: 'sending' },
+    { id: 'failed_1', conversationId: 'conv_1', text: 'retry me', createdAt: '2026-11-17T10:01:00.000Z', deliveryStatus: 'failed' },
+  ];
+
+  const merged = mergeAuthoritativeMessages(local, [], 'conv_1', {
+    pruneToServerSnapshot: true,
+    pageLimit: 50,
+  });
+
+  assert.deepEqual(
+    merged.map((m) => m.id),
+    ['pending_1', 'failed_1']
+  );
+});
+
+test('mergeAuthoritativeMessages with pruneToServerSnapshot keeps older paginated history when pageLimit is full', () => {
+  const local: ChatMessage[] = [
+    { id: 'old_page', conversationId: 'conv_1', text: 'older page', createdAt: '2026-11-16T08:00:00.000Z', deliveryStatus: 'sent' },
+    { id: 'ghost_recent', conversationId: 'conv_1', text: 'deleted in recent window', createdAt: '2026-11-16T10:01:30.000Z', deliveryStatus: 'sent' },
+  ];
+
+  const remoteRows = [
+    {
+      id: 'm_1',
+      conversation_id: 'conv_1',
+      sender_id: 'u1',
+      sender_name: 'Alice',
+      sender_role: 'customer',
+      content: 'first recent',
+      created_at: '2026-11-16T10:01:00.000Z',
+    },
+    {
+      id: 'm_2',
+      conversation_id: 'conv_1',
+      sender_id: 'u1',
+      sender_name: 'Alice',
+      sender_role: 'customer',
+      content: 'second recent',
+      created_at: '2026-11-16T10:02:00.000Z',
+    },
+  ].map((r) => mapDbMessageRowToChatMessage(r, 'conv_1'));
+
+  const merged = mergeAuthoritativeMessages(local, remoteRows, 'conv_1', {
+    pruneToServerSnapshot: true,
+    pageLimit: 2,
+  });
+
+  assert.deepEqual(
+    merged.map((m) => m.id),
+    ['old_page', 'm_1', 'm_2']
+  );
+});

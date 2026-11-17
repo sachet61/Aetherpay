@@ -138,9 +138,10 @@ class DataService {
       localStorage.removeItem(STORAGE_KEYS.USERS);
       localStorage.removeItem('aetherpay_users');
 
-      const CLEAN_FLAG = 'swift_sweeps_prod_clean_v6';
+      const CLEAN_FLAG = 'swift_sweeps_prod_clean_v7';
       if (!localStorage.getItem(CLEAN_FLAG)) {
         console.log('[SwiftSweeps] Performing clean-slate migration: clearing legacy storage...');
+        localStorage.removeItem('swift_sweeps_prod_clean_v6');
         const keysToClean = [
           'aetherpay_users',
           'aetherpay_wallets',
@@ -154,6 +155,7 @@ class DataService {
           'aetherpay_audit_logs',
           'aetherpay_faked_cashouts',
           'aetherpay_webhook_logs',
+          'aetherpay_password_reset_tokens',
           'aetherpay_mock_users',
           'aetherpay_user_credentials',
         ];
@@ -505,7 +507,13 @@ class DataService {
         if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
         if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
         if (walletsRes.data) this.applyWalletRows(walletsRes.data);
-        if (convsRes.data) this.applyConversationRows(convsRes.data, true);
+        if (!convsRes.error && Array.isArray(convsRes.data)) {
+          this.applyConversationRows(convsRes.data, true);
+          if (convsRes.data.length === 0) {
+            this.cache[STORAGE_KEYS.MESSAGES] = {};
+            this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, {});
+          }
+        }
         if (gameAccsRes?.data) this.applyGameAccountRows(gameAccsRes.data, false);
       } else if (currentUserId) {
         // Customer session: strictly scoped to CURRENT user only (no global table downloads)
@@ -561,22 +569,36 @@ class DataService {
         if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
         if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
         if (gameAccsRes.data) this.applyGameAccountRows(gameAccsRes.data, false);
-        if (convRes?.data && convRes.data.length > 0) {
-          this.applyConversationRows(convRes.data, false);
-          // Hydrate customer's active chat messages capped at 40
-          const convIds = convRes.data.map((c: any) => c.id);
-          const activeConv = this.getOrCreateConversationForCustomer(currentUserId, user?.displayName || 'Player');
-          const allTargetIds = Array.from(new Set([...convIds, activeConv.id, `conv_${currentUserId}`].filter(Boolean)));
-          let msgQuery = supabase.from('messages').select('*');
-          if (allTargetIds.length === 1) {
-            msgQuery = msgQuery.eq('conversation_id', allTargetIds[0]);
+        if (!convRes?.error && Array.isArray(convRes?.data)) {
+          if (convRes.data.length > 0) {
+            this.applyConversationRows(convRes.data, false);
+            // Hydrate customer's active chat messages capped at 40
+            const convIds = convRes.data.map((c: any) => c.id);
+            const activeConv = this.getOrCreateConversationForCustomer(currentUserId, user?.displayName || 'Player');
+            const allTargetIds = Array.from(new Set([...convIds, activeConv.id, `conv_${currentUserId}`].filter(Boolean)));
+            let msgQuery = supabase.from('messages').select('*');
+            if (allTargetIds.length === 1) {
+              msgQuery = msgQuery.eq('conversation_id', allTargetIds[0]);
+            } else {
+              msgQuery = msgQuery.in('conversation_id', allTargetIds);
+            }
+            const { data: msgData } = await msgQuery
+              .order('created_at', { ascending: false })
+              .limit(40);
+            if (msgData) this.applyMessageRows(msgData);
           } else {
-            msgQuery = msgQuery.in('conversation_id', allTargetIds);
+            const canonicalConvId = `conv_${currentUserId}`;
+            const remainingConvs = this.getConversations().filter(
+              (c) => c.customerId !== currentUserId && c.id !== canonicalConvId
+            );
+            this.cache[STORAGE_KEYS.CONVERSATIONS] = remainingConvs;
+            this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, remainingConvs);
+
+            const allMsgs = { ...this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES) };
+            delete allMsgs[canonicalConvId];
+            this.cache[STORAGE_KEYS.MESSAGES] = allMsgs;
+            this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, allMsgs);
           }
-          const { data: msgData } = await msgQuery
-            .order('created_at', { ascending: false })
-            .limit(40);
-          if (msgData) this.applyMessageRows(msgData);
         }
       } else {
         // Unauthenticated visitor: only public app config, catalog, and ticker
@@ -692,9 +714,16 @@ class DataService {
           this.applyWithdrawalRows(withdrawalsRes.data, false);
           changed = true;
         }
-        if (convsRes.data && convsRes.data.length > 0) {
-          this.applyConversationRows(convsRes.data, false);
-          changed = true;
+        if (!convsRes.error && Array.isArray(convsRes.data)) {
+          const replaceAll = convsRes.data.length < 25;
+          if (convsRes.data.length > 0 || (replaceAll && this.getConversations().length > 0)) {
+            this.applyConversationRows(convsRes.data, replaceAll);
+            if (convsRes.data.length === 0) {
+              this.cache[STORAGE_KEYS.MESSAGES] = {};
+              this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, {});
+            }
+            changed = true;
+          }
         }
         if (msgsRes.data && msgsRes.data.length > 0) {
           this.applyMessageRows(msgsRes.data);
@@ -760,7 +789,11 @@ class DataService {
           }
         }
         const remoteMsgs = (remoteRows || []).map((row) => mapDbMessageRowToChatMessage(row, targetConvId));
-        const merged = mergeAuthoritativeMessages(existingPool, remoteMsgs, targetConvId);
+        const shouldPruneSnapshot = !options?.beforeCreatedAt && !options?.afterCreatedAt;
+        const merged = mergeAuthoritativeMessages(existingPool, remoteMsgs, targetConvId, {
+          pruneToServerSnapshot: shouldPruneSnapshot,
+          pageLimit: limit,
+        });
 
         for (const cid of candidateIds) {
           all[cid] = merged;
@@ -1460,7 +1493,7 @@ class DataService {
     return val as T;
   }
 
-  private save<T>(key: string, value: T): void {
+  private save<T>(key: string, value: T, skipRemotePersist: boolean = false): void {
     let finalValue = value;
     if (key === STORAGE_KEYS.GAME_ACCOUNTS && Array.isArray(value)) {
       finalValue = this.deduplicateGameAccounts(value as unknown as GameAccount[]) as unknown as T;
@@ -1473,7 +1506,9 @@ class DataService {
     this.saveToLocalStorage(key, finalValue);
 
     // 3. Persist to Supabase PostgreSQL asynchronously if configured
-    this.persistToSupabase(key, finalValue);
+    if (!skipRemotePersist) {
+      this.persistToSupabase(key, finalValue);
+    }
   }
 
   private async persistToSupabase(key: string, value: any): Promise<void> {
@@ -4845,8 +4880,13 @@ class DataService {
         .order('last_message_at', { ascending: false })
         .limit(50);
 
-      if (!error && data && data.length > 0) {
-        this.applyConversationRows(data, false);
+      if (!error && Array.isArray(data)) {
+        const replaceAll = data.length < 50;
+        this.applyConversationRows(data, replaceAll);
+        if (data.length === 0) {
+          this.cache[STORAGE_KEYS.MESSAGES] = {};
+          this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, {});
+        }
         window.dispatchEvent(
           new CustomEvent('aetherpay_state_changed', {
             detail: { key: 'conversations_fetched', count: data.length },
@@ -5529,7 +5569,7 @@ class DataService {
     if (conv) {
       if (role === 'customer') conv.unreadCountCustomer = 0;
       else conv.unreadCountStaff = 0;
-      this.save(STORAGE_KEYS.CONVERSATIONS, conversations);
+      this.save(STORAGE_KEYS.CONVERSATIONS, conversations, true);
       window.dispatchEvent(
         new CustomEvent('aetherpay_state_changed', {
           detail: { key: 'chat_read', conversationId: targetConvId, role },
