@@ -607,3 +607,295 @@ export function getActivityStatusMeta(status?: string): ActivityStatusMeta {
       };
   }
 }
+
+export function getDefaultBonusPercentageForMethod(
+  method: string,
+  configuredMethods?: Array<{ type: string; bonusPercentage?: number }>
+): number {
+  const normalized = String(method || '').trim().toLowerCase();
+  const match = (configuredMethods || []).find(
+    (m) => String(m.type || '').trim().toLowerCase() === normalized
+  );
+  if (match && typeof match.bonusPercentage === 'number' && Number.isFinite(match.bonusPercentage)) {
+    return Math.max(0, Number(match.bonusPercentage));
+  }
+  switch (normalized) {
+    case 'cashapp':
+      return 30;
+    case 'crypto':
+      return 30;
+    case 'payment_link':
+      return 20;
+    case 'chime':
+      return 15;
+    case 'manual_receipt':
+    case 'manual_support':
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+export function computeCumulativeCompletedWithdrawals(
+  withdrawals: WithdrawalRequest[],
+  customerId: string
+): number {
+  const total = (withdrawals || [])
+    .filter((w) => {
+      if (!w || w.customerId !== customerId) return false;
+      const s = String(w.status || '').trim().toLowerCase();
+      return s === 'completed' || s === 'approved';
+    })
+    .reduce((sum, w) => sum + toFiniteNumber(w.amount, 0), 0);
+  return Number(total.toFixed(2));
+}
+
+export interface StaffTopUpDraftParams {
+  customerId: string;
+  customerName: string;
+  reviewerId: string;
+  reviewerName: string;
+  amount: number;
+  bonusPercentage?: number;
+  feePercentage?: number;
+  method: string;
+  methodName: string;
+  targetGameCatalogId?: string;
+  targetGameName?: string;
+  targetGameUsername?: string;
+  providerRef?: string;
+  receiptUrl?: string;
+  receiptName?: string;
+  notes?: string;
+  status: 'completed' | 'submitted';
+  currency?: string;
+  nowIso?: string;
+  requestId?: string;
+}
+
+export interface StaffTopUpDraftResult {
+  valid: boolean;
+  error?: string;
+  request?: TopUpRequest;
+  chatTransactionData?: Record<string, any>;
+}
+
+export function buildStaffTopUpDraft(params: StaffTopUpDraftParams): StaffTopUpDraftResult {
+  const amount = Number(toFiniteNumber(params.amount, 0).toFixed(2));
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { valid: false, error: 'Deposit amount must be greater than $0.00.' };
+  }
+
+  const bonusPercentage =
+    params.bonusPercentage !== undefined
+      ? Math.max(0, toFiniteNumber(params.bonusPercentage, 0))
+      : getDefaultBonusPercentageForMethod(params.method);
+
+  if (!Number.isFinite(bonusPercentage) || bonusPercentage < 0 || bonusPercentage > 500) {
+    return { valid: false, error: 'Bonus percentage must be between 0% and 500%.' };
+  }
+
+  const feePct = Math.max(0, toFiniteNumber(params.feePercentage, 0));
+  const bonusAmount = Number(((amount * bonusPercentage) / 100).toFixed(2));
+  const feeAmount = Number(((amount * feePct) / 100).toFixed(2));
+  const finalWalletCredit = Number((amount + bonusAmount).toFixed(2));
+
+  const nowIso = params.nowIso || new Date().toISOString();
+  const requestId = params.requestId || `req_topup_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const isCompleted = params.status === 'completed';
+  const cleanNotes =
+    (params.notes || '').trim() ||
+    (isCompleted
+      ? 'Direct deposit logged & finalized by support specialist.'
+      : 'Pending deposit request created by support specialist.');
+  const cleanRef = (params.providerRef || '').trim() || undefined;
+  const cleanGameName = (params.targetGameName || '').trim() || undefined;
+  const cleanGameUsername = (params.targetGameUsername || '').trim() || undefined;
+
+  const request: TopUpRequest = {
+    id: requestId,
+    customerId: params.customerId,
+    customerName: params.customerName,
+    amount,
+    currency: params.currency || 'USD',
+    method: params.method as any,
+    methodName: params.methodName || 'Direct Support Desk',
+    targetGameCatalogId: (params.targetGameCatalogId || '').trim() || undefined,
+    targetGameName: cleanGameName,
+    targetGameUsername: cleanGameUsername,
+    fundingSource: 'payment_method',
+    providerRef: cleanRef,
+    receiptUrl: (params.receiptUrl || '').trim() || undefined,
+    receiptName: (params.receiptName || '').trim() || undefined,
+    bonusAmount,
+    bonusPercentage,
+    feeAmount,
+    finalWalletCredit,
+    status: params.status,
+    reviewerId: isCompleted ? params.reviewerId : undefined,
+    reviewerName: isCompleted ? params.reviewerName : undefined,
+    reviewNotes: cleanNotes,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const chatTransactionData = {
+    transactionType: 'topup',
+    requestId,
+    gameName: cleanGameName,
+    gameUsername: cleanGameUsername,
+    amount,
+    bonusAmount,
+    bonusPercentage,
+    finalCredit: finalWalletCredit,
+    methodName: request.methodName,
+    status: isCompleted ? 'completed' : 'pending',
+    proofUrl: request.receiptUrl,
+    proofName: request.receiptName,
+    details: cleanRef,
+    notes: cleanNotes,
+    approvedBy: isCompleted ? params.reviewerName : undefined,
+    approvedAt: isCompleted ? nowIso : undefined,
+  };
+
+  return { valid: true, request, chatTransactionData };
+}
+
+export interface StaffWithdrawalDraftParams {
+  customerId: string;
+  customerName: string;
+  reviewerId: string;
+  reviewerName: string;
+  amount: number;
+  feeAmount?: number;
+  method: string;
+  methodName: string;
+  payoutHandle?: string;
+  payoutReference?: string;
+  sourceGameCatalogId?: string;
+  sourceGameName?: string;
+  sourceGameUsername?: string;
+  notes?: string;
+  status: 'completed' | 'submitted';
+  currency?: string;
+  nowIso?: string;
+  requestId?: string;
+}
+
+export interface StaffWithdrawalDraftResult {
+  valid: boolean;
+  error?: string;
+  request?: WithdrawalRequest;
+  chatTransactionData?: Record<string, any>;
+}
+
+export function buildStaffWithdrawalDraft(
+  params: StaffWithdrawalDraftParams
+): StaffWithdrawalDraftResult {
+  const amount = Number(toFiniteNumber(params.amount, 0).toFixed(2));
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { valid: false, error: 'Cashout amount must be greater than $0.00.' };
+  }
+
+  const feeAmount = Number(Math.max(0, toFiniteNumber(params.feeAmount, 0)).toFixed(2));
+  if (feeAmount >= amount) {
+    return { valid: false, error: 'Fee amount cannot equal or exceed the gross cashout amount.' };
+  }
+
+  const netPayout = Number((amount - feeAmount).toFixed(2));
+  const nowIso = params.nowIso || new Date().toISOString();
+  const requestId = params.requestId || `req_wdr_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const isCompleted = params.status === 'completed';
+
+  const cleanGameCatalogId = (params.sourceGameCatalogId || '').trim() || undefined;
+  const cleanGameName = (params.sourceGameName || '').trim() || undefined;
+  const cleanGameUsername = (params.sourceGameUsername || '').trim() || undefined;
+  const cleanHandle = (params.payoutHandle || '').trim() || undefined;
+  const cleanPayoutRef =
+    (params.payoutReference || '').trim() ||
+    (isCompleted ? `STAFF_PAY_${Date.now().toString(36).toUpperCase()}` : undefined);
+  const cleanNotes =
+    (params.notes || '').trim() ||
+    (isCompleted
+      ? 'Emergency cashout logged & completed by support specialist.'
+      : 'Emergency cashout request created by support specialist.');
+
+  const payoutDetails: Record<string, any> = {
+    methodType: params.method,
+    collectedBySupport: true,
+    createdByStaff: true,
+    bypassedDepositLock: true,
+    reservedAmount: amount,
+    ...(cleanHandle ? { payoutHandle: cleanHandle } : {}),
+    ...(params.method === 'cashapp' && cleanHandle ? { cashtag: cleanHandle } : {}),
+    ...(params.method === 'chime' && cleanHandle ? { chimeHandle: cleanHandle } : {}),
+    ...(params.method === 'crypto' && cleanHandle ? { cryptoAddress: cleanHandle } : {}),
+    ...(params.method === 'payment_link' && cleanHandle ? { linkAccountRef: cleanHandle } : {}),
+    ...(cleanGameCatalogId ? { sourceGameCatalogId: cleanGameCatalogId } : {}),
+    ...(cleanGameName ? { sourceGameName: cleanGameName } : {}),
+    ...(cleanGameUsername ? { sourceGameUsername: cleanGameUsername } : {}),
+    playerNotes: cleanNotes,
+  };
+
+  const timeline = [
+    {
+      status: 'submitted',
+      note: `Created by ${params.reviewerName} via Admin Support Chat (${params.methodName}${cleanHandle ? ` • ${cleanHandle}` : ''}).`,
+      timestamp: nowIso,
+      actorName: params.reviewerName,
+    },
+    ...(isCompleted
+      ? [
+          {
+            status: 'completed',
+            note: cleanNotes,
+            timestamp: nowIso,
+            actorName: params.reviewerName,
+          },
+        ]
+      : []),
+  ];
+
+  const request: WithdrawalRequest = {
+    id: requestId,
+    customerId: params.customerId,
+    customerName: params.customerName,
+    amount,
+    currency: params.currency || 'USD',
+    feeAmount,
+    netPayout,
+    reservedAmount: amount,
+    method: params.method || 'manual_support',
+    methodName: params.methodName || 'Customer Support Manual Payout',
+    sourceGameCatalogId: cleanGameCatalogId,
+    sourceGameName: cleanGameName,
+    sourceGameUsername: cleanGameUsername,
+    playerNotes: cleanNotes,
+    payoutDetails,
+    status: params.status,
+    reviewerId: isCompleted ? params.reviewerId : undefined,
+    reviewerName: isCompleted ? params.reviewerName : undefined,
+    reviewNotes: cleanNotes,
+    payoutReference: cleanPayoutRef,
+    timeline,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const chatTransactionData = {
+    transactionType: 'withdrawal',
+    requestId,
+    gameName: cleanGameName,
+    gameUsername: cleanGameUsername,
+    amount,
+    methodName: request.methodName,
+    status: isCompleted ? 'completed' : 'pending',
+    details: [cleanHandle, cleanPayoutRef].filter(Boolean).join(' • ') || undefined,
+    notes: cleanNotes,
+    approvedBy: isCompleted ? params.reviewerName : undefined,
+    approvedAt: isCompleted ? nowIso : undefined,
+  };
+
+  return { valid: true, request, chatTransactionData };
+}
+

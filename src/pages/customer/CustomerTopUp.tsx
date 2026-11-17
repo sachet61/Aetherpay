@@ -844,7 +844,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                   ? 'Submitting Proof to Admin...'
                   : fundingMode === 'referral_rewards'
                   ? `Load $${parsedRefAmount.toFixed(2)} Referral Bonus`
-                  : `Forward Payment Proof for ${targetGameName} (+${dynamicBonusPercent}% Bonus)`}
+                  : 'Submit'}
               </span>
             </button>
           </form>

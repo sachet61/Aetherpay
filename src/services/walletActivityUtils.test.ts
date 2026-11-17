@@ -1,11 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildStaffTopUpDraft,
+  buildStaffWithdrawalDraft,
   buildUnifiedWalletActivity,
   computeCumulativeCompletedDeposits,
+  computeCumulativeCompletedWithdrawals,
   deriveLatestCompletedTopUp,
   filterUnifiedWalletActivity,
   getActivityStatusMeta,
+  getDefaultBonusPercentageForMethod,
   mapDbTransactionRowToWalletTransaction,
   mapDbWalletRowToWallet,
   mergeWalletTransactions,
@@ -394,3 +398,142 @@ test('getActivityStatusMeta covers all request lifecycle statuses', () => {
     assert.ok(meta.textClass.startsWith('text-'));
   }
 });
+
+test('buildStaffTopUpDraft handles completed without screenshot, pending mode, custom bonus, and validation', () => {
+  const invalid = buildStaffTopUpDraft({
+    customerId: 'cust_1',
+    customerName: 'Player One',
+    reviewerId: 'adm_1',
+    reviewerName: 'Admin One',
+    amount: 0,
+    method: 'cashapp',
+    methodName: 'Verified CashApp',
+    status: 'completed',
+  });
+  assert.equal(invalid.valid, false);
+  assert.ok(invalid.error);
+
+  // Completed emergency top-up without screenshot proof, custom 25% bonus
+  const completed = buildStaffTopUpDraft({
+    customerId: 'cust_1',
+    customerName: 'Player One',
+    reviewerId: 'adm_1',
+    reviewerName: 'Admin One',
+    amount: 100,
+    bonusPercentage: 25,
+    method: 'cashapp',
+    methodName: 'Verified CashApp',
+    targetGameCatalogId: 'game_fk',
+    targetGameName: 'Fire Kirin',
+    targetGameUsername: 'player_fk_77',
+    providerRef: '$playerOne',
+    notes: 'Paid earlier in chat; logged by admin',
+    status: 'completed',
+    nowIso: '2026-11-17T12:00:00.000Z',
+    requestId: 'req_topup_staff_1',
+  });
+
+  assert.equal(completed.valid, true);
+  assert.ok(completed.request);
+  assert.equal(completed.request.status, 'completed');
+  assert.equal(completed.request.receiptUrl, undefined);
+  assert.equal(completed.request.bonusAmount, 25);
+  assert.equal(completed.request.finalWalletCredit, 125);
+  assert.equal(completed.request.reviewerName, 'Admin One');
+  assert.equal(completed.request.reviewNotes, 'Paid earlier in chat; logged by admin');
+  assert.equal(completed.chatTransactionData?.status, 'completed');
+  assert.equal(completed.chatTransactionData?.approvedBy, 'Admin One');
+  assert.equal(completed.chatTransactionData?.finalCredit, 125);
+
+  // Pending mode with default method bonus
+  const defaultBonus = getDefaultBonusPercentageForMethod('chime');
+  assert.equal(defaultBonus, 15);
+  const pending = buildStaffTopUpDraft({
+    customerId: 'cust_1',
+    customerName: 'Player One',
+    reviewerId: 'adm_1',
+    reviewerName: 'Admin One',
+    amount: 60,
+    method: 'chime',
+    methodName: 'Chime Direct',
+    status: 'submitted',
+    requestId: 'req_topup_staff_2',
+  });
+  assert.equal(pending.valid, true);
+  assert.equal(pending.request?.status, 'submitted');
+  assert.equal(pending.request?.bonusAmount, 9);
+  assert.equal(pending.request?.reviewerId, undefined);
+  assert.equal(pending.chatTransactionData?.status, 'pending');
+});
+
+test('buildStaffWithdrawalDraft bypasses deposit lock, computes fees, and supports completed & pending states', () => {
+  const invalidFee = buildStaffWithdrawalDraft({
+    customerId: 'cust_1',
+    customerName: 'Player One',
+    reviewerId: 'adm_1',
+    reviewerName: 'Admin One',
+    amount: 50,
+    feeAmount: 50,
+    method: 'cashapp',
+    methodName: 'Verified CashApp',
+    status: 'completed',
+  });
+  assert.equal(invalidFee.valid, false);
+
+  const completed = buildStaffWithdrawalDraft({
+    customerId: 'cust_1',
+    customerName: 'Player One',
+    reviewerId: 'adm_1',
+    reviewerName: 'Admin One',
+    amount: 200,
+    feeAmount: 5,
+    method: 'crypto',
+    methodName: 'Crypto USDT',
+    payoutHandle: 'TX_WALLET_123',
+    payoutReference: 'HASH_ABC',
+    sourceGameCatalogId: 'game_orion',
+    sourceGameName: 'Orion Stars',
+    sourceGameUsername: 'orion_88',
+    notes: 'Emergency chat cashout logged',
+    status: 'completed',
+    nowIso: '2026-11-17T13:00:00.000Z',
+    requestId: 'req_wdr_staff_1',
+  });
+
+  assert.equal(completed.valid, true);
+  assert.ok(completed.request);
+  assert.equal(completed.request.status, 'completed');
+  assert.equal(completed.request.netPayout, 195);
+  assert.equal(completed.request.payoutDetails.createdByStaff, true);
+  assert.equal(completed.request.payoutDetails.bypassedDepositLock, true);
+  assert.equal(completed.request.payoutDetails.cryptoAddress, 'TX_WALLET_123');
+  assert.equal(completed.request.payoutReference, 'HASH_ABC');
+  assert.equal(completed.chatTransactionData?.status, 'completed');
+  assert.equal(completed.chatTransactionData?.approvedBy, 'Admin One');
+
+  const pending = buildStaffWithdrawalDraft({
+    customerId: 'cust_1',
+    customerName: 'Player One',
+    reviewerId: 'adm_1',
+    reviewerName: 'Admin One',
+    amount: 80,
+    method: 'cashapp',
+    methodName: 'Verified CashApp',
+    payoutHandle: '$playerOne',
+    status: 'submitted',
+    requestId: 'req_wdr_staff_2',
+  });
+  assert.equal(pending.valid, true);
+  assert.equal(pending.request?.status, 'submitted');
+  assert.equal(pending.request?.payoutReference, undefined);
+  assert.equal(pending.chatTransactionData?.status, 'pending');
+
+  assert.equal(
+    computeCumulativeCompletedWithdrawals(
+      [completed.request!, pending.request!],
+      'cust_1'
+    ),
+    200
+  );
+});
+

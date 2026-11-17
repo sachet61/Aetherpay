@@ -12,6 +12,8 @@ import { dataService } from '../../services/dataService';
 import { realtimeChatHub } from '../../services/chatRealtime';
 import { mapDbMessageRowToChatMessage, sortAndDeduplicateMessages } from '../../services/chatOrderUtils';
 import { ChatTransactionCard } from '../../components/chat/ChatTransactionCard';
+import { AdminChatTopUpModal } from '../../components/chat/AdminChatTopUpModal';
+import { AdminChatCashoutModal } from '../../components/chat/AdminChatCashoutModal';
 import {
   Search,
   MessageSquare,
@@ -109,14 +111,6 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   const [assignedUsername, setAssignedUsername] = useState('');
   const [assignedPassword, setAssignedPassword] = useState('');
   const [gameIdNote, setGameIdNote] = useState('');
-
-  // Form states for Top-Up Assist inside chat
-  const [topUpAmount, setTopUpAmount] = useState('100');
-  const [topUpMethodName, setTopUpMethodName] = useState('Instant Gateway Credit');
-  const [topUpActionType, setTopUpActionType] = useState<'prompt' | 'credit'>('credit');
-
-  // Form states for Cashout Assist inside chat
-  const [cashoutActionNote, setCashoutActionNote] = useState('');
 
   const [feedbackToast, setFeedbackToast] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [requestsVersion, setRequestsVersion] = useState(0);
@@ -667,107 +661,25 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     }
   };
 
-  // Quick Action 2: Top-Up Assist directly from chat
+  // Quick Action 2: Top-Up Record & Assist directly from chat
   const handleOpenTopUpModal = () => {
-    setTopUpAmount('100');
-    setTopUpActionType('credit');
     setShowTopUpModal(true);
   };
 
-  const handleConfirmTopUpAction = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeConv) return;
-    const amountNum = parseFloat(topUpAmount);
-    if (isNaN(amountNum) || amountNum <= 0) {
-      alert('Please enter a valid amount.');
-      return;
-    }
-
-    if (topUpActionType === 'prompt') {
-      // Send an interactive prompt to the customer
-      dataService.sendChatMessage({
-        conversationId: activeConv.id,
-        senderId: currentUser.id,
-        senderName: currentUser.displayName,
-        senderRole: 'agent',
-        text: `Here is the expedited Top-Up link for $${amountNum.toFixed(2)}. Please click below to complete your deposit.`,
-        isInternalNote: false,
-      });
-    } else {
-      // Direct credit adjustment
-      const newReq = dataService.submitTopUp({
-        customerId: activeConv.customerId,
-        customerName: activeConv.customerName,
-        amount: amountNum,
-        method: 'manual_receipt',
-        methodName: 'Direct Support Desk Deposit',
-      });
-
-      if (newReq && newReq.id) {
-        dataService.approveTopUp({
-          requestId: newReq.id,
-          reviewerId: currentUser.id,
-          reviewerName: currentUser.displayName,
-          notes: 'Direct credited by customer care specialist in live support chat.',
-        });
-
-        dataService.sendChatMessage({
-          conversationId: activeConv.id,
-          senderId: currentUser.id,
-          senderName: currentUser.displayName,
-          senderRole: 'agent',
-          text: `💳 Verified Deposit Complete: $${amountNum.toFixed(2)} has been credited directly to your gaming wallet. Your updated balance is ready to use!`,
-          isInternalNote: false,
-        });
-      }
-    }
-
-    setRequestsVersion((v) => v + 1);
-    setShowTopUpModal(false);
-    setFeedbackToast({
-      text: `Top-Up action of $${amountNum.toFixed(2)} executed successfully!`,
-      type: 'success',
-    });
-    setTimeout(() => setFeedbackToast(null), 4000);
-  };
-
-  // Quick Action 3: Cashout Assist directly from chat
+  // Quick Action 3: Cashout Verification & Emergency Record directly from chat
   const handleOpenCashoutModal = () => {
-    setCashoutActionNote('');
     setShowCashoutModal(true);
   };
 
-  const handleApprovePendingCashoutInChat = async (req: WithdrawalRequest) => {
-    const res = await dataService.updateWithdrawalStatusAsync({
-      requestId: req.id,
-      newStatus: 'completed',
-      reviewerId: currentUser.id,
-      reviewerName: currentUser.displayName,
-      note: cashoutActionNote.trim() || 'Approved directly via Customer Care live chat',
-      payoutReference: `WIRE_${Date.now().toString().slice(-6)}`,
-    });
-
-    if (res.success) {
-      setRequestsVersion((v) => v + 1);
-      dataService.sendChatMessage({
-        conversationId: activeConv!.id,
-        senderId: currentUser.id,
-        senderName: currentUser.displayName,
-        senderRole: 'agent',
-        text: `💸 Cashout Approved! Your withdrawal request #${req.id} for $${req.amount.toFixed(2)} (${req.methodName}) has been processed and marked completed.`,
-        isInternalNote: false,
-      });
-
-      setShowCashoutModal(false);
-      setFeedbackToast({
-        text: `Withdrawal #${req.id} for $${req.amount.toFixed(2)} approved & completed!`,
-        type: 'success',
-      });
-      setTimeout(() => setFeedbackToast(null), 4000);
-    } else {
-      setFeedbackToast({ text: res.message, type: 'error' });
-      setTimeout(() => setFeedbackToast(null), 5000);
+  const handleModalTransactionSuccess = (toastText: string) => {
+    setRequestsVersion((v) => v + 1);
+    if (activeConv) {
+      setMessages(dataService.getMessages(activeConv.id));
     }
+    setShowTopUpModal(false);
+    setShowCashoutModal(false);
+    setFeedbackToast({ text: toastText, type: 'success' });
+    setTimeout(() => setFeedbackToast(null), 4000);
   };
 
   // Quick Action 4: Start New Chat with any customer
@@ -1694,229 +1606,39 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       )}
 
       {/* ======================================================== */}
-      {/* MODAL 2: TOP-UP ASSIST DIRECTLY FROM CHAT */}
+      {/* MODAL 2: TOP-UP RECORD & ASSIST DIRECTLY FROM CHAT */}
       {/* ======================================================== */}
       {showTopUpModal && activeConv && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setShowTopUpModal(false);
-          }}
-        >
-          <form
-            onSubmit={handleConfirmTopUpAction}
-            className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto max-h-[90vh] overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150"
-          >
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <ArrowDownToLine className="w-5 h-5 text-emerald-400" />
-                <div>
-                  <h3 className="text-base font-bold text-white">Top-Up Assistance</h3>
-                  <div className="text-[11px] text-slate-400">Player: {activeConv.customerName}</div>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowTopUpModal(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-                aria-label="Close modal"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div className="space-y-1">
-                <label className="text-slate-300 font-semibold">Deposit Amount ($ USD)</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-2 text-slate-400 font-mono">$</span>
-                  <input
-                    type="number"
-                    min="10"
-                    step="5"
-                    value={topUpAmount}
-                    onChange={(e) => setTopUpAmount(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-7 pr-3 py-2 text-white font-mono font-bold focus:outline-none focus:border-indigo-500"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-2 pt-1">
-                <label className="text-slate-300 font-semibold">Action Mode</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setTopUpActionType('credit')}
-                    className={`p-3 rounded-xl border text-left transition-colors ${
-                      topUpActionType === 'credit'
-                        ? 'bg-emerald-950/60 border-emerald-600 text-emerald-200'
-                        : 'bg-slate-950 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    <div className="font-bold text-xs text-white">Instant Credit</div>
-                    <div className="text-[10px] text-slate-400 mt-1">
-                      Directly add funds to player's wallet &amp; ledger
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setTopUpActionType('prompt')}
-                    className={`p-3 rounded-xl border text-left transition-colors ${
-                      topUpActionType === 'prompt'
-                        ? 'bg-indigo-950/60 border-indigo-600 text-indigo-200'
-                        : 'bg-slate-950 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    <div className="font-bold text-xs text-white">Send Deposit Prompt</div>
-                    <div className="text-[10px] text-slate-400 mt-1">
-                      Send clickable deposit form card to customer
-                    </div>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => setShowTopUpModal(false)}
-                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors shadow-lg shadow-emerald-600/20"
-              >
-                {topUpActionType === 'credit' ? 'Authorize & Credit Now' : 'Send Link to Chat'}
-              </button>
-            </div>
-          </form>
-        </div>
+        <AdminChatTopUpModal
+          customerId={canonicalCustomerId}
+          customerName={activeConv.customerName}
+          conversationId={activeConv.id}
+          currentUser={currentUser}
+          customerWallet={customerWallet}
+          customerGameAccounts={customerGameAccounts}
+          gameCatalog={gameCatalog}
+          onClose={() => setShowTopUpModal(false)}
+          onSuccess={handleModalTransactionSuccess}
+        />
       )}
 
       {/* ======================================================== */}
-      {/* MODAL 3: CASHOUT ASSIST DIRECTLY FROM CHAT */}
+      {/* MODAL 3: CASHOUT DESK & EMERGENCY RECORD FROM CHAT */}
       {/* ======================================================== */}
       {showCashoutModal && activeConv && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setShowCashoutModal(false);
-          }}
-        >
-          <div className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-5 sm:p-6 shadow-2xl my-auto max-h-[90vh] overflow-y-auto overscroll-contain space-y-4 animate-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <ArrowUpFromLine className="w-5 h-5 text-amber-400" />
-                <div>
-                  <h3 className="text-base font-bold text-white">Cashout Verification Desk</h3>
-                  <div className="text-[11px] text-slate-400">Player: {activeConv.customerName}</div>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowCashoutModal(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-                aria-label="Close modal"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Balances */}
-            <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between text-xs">
-              <div>
-                <span className="text-[10px] text-slate-400 uppercase">Available Balance</span>
-                <div className="text-base font-bold text-white font-mono">
-                  ${customerWallet?.availableBalance.toFixed(2)}
-                </div>
-              </div>
-              <div className="text-right">
-                <span className="text-[10px] text-slate-400 uppercase">Reserved In Vault</span>
-                <div className="text-base font-bold text-amber-400 font-mono">
-                  ${customerWallet?.reservedBalance.toFixed(2)}
-                </div>
-              </div>
-            </div>
-
-            {/* Check for pending cashout */}
-            {pendingWithdrawalForCustomer ? (
-              <div className="space-y-3">
-                <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-800/60 text-xs space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-amber-300">
-                      Pending Cashout #{pendingWithdrawalForCustomer.id.slice(-6)}
-                    </span>
-                    <span className="font-mono text-emerald-400 font-bold">
-                      ${pendingWithdrawalForCustomer.amount.toFixed(2)}
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-300">
-                    Method: {pendingWithdrawalForCustomer.methodName}
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-slate-300 font-semibold text-xs">Approval Wire Note</label>
-                  <input
-                    type="text"
-                    value={cashoutActionNote}
-                    onChange={(e) => setCashoutActionNote(e.target.value)}
-                    placeholder="e.g. Wire verified via bank portal"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div className="flex items-center gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowCashoutModal(false)}
-                    className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition-colors"
-                  >
-                    Close
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleApprovePendingCashoutInChat(pendingWithdrawalForCustomer)}
-                    className="flex-1 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition-colors shadow-lg shadow-amber-500/20"
-                  >
-                    Authorize &amp; Complete Payout
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-4 text-xs">
-                <div className="p-4 text-center rounded-xl bg-slate-950 border border-slate-800 text-slate-400 space-y-1">
-                  <div className="font-medium text-white">No pending cashouts for this player.</div>
-                  <p className="text-[11px] text-slate-500">
-                    You can send a cashout invitation to the player so they can submit a withdrawal request.
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    dataService.sendChatMessage({
-                      conversationId: activeConv.id,
-                      senderId: currentUser.id,
-                      senderName: currentUser.displayName,
-                      senderRole: 'agent',
-                      text: `You have $${customerWallet?.availableBalance.toFixed(2)} available for cashout. Would you like to initiate a bank wire, crypto payout, or e-wallet cashout?`,
-                      isInternalNote: false,
-                    });
-                    setShowCashoutModal(false);
-                    setFeedbackToast({ text: 'Cashout inquiry sent to player.', type: 'info' });
-                  }}
-                  className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition-colors shadow-lg shadow-amber-500/20"
-                >
-                  Send Cashout Link to Player
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
+        <AdminChatCashoutModal
+          customerId={canonicalCustomerId}
+          customerName={activeConv.customerName}
+          customerProfile={customerProfile}
+          conversationId={activeConv.id}
+          currentUser={currentUser}
+          customerWallet={customerWallet}
+          customerGameAccounts={customerGameAccounts}
+          gameCatalog={gameCatalog}
+          customerWithdrawals={customerWithdrawals}
+          onClose={() => setShowCashoutModal(false)}
+          onSuccess={handleModalTransactionSuccess}
+        />
       )}
 
       {/* ======================================================== */}

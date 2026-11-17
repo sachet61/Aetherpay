@@ -58,7 +58,11 @@ import {
   findRequestById,
 } from './requestSyncUtils';
 import {
+  buildStaffTopUpDraft,
+  buildStaffWithdrawalDraft,
   computeCumulativeCompletedDeposits,
+  computeCumulativeCompletedWithdrawals,
+  getDefaultBonusPercentageForMethod,
   mapDbWalletRowToWallet,
   mergeWalletTransactions,
   reconcileWalletWithTopups,
@@ -4063,6 +4067,531 @@ class DataService {
     }
 
     return res;
+  }
+
+  public async createStaffTopUpAsync(params: {
+    customerId: string;
+    customerName: string;
+    reviewerId: string;
+    reviewerName: string;
+    amount: number;
+    bonusPercentage?: number;
+    method: PaymentMethodType;
+    methodName: string;
+    targetGameCatalogId?: string;
+    targetGameName?: string;
+    targetGameUsername?: string;
+    providerRef?: string;
+    receiptUrl?: string;
+    receiptName?: string;
+    notes?: string;
+    status: 'completed' | 'submitted';
+    postToChat: boolean;
+  }): Promise<{ success: boolean; message: string; request?: TopUpRequest }> {
+    const config = this.getAppConfig();
+    const pm = config.paymentMethods.find((m) => m.type === params.method);
+    const resolvedBonusPct =
+      params.bonusPercentage !== undefined
+        ? params.bonusPercentage
+        : getDefaultBonusPercentageForMethod(params.method, config.paymentMethods);
+
+    const draft = buildStaffTopUpDraft({
+      customerId: params.customerId,
+      customerName: params.customerName,
+      reviewerId: params.reviewerId,
+      reviewerName: params.reviewerName,
+      amount: params.amount,
+      bonusPercentage: resolvedBonusPct,
+      feePercentage: pm?.feePercentage || 0,
+      method: params.method,
+      methodName: params.methodName,
+      targetGameCatalogId: params.targetGameCatalogId,
+      targetGameName: params.targetGameName,
+      targetGameUsername: params.targetGameUsername,
+      providerRef: params.providerRef,
+      receiptUrl: params.receiptUrl,
+      receiptName: params.receiptName,
+      notes: params.notes,
+      status: params.status,
+      currency: config.currency,
+    });
+
+    if (!draft.valid || !draft.request || !draft.chatTransactionData) {
+      return { success: false, message: draft.error || 'Invalid top-up parameters.' };
+    }
+
+    const newReq = draft.request;
+    const isCompleted = newReq.status === 'completed';
+
+    if (isSupabaseConfigured() && supabase) {
+      const { error: topupErr } = await supabase.from('topups').upsert({
+        id: newReq.id,
+        customer_id: newReq.customerId,
+        customer_name: newReq.customerName,
+        amount: newReq.amount,
+        bonus_amount: newReq.bonusAmount || 0,
+        payment_method_id: newReq.method || 'manual_receipt',
+        payment_method_name: newReq.methodName || 'Direct Support Desk',
+        status: newReq.status,
+        proof_url: newReq.receiptUrl || null,
+        target_game_name: newReq.targetGameName || null,
+        target_game_account_id: newReq.targetGameCatalogId || null,
+        customer_notes: newReq.providerRef || null,
+        reviewer_id: newReq.reviewerId || null,
+        reviewer_name: newReq.reviewerName || null,
+        review_notes: newReq.reviewNotes || null,
+        created_at: newReq.createdAt,
+        updated_at: newReq.updatedAt,
+      });
+
+      if (topupErr) {
+        console.warn('createStaffTopUpAsync Supabase error:', topupErr);
+        return {
+          success: false,
+          message: `Failed to save top-up to database: ${topupErr.message}`,
+        };
+      }
+    }
+
+    // Update topups cache & local storage
+    const allReqs = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
+    allReqs.unshift(newReq);
+    this.cache[STORAGE_KEYS.TOPUPS] = allReqs;
+    this.saveToLocalStorage(STORAGE_KEYS.TOPUPS, allReqs);
+
+    // Update customer wallet cleanly
+    const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
+    const baseWallet = wallets[params.customerId] || {
+      customerId: params.customerId,
+      currency: config.currency,
+      availableBalance: 0,
+      referralBonusBalance: 0,
+      reservedBalance: 0,
+      pendingDepositBalance: 0,
+      lastTopUpAmount: 0,
+      totalDeposited: 0,
+      totalWithdrawn: 0,
+      lastUpdatedAt: newReq.updatedAt,
+    };
+
+    if (isCompleted) {
+      baseWallet.lastTopUpAmount = newReq.finalWalletCredit || newReq.amount;
+      baseWallet.lastTopUpGame = newReq.targetGameName || baseWallet.lastTopUpGame;
+      baseWallet.lastTopUpAt = newReq.updatedAt;
+      baseWallet.totalDeposited = Math.max(
+        baseWallet.totalDeposited || 0,
+        computeCumulativeCompletedDeposits(allReqs, params.customerId)
+      );
+    } else {
+      baseWallet.pendingDepositBalance = Number(
+        ((baseWallet.pendingDepositBalance || 0) + newReq.amount).toFixed(2)
+      );
+    }
+    baseWallet.lastUpdatedAt = newReq.updatedAt;
+    const reconciledWallet = reconcileWalletWithTopups(baseWallet, allReqs, {
+      authoritativeTopupsLoaded: true,
+    });
+    wallets[params.customerId] = reconciledWallet;
+    this.cache[STORAGE_KEYS.WALLETS] = wallets;
+    this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
+
+    if (isSupabaseConfigured() && supabase) {
+      const { error: walletErr } = await supabase.from('wallets').upsert({
+        customer_id: params.customerId,
+        balance: reconciledWallet.availableBalance || 0,
+        pending_withdrawal: reconciledWallet.reservedBalance || 0,
+        pending_deposit: reconciledWallet.pendingDepositBalance || 0,
+        total_deposited: reconciledWallet.totalDeposited || 0,
+        total_withdrawn: reconciledWallet.totalWithdrawn || 0,
+        currency: reconciledWallet.currency || 'USD',
+        updated_at: newReq.updatedAt,
+      });
+      if (walletErr) {
+        console.warn('createStaffTopUpAsync wallet sync warning:', walletErr);
+      }
+    }
+
+    if (isCompleted) {
+      if (newReq.targetGameCatalogId) {
+        const allAccounts = this.getGameAccounts();
+        const gameAcc = allAccounts.find(
+          (a) =>
+            a.customerId === params.customerId &&
+            (a.gameCatalogId === newReq.targetGameCatalogId ||
+              (newReq.targetGameName &&
+                a.gameName?.toLowerCase() === newReq.targetGameName.toLowerCase()))
+        );
+        if (gameAcc) {
+          gameAcc.balance = (gameAcc.balance || 0) + (newReq.finalWalletCredit || newReq.amount);
+          gameAcc.updatedAt = newReq.updatedAt;
+          this.save(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
+        }
+      }
+
+      const nowTs = newReq.updatedAt;
+      const allTxs = this.load<WalletTransaction[]>(STORAGE_KEYS.TRANSACTIONS, INITIAL_TRANSACTIONS);
+      const createdTxs: WalletTransaction[] = [
+        {
+          id: `tx_dep_${newReq.id}`,
+          customerId: params.customerId,
+          type: 'deposit',
+          amount: newReq.amount,
+          fee: newReq.feeAmount || 0,
+          netAmount: newReq.amount,
+          currency: config.currency,
+          balanceAfter: reconciledWallet.availableBalance,
+          targetGameName: newReq.targetGameName,
+          targetGameUsername: newReq.targetGameUsername,
+          relatedRequestId: newReq.id,
+          description: newReq.targetGameName
+            ? `Staff Logged Top-Up to ${newReq.targetGameName}${newReq.targetGameUsername ? ` (${newReq.targetGameUsername})` : ''} via ${newReq.methodName}`
+            : `Staff Logged ${newReq.methodName} Deposit`,
+          idempotencyKey: `idemp_dep_${newReq.id}`,
+          status: 'completed',
+          createdAt: nowTs,
+        },
+      ];
+
+      if ((newReq.bonusAmount || 0) > 0) {
+        createdTxs.push({
+          id: `tx_bns_${newReq.id}`,
+          customerId: params.customerId,
+          type: 'bonus',
+          amount: newReq.bonusAmount || 0,
+          fee: 0,
+          netAmount: newReq.bonusAmount || 0,
+          currency: config.currency,
+          balanceAfter: reconciledWallet.availableBalance,
+          targetGameName: newReq.targetGameName,
+          relatedRequestId: newReq.id,
+          description: `Promo Bonus (${newReq.bonusPercentage || 0}%) Credited by Staff`,
+          idempotencyKey: `idemp_bns_${newReq.id}`,
+          status: 'completed',
+          createdAt: nowTs,
+        });
+      }
+
+      const nextTxs = [...createdTxs, ...allTxs];
+      this.cache[STORAGE_KEYS.TRANSACTIONS] = nextTxs;
+      this.saveToLocalStorage(STORAGE_KEYS.TRANSACTIONS, nextTxs);
+
+      if (isSupabaseConfigured() && supabase) {
+        const txRows = createdTxs.map((t) => ({
+          id: t.id,
+          customer_id: t.customerId,
+          amount: t.amount,
+          type: t.type,
+          status: t.status,
+          description: t.description,
+          reference_id: t.relatedRequestId || null,
+          game_name: t.targetGameName || null,
+          created_at: t.createdAt,
+        }));
+        const { error: txErr } = await supabase.from('transactions').upsert(txRows);
+        if (txErr) {
+          console.warn('createStaffTopUpAsync transactions upsert warning:', txErr);
+        }
+      }
+
+      this.checkAndAwardReferral(params.customerId, newReq.amount);
+    }
+
+    this.logAudit({
+      actorId: params.reviewerId,
+      actorName: params.reviewerName,
+      actorRole: 'agent',
+      action: isCompleted ? 'STAFF_TOPUP_LOGGED_COMPLETED' : 'STAFF_TOPUP_LOGGED_PENDING',
+      entityType: 'topup',
+      entityId: newReq.id,
+      details: `${isCompleted ? 'Logged completed' : 'Created pending'} top-up of $${newReq.amount.toFixed(2)} (+$${(newReq.bonusAmount || 0).toFixed(2)} bonus) for ${params.customerName}${newReq.targetGameName ? ` on ${newReq.targetGameName}` : ''}. Note: ${newReq.reviewNotes}`,
+    });
+
+    if (params.postToChat) {
+      const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
+      const bonusSummary =
+        (newReq.bonusAmount || 0) > 0
+          ? ` + $${(newReq.bonusAmount || 0).toFixed(2)} Bonus (${newReq.bonusPercentage}%) = $${(newReq.finalWalletCredit || newReq.amount).toFixed(2)} Total`
+          : '';
+      this.sendChatMessage({
+        conversationId: conv.id,
+        senderId: params.reviewerId,
+        senderName: params.reviewerName,
+        senderRole: 'agent',
+        text: isCompleted
+          ? `💳 Verified Deposit Logged (#${newReq.id.slice(-6)}): $${newReq.amount.toFixed(2)}${bonusSummary} via ${newReq.methodName}${newReq.targetGameName ? ` -> ${newReq.targetGameName}` : ''}.`
+          : `🎮 Deposit Request Created (#${newReq.id.slice(-6)}): $${newReq.amount.toFixed(2)}${bonusSummary} via ${newReq.methodName}${newReq.targetGameName ? ` -> ${newReq.targetGameName}` : ''}. Status: PENDING VERIFICATION.`,
+        attachmentUrl: newReq.receiptUrl,
+        attachmentName: newReq.receiptName,
+        isInternalNote: false,
+        transactionData: draft.chatTransactionData,
+      });
+
+      this.createNotification({
+        userId: params.customerId,
+        title: isCompleted ? 'Deposit Logged & Credited' : 'Deposit Request Created',
+        message: isCompleted
+          ? `$${(newReq.finalWalletCredit || newReq.amount).toFixed(2)} has been credited${newReq.targetGameName ? ` to ${newReq.targetGameName}` : ''}.`
+          : `A deposit request of $${newReq.amount.toFixed(2)} was created for your review.`,
+        type: 'topup',
+        linkTab: 'wallet',
+        linkRequestId: newReq.id,
+      });
+
+      if (isCompleted && typeof window !== 'undefined') {
+        webPushClient
+          .dispatchPushAlert({
+            recipientId: params.customerId,
+            recipientRole: 'customer',
+            title: '💳 Deposit Credited!',
+            body: `$${(newReq.finalWalletCredit || newReq.amount).toFixed(2)} credited${newReq.targetGameName ? ` to ${newReq.targetGameName}` : ''}.`,
+            url: '/#wallet',
+            tag: `topup_${newReq.id}`,
+            actionType: 'deposit',
+          })
+          .catch(() => {});
+      }
+    }
+
+    window.dispatchEvent(
+      new CustomEvent('aetherpay_state_changed', {
+        detail: { key: isCompleted ? 'topup_approved' : 'topup_submitted', requestId: newReq.id },
+      })
+    );
+
+    return {
+      success: true,
+      message: isCompleted
+        ? `Completed deposit of $${(newReq.finalWalletCredit || newReq.amount).toFixed(2)} saved.`
+        : `Pending deposit request of $${newReq.amount.toFixed(2)} created.`,
+      request: newReq,
+    };
+  }
+
+  public async createStaffWithdrawalAsync(params: {
+    customerId: string;
+    customerName: string;
+    reviewerId: string;
+    reviewerName: string;
+    amount: number;
+    feeAmount?: number;
+    method: PayoutMethodType | string;
+    methodName: string;
+    payoutHandle?: string;
+    payoutReference?: string;
+    sourceGameCatalogId?: string;
+    sourceGameName?: string;
+    sourceGameUsername?: string;
+    notes?: string;
+    status: 'completed' | 'submitted';
+    postToChat: boolean;
+  }): Promise<{ success: boolean; message: string; request?: WithdrawalRequest }> {
+    const config = this.getAppConfig();
+    const draft = buildStaffWithdrawalDraft({
+      customerId: params.customerId,
+      customerName: params.customerName,
+      reviewerId: params.reviewerId,
+      reviewerName: params.reviewerName,
+      amount: params.amount,
+      feeAmount: params.feeAmount,
+      method: params.method,
+      methodName: params.methodName,
+      payoutHandle: params.payoutHandle,
+      payoutReference: params.payoutReference,
+      sourceGameCatalogId: params.sourceGameCatalogId,
+      sourceGameName: params.sourceGameName,
+      sourceGameUsername: params.sourceGameUsername,
+      notes: params.notes,
+      status: params.status,
+      currency: config.currency,
+    });
+
+    if (!draft.valid || !draft.request || !draft.chatTransactionData) {
+      return { success: false, message: draft.error || 'Invalid cashout parameters.' };
+    }
+
+    const newReq = draft.request;
+    const isCompleted = newReq.status === 'completed';
+
+    if (isSupabaseConfigured() && supabase) {
+      const { error: wdrErr } = await supabase.from('withdrawals').upsert({
+        id: newReq.id,
+        customer_id: newReq.customerId,
+        customer_name: newReq.customerName,
+        amount: newReq.amount,
+        fee: newReq.feeAmount || 0,
+        net_amount: newReq.netPayout,
+        payout_method_id: newReq.method || 'manual_support',
+        payout_method_name: newReq.methodName || 'Customer Support Manual Payout',
+        payout_details: newReq.payoutDetails || {},
+        status: newReq.status,
+        reviewer_id: newReq.reviewerId || null,
+        reviewer_name: newReq.reviewerName || null,
+        review_notes: newReq.reviewNotes || null,
+        transaction_hash: newReq.payoutReference || null,
+        created_at: newReq.createdAt,
+        updated_at: newReq.updatedAt,
+      });
+
+      if (wdrErr) {
+        console.warn('createStaffWithdrawalAsync Supabase error:', wdrErr);
+        return {
+          success: false,
+          message: `Failed to save cashout to database: ${wdrErr.message}`,
+        };
+      }
+    }
+
+    const allReqs = this.load<WithdrawalRequest[]>(STORAGE_KEYS.WITHDRAWALS, INITIAL_WITHDRAWALS);
+    allReqs.unshift(newReq);
+    this.cache[STORAGE_KEYS.WITHDRAWALS] = allReqs;
+    this.saveToLocalStorage(STORAGE_KEYS.WITHDRAWALS, allReqs);
+
+    const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
+    const wallet = wallets[params.customerId] || {
+      customerId: params.customerId,
+      currency: config.currency,
+      availableBalance: 0,
+      referralBonusBalance: 0,
+      reservedBalance: 0,
+      pendingDepositBalance: 0,
+      lastTopUpAmount: 0,
+      totalDeposited: 0,
+      totalWithdrawn: 0,
+      lastUpdatedAt: newReq.updatedAt,
+    };
+
+    if (isCompleted) {
+      wallet.totalWithdrawn = Math.max(
+        wallet.totalWithdrawn || 0,
+        computeCumulativeCompletedWithdrawals(allReqs, params.customerId)
+      );
+    }
+    wallet.lastUpdatedAt = newReq.updatedAt;
+    wallets[params.customerId] = wallet;
+    this.cache[STORAGE_KEYS.WALLETS] = wallets;
+    this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
+
+    if (isSupabaseConfigured() && supabase) {
+      const { error: walletErr } = await supabase.from('wallets').upsert({
+        customer_id: params.customerId,
+        balance: wallet.availableBalance || 0,
+        pending_withdrawal: wallet.reservedBalance || 0,
+        pending_deposit: wallet.pendingDepositBalance || 0,
+        total_deposited: wallet.totalDeposited || 0,
+        total_withdrawn: wallet.totalWithdrawn || 0,
+        currency: wallet.currency || 'USD',
+        updated_at: newReq.updatedAt,
+      });
+      if (walletErr) {
+        console.warn('createStaffWithdrawalAsync wallet sync warning:', walletErr);
+      }
+    }
+
+    const allTxs = this.load<WalletTransaction[]>(STORAGE_KEYS.TRANSACTIONS, INITIAL_TRANSACTIONS);
+    const ledgerTx: WalletTransaction = {
+      id: `tx_wdr_${newReq.id}`,
+      customerId: params.customerId,
+      type: isCompleted ? 'withdrawal' : 'withdrawal_hold',
+      amount: newReq.amount,
+      fee: newReq.feeAmount || 0,
+      netAmount: newReq.netPayout,
+      currency: config.currency,
+      balanceAfter: wallet.availableBalance,
+      targetGameName: newReq.sourceGameName,
+      targetGameUsername: newReq.sourceGameUsername,
+      relatedRequestId: newReq.id,
+      description: isCompleted
+        ? `Staff Logged Cashout Paid Out via ${newReq.methodName}${newReq.payoutReference ? ` (${newReq.payoutReference})` : ''}`
+        : `Staff Created Cashout Request #${newReq.id.slice(-6)}${newReq.sourceGameName ? ` from ${newReq.sourceGameName}` : ''}`,
+      idempotencyKey: isCompleted ? `idemp_wdr_final_${newReq.id}` : `idemp_wdr_${newReq.id}`,
+      status: isCompleted ? 'completed' : 'pending',
+      createdAt: newReq.updatedAt,
+    };
+
+    const nextTxs = [ledgerTx, ...allTxs];
+    this.cache[STORAGE_KEYS.TRANSACTIONS] = nextTxs;
+    this.saveToLocalStorage(STORAGE_KEYS.TRANSACTIONS, nextTxs);
+
+    if (isSupabaseConfigured() && supabase) {
+      const { error: txErr } = await supabase.from('transactions').upsert({
+        id: ledgerTx.id,
+        customer_id: ledgerTx.customerId,
+        amount: ledgerTx.amount,
+        type: ledgerTx.type,
+        status: ledgerTx.status,
+        description: ledgerTx.description,
+        reference_id: ledgerTx.relatedRequestId || null,
+        game_name: ledgerTx.targetGameName || null,
+        created_at: ledgerTx.createdAt,
+      });
+      if (txErr) {
+        console.warn('createStaffWithdrawalAsync transaction upsert warning:', txErr);
+      }
+    }
+
+    this.logAudit({
+      actorId: params.reviewerId,
+      actorName: params.reviewerName,
+      actorRole: 'agent',
+      action: isCompleted ? 'STAFF_WITHDRAWAL_LOGGED_COMPLETED' : 'STAFF_WITHDRAWAL_LOGGED_PENDING',
+      entityType: 'withdrawal',
+      entityId: newReq.id,
+      details: `${isCompleted ? 'Logged completed' : 'Created pending'} emergency cashout of $${newReq.amount.toFixed(2)} (Net $${newReq.netPayout.toFixed(2)}) via ${newReq.methodName} for ${params.customerName}. Bypassed deposit lock. Note: ${newReq.reviewNotes}`,
+    });
+
+    if (params.postToChat) {
+      const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
+      this.sendChatMessage({
+        conversationId: conv.id,
+        senderId: params.reviewerId,
+        senderName: params.reviewerName,
+        senderRole: 'agent',
+        text: isCompleted
+          ? `💸 Cashout Completed (#${newReq.id.slice(-6)}): $${newReq.amount.toFixed(2)} via ${newReq.methodName}${newReq.payoutReference ? ` (Ref: ${newReq.payoutReference})` : ''}.`
+          : `💸 Cashout Request Created (#${newReq.id.slice(-6)}): $${newReq.amount.toFixed(2)} via ${newReq.methodName}. Status: PENDING PAYOUT.`,
+        isInternalNote: false,
+        transactionData: draft.chatTransactionData,
+      });
+
+      this.createNotification({
+        userId: params.customerId,
+        title: isCompleted ? 'Cashout Logged & Completed' : 'Cashout Request Created',
+        message: isCompleted
+          ? `Your cashout of $${newReq.netPayout.toFixed(2)} via ${newReq.methodName} has been recorded as completed.`
+          : `A cashout request of $${newReq.amount.toFixed(2)} via ${newReq.methodName} was created for review.`,
+        type: 'withdrawal',
+        linkTab: 'wallet',
+        linkRequestId: newReq.id,
+      });
+
+      if (isCompleted && typeof window !== 'undefined') {
+        webPushClient
+          .dispatchPushAlert({
+            recipientId: params.customerId,
+            recipientRole: 'customer',
+            title: '💸 Payout Recorded & Completed!',
+            body: `Your $${newReq.netPayout.toFixed(2)} cashout via ${newReq.methodName} is complete.`,
+            url: '/#wallet',
+            tag: `wdr_comp_${newReq.id}`,
+            actionType: 'payout',
+          })
+          .catch(() => {});
+      }
+    }
+
+    window.dispatchEvent(
+      new CustomEvent('aetherpay_state_changed', {
+        detail: { key: 'withdrawal_updated', requestId: newReq.id },
+      })
+    );
+
+    return {
+      success: true,
+      message: isCompleted
+        ? `Completed cashout of $${newReq.amount.toFixed(2)} logged.`
+        : `Pending cashout request of $${newReq.amount.toFixed(2)} created.`,
+      request: newReq,
+    };
   }
 
   // Cashout / Withdrawal Workflow
