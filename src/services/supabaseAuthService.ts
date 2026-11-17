@@ -159,6 +159,7 @@ class SupabaseAuthService {
             userProfile.role,
             userProfile.emailVerified
           );
+          void dataService.hydrateForSession(userProfile);
         }
       });
 
@@ -248,6 +249,7 @@ class SupabaseAuthService {
                 userProfile.role,
                 userProfile.emailVerified
               );
+              void dataService.hydrateForSession(userProfile);
             }
           }
         })
@@ -494,6 +496,7 @@ class SupabaseAuthService {
         userProfile.role,
         userProfile.emailVerified
       );
+      void dataService.hydrateForSession(userProfile, { force: true });
 
       return { success: true, user: userProfile };
     } catch (err: any) {
@@ -756,8 +759,10 @@ class SupabaseAuthService {
         userProfile.id,
         userProfile.email,
         userProfile.displayName,
-        userProfile.role
+        userProfile.role,
+        userProfile.emailVerified
       );
+      void dataService.hydrateForSession(userProfile, { force: true });
 
       // Check referral qualification on email verification
       try {
@@ -878,16 +883,24 @@ class SupabaseAuthService {
       await supabase.from('users').upsert(upsertData);
 
       const wallet = dataService.getWallet(profile.id);
-      if (wallet) {
-        await supabase.from('wallets').upsert({
-          customer_id: profile.id,
-          balance: wallet.availableBalance,
-          pending_withdrawal: wallet.reservedBalance,
-          pending_deposit: wallet.pendingDepositBalance,
-          total_deposited: wallet.lastTopUpAmount || 0,
-          total_withdrawn: 0,
-          currency: wallet.currency || 'USD',
-        });
+      if (wallet && supabase && isSupabaseConfigured()) {
+        const { data: existingWallet } = await supabase
+          .from('wallets')
+          .select('customer_id')
+          .eq('customer_id', profile.id)
+          .maybeSingle();
+
+        if (!existingWallet) {
+          await supabase.from('wallets').insert({
+            customer_id: profile.id,
+            balance: wallet.availableBalance || 0,
+            pending_withdrawal: wallet.reservedBalance || 0,
+            pending_deposit: wallet.pendingDepositBalance || 0,
+            total_deposited: wallet.totalDeposited || 0,
+            total_withdrawn: wallet.totalWithdrawn || 0,
+            currency: wallet.currency || 'USD',
+          });
+        }
       }
     } catch (err) {
       console.warn('Supabase profile sync notice:', err);

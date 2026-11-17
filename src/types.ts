@@ -57,11 +57,17 @@ export interface WalletTransaction {
   amount?: number;
   fee?: number;
   netAmount?: number;
+  currency?: string;
+  balanceAfter?: number;
   type?: TransactionType;
-  status?: 'completed' | 'pending' | 'failed' | 'cancelled' | string;
+  status?: 'completed' | 'pending' | 'failed' | 'cancelled' | 'reversed' | string;
   description?: string;
+  relatedRequestId?: string;
   referenceId?: string;
   gameName?: string;
+  targetGameName?: string;
+  targetGameUsername?: string;
+  idempotencyKey?: string;
   createdAt?: string;
   [key: string]: any;
 }
@@ -87,6 +93,7 @@ export type PayoutMethodType =
 
 export type WithdrawalStatus =
   | 'pending'
+  | 'pending_verification'
   | 'submitted'
   | 'processing'
   | 'approved'
@@ -102,13 +109,23 @@ export interface TopUpRequest {
   amount: number;
   currency?: string;
   bonusAmount?: number;
+  bonusPercentage?: number;
+  feeAmount?: number;
+  finalWalletCredit?: number;
   paymentMethodId?: string;
   paymentMethodName?: string;
   method?: string;
-  status?: 'pending' | 'submitted' | 'verifying' | 'approved' | 'rejected' | 'completed' | string;
+  methodName?: string;
+  status?: 'pending' | 'submitted' | 'verifying' | 'approved' | 'rejected' | 'completed' | 'cancelled' | string;
   proofUrl?: string;
+  receiptUrl?: string;
+  receiptName?: string;
+  providerRef?: string;
+  cryptoTxHash?: string;
   targetGameName?: string;
+  targetGameCatalogId?: string;
   targetGameAccountId?: string;
+  targetGameUsername?: string;
   customerNotes?: string;
   reviewerId?: string;
   reviewerName?: string;
@@ -128,16 +145,28 @@ export interface WithdrawalRequest {
   feeAmount?: number;
   netAmount?: number;
   netPayout?: number;
+  reservedAmount?: number;
   payoutMethodId?: string;
   payoutMethodName?: string;
   method?: string;
   methodName?: string;
+  sourceGameCatalogId?: string;
+  sourceGameName?: string;
+  sourceGameUsername?: string;
+  playerNotes?: string;
   payoutDetails?: any;
   status?: WithdrawalStatus;
   reviewerId?: string;
   reviewerName?: string;
   reviewNotes?: string;
+  payoutReference?: string;
   transactionHash?: string;
+  timeline?: Array<{
+    status: string;
+    note: string;
+    timestamp: string;
+    actorName: string;
+  }>;
   createdAt?: string;
   updatedAt?: string;
   [key: string]: any;

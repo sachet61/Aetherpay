@@ -1,8 +1,13 @@
-import React from 'react';
-import { UserProfile, UserWallet, GameCatalogItem } from '../../types';
+import React, { useEffect, useMemo, useRef } from 'react';
+import { UserProfile, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
 import { resolveGameImageUrl } from '../../utils/imageUtils';
 import { LiveCashoutFeedList } from '../../components/common/LiveCashoutFeedList';
+import {
+  buildUnifiedWalletActivity,
+  getActivityStatusMeta,
+  resolveDashboardTopUpDisplay,
+} from '../../services/walletActivityUtils';
 import {
   Wallet,
   ArrowDownToLine,
@@ -35,17 +40,45 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   onNavigateTab,
 }) => {
   const [copiedRef, setCopiedRef] = React.useState(false);
-  const transactions = dataService.getTransactions(currentUser.id).slice(0, 5);
-  const pendingTopUps = dataService.getTopUpRequests(currentUser.id).filter((r) => r.status === 'verifying' || r.status === 'submitted');
-  const activeWithdrawals = dataService.getWithdrawalRequests(currentUser.id).filter((r) => r.status === 'submitted' || r.status === 'processing');
+  const hydratedAccountsForRef = useRef<string | null>(null);
+
+  const topups = dataService.getTopUpRequests(currentUser.id);
+  const withdrawals = dataService.getWithdrawalRequests(currentUser.id);
+  const transactions = dataService.getTransactions(currentUser.id);
   const gameAccounts = dataService.getGameAccounts(currentUser.id);
+
+  useEffect(() => {
+    if (
+      gameAccounts.length === 0 &&
+      !dataService.getIsHydrating() &&
+      hydratedAccountsForRef.current !== currentUser.id
+    ) {
+      hydratedAccountsForRef.current = currentUser.id;
+      void dataService.fetchGameAccountsFromDb(currentUser.id);
+    }
+  }, [currentUser.id, gameAccounts.length]);
+
+  const recentActivity = useMemo(
+    () =>
+      buildUnifiedWalletActivity({
+        customerId: currentUser.id,
+        topups,
+        withdrawals,
+        transactions,
+      }).slice(0, 5),
+    [currentUser.id, topups, withdrawals, transactions]
+  );
+
+  const pendingTopUps = topups.filter((r) => r.status === 'verifying' || r.status === 'submitted');
+  const activeWithdrawals = withdrawals.filter(
+    (r) => r.status === 'submitted' || r.status === 'processing' || r.status === 'pending_verification'
+  );
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
   const referralSummary = dataService.getReferralSummary(currentUser.id);
   const conversation = dataService.getConversations().find((c) => c.customerId === currentUser.id);
-  const completedTopUps = dataService.getTopUpRequests(currentUser.id).filter((r) => r.status === 'completed');
-  const latestCompletedTopUp = completedTopUps[0];
-  const displayTopUpAmount = wallet.lastTopUpAmount || latestCompletedTopUp?.finalWalletCredit || latestCompletedTopUp?.amount || 0;
-  const displayTopUpGame = wallet.lastTopUpGame || latestCompletedTopUp?.targetGameName || 'Orion Stars Elite';
+  const topUpDisplay = resolveDashboardTopUpDisplay(wallet, topups, currentUser.id);
+  const displayTopUpAmount = topUpDisplay.amount;
+  const displayTopUpGame = topUpDisplay.gameName;
 
   const handleCopyReferral = () => {
     navigator.clipboard.writeText(referralSummary.referralLink);
@@ -91,8 +124,14 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
                 <Gamepad2 className="w-3.5 h-3.5 text-amber-400" />
                 <span>Latest Top-Up Amount</span>
               </span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950/80 border border-emerald-700/60 text-emerald-400 font-semibold font-mono">
-                Game Loaded
+              <span
+                className={`text-[10px] px-1.5 py-0.5 rounded font-semibold font-mono border ${
+                  topUpDisplay.hasCompletedTopUp
+                    ? 'bg-emerald-950/80 border-emerald-700/60 text-emerald-400'
+                    : 'bg-slate-900 border-slate-700 text-slate-400'
+                }`}
+              >
+                {topUpDisplay.hasCompletedTopUp ? 'Game Loaded' : 'Awaiting Top-Up'}
               </span>
             </div>
 
@@ -100,9 +139,28 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
               ${displayTopUpAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
 
-            <div className="text-[11px] text-slate-300 flex items-center gap-1 font-medium">
-              <span className="text-slate-400">Target Game:</span>
-              <span className="text-amber-300 font-bold">{displayTopUpGame}</span>
+            {topUpDisplay.hasCompletedTopUp && topUpDisplay.bonusAmount > 0 && (
+              <div className="text-[11px] font-mono text-slate-400">
+                ${topUpDisplay.baseAmount.toFixed(2)} deposit +{' '}
+                <span className="text-amber-300">${topUpDisplay.bonusAmount.toFixed(2)} bonus</span>
+              </div>
+            )}
+
+            <div className="text-[11px] text-slate-300 flex items-center justify-between gap-2 font-medium">
+              <div className="flex items-center gap-1 truncate">
+                <span className="text-slate-400">Target Game:</span>
+                <span className={displayTopUpGame ? 'text-amber-300 font-bold' : 'text-slate-500'}>
+                  {displayTopUpGame || 'No completed deposit yet'}
+                </span>
+              </div>
+              {topUpDisplay.completedAt && (
+                <span className="text-[10px] font-mono text-slate-500 shrink-0">
+                  {new Date(topUpDisplay.completedAt).toLocaleDateString([], {
+                    month: 'short',
+                    day: 'numeric',
+                  })}
+                </span>
+              )}
             </div>
 
             <p className="text-[10px] text-slate-400 leading-snug bg-[#0A0F1D]/80 p-2 rounded-lg border border-slate-800/80">
@@ -204,7 +262,12 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
         {/* Game Platforms Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {gameCatalog.map((game) => {
-            const userAccount = gameAccounts.find((ga) => ga.gameCatalogId === game.id);
+            const userAccount = gameAccounts.find(
+              (ga) =>
+                ga.gameCatalogId === game.id ||
+                ga.gameId === game.id ||
+                (ga.gameName || '').toLowerCase().trim() === (game.title || '').toLowerCase().trim()
+            );
             const playLinks = game.links && game.links.length > 0
               ? game.links
               : [{ label: 'Web Play', url: game.gameUrl }];
@@ -270,31 +333,50 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
                   </div>
                 </div>
 
-                {/* Bottom Action Buttons */}
-                <div className="pt-2 border-t border-slate-800/80 flex items-center gap-2 text-xs">
-                  <button
-                    onClick={() => onNavigateTab('topup', { gameCatalogId: game.id })}
-                    className="flex-1 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] flex items-center justify-center gap-1 transition-colors shadow-sm"
-                  >
-                    <ArrowDownToLine className="w-3.5 h-3.5" />
-                    <span>Top-Up</span>
-                  </button>
+                {/* Bottom Action Buttons & Credential Indicator */}
+                <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-slate-500 font-medium">Game ID Status:</span>
+                    {userAccount ? (
+                      userAccount.status === 'active' ? (
+                        <span className="font-mono font-semibold text-emerald-400 truncate max-w-[160px]">
+                          ID: {userAccount.username}
+                        </span>
+                      ) : (
+                        <span className="font-mono font-semibold text-amber-400">
+                          Setup Pending
+                        </span>
+                      )
+                    ) : (
+                      <span className="font-mono text-slate-400">No Game ID</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <button
+                      onClick={() => onNavigateTab('topup', { gameCatalogId: game.id })}
+                      className="flex-1 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] flex items-center justify-center gap-1 transition-colors shadow-sm"
+                    >
+                      <ArrowDownToLine className="w-3.5 h-3.5" />
+                      <span>Top-Up</span>
+                    </button>
 
-                  <button
-                    onClick={() => onNavigateTab('withdrawal', { gameCatalogId: game.id })}
-                    className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-[11px] flex items-center justify-center gap-1 border border-slate-700 transition-colors"
-                  >
-                    <ArrowUpFromLine className="w-3.5 h-3.5" />
-                    <span>Cashout</span>
-                  </button>
+                    <button
+                      onClick={() => onNavigateTab('withdrawal', { gameCatalogId: game.id })}
+                      className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-[11px] flex items-center justify-center gap-1 border border-slate-700 transition-colors"
+                    >
+                      <ArrowUpFromLine className="w-3.5 h-3.5" />
+                      <span>Cashout</span>
+                    </button>
 
-                  <button
-                    onClick={() => onNavigateTab('game_accounts')}
-                    className="py-2 px-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-300 font-medium text-[11px] flex items-center justify-center border border-slate-800 transition-colors"
-                    title={userAccount ? `Account: ${userAccount.username}` : 'Request Credentials'}
-                  >
-                    <KeyRound className="w-3.5 h-3.5 text-cyan-400" />
-                  </button>
+                    <button
+                      onClick={() => onNavigateTab('game_accounts')}
+                      className="py-2 px-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-300 font-medium text-[11px] flex items-center justify-center border border-slate-800 transition-colors"
+                      title={userAccount ? `Account: ${userAccount.username}` : 'Request Credentials'}
+                      aria-label={userAccount ? `Manage ${game.title} credentials (${userAccount.username})` : `Request ${game.title} credentials`}
+                    >
+                      <KeyRound className="w-3.5 h-3.5 text-cyan-400" />
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -400,45 +482,69 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
           </div>
 
           <div className="rounded-xl border border-slate-800 bg-slate-900 overflow-hidden">
-            {transactions.length === 0 ? (
+            {recentActivity.length === 0 ? (
               <div className="p-8 text-center text-xs text-slate-500">
-                No transactions recorded yet. Add your first top-up to start gaming.
+                No deposits, withdrawals, or referral rewards recorded yet.
               </div>
             ) : (
               <div className="divide-y divide-slate-800/80">
-                {transactions.map((tx) => {
-                  const isCredit = tx.type === 'deposit' || tx.type === 'bonus' || tx.type === 'referral_reward' || tx.type === 'withdrawal_release';
+                {recentActivity.map((item) => {
+                  const statusMeta = getActivityStatusMeta(item.status);
+                  const isRejectedOrCancelled =
+                    item.status === 'rejected' || item.status === 'cancelled';
+
                   return (
-                    <div key={tx.id} className="p-3.5 flex items-center justify-between text-xs hover:bg-slate-800/40 transition-colors">
-                      <div className="flex items-center gap-3">
+                    <button
+                      key={`${item.sourceType}_${item.id}`}
+                      type="button"
+                      onClick={() => onNavigateTab('wallet')}
+                      className="w-full text-left p-3.5 flex items-center justify-between gap-3 text-xs hover:bg-slate-800/40 transition-colors"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
                         <div
-                          className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${
-                            isCredit ? 'bg-emerald-950/70 text-emerald-400 border border-emerald-800/60' : 'bg-rose-950/70 text-rose-400 border border-rose-800/60'
+                          className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 border ${
+                            item.direction === 'credit'
+                              ? 'bg-emerald-950/70 text-emerald-400 border-emerald-800/60'
+                              : item.direction === 'debit'
+                              ? 'bg-cyan-950/70 text-cyan-400 border-cyan-800/60'
+                              : 'bg-slate-950 text-slate-400 border-slate-800'
                           }`}
                         >
-                          {isCredit ? '+' : '-'}
+                          {item.direction === 'credit' ? '+' : item.direction === 'debit' ? '-' : '•'}
                         </div>
-                        <div>
-                          <div className="font-medium text-slate-200">{tx.description}</div>
-                          <div className="text-[11px] text-slate-500 font-mono">
-                            {new Date(tx.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        <div className="min-w-0">
+                          <div className="font-medium text-slate-200 truncate">{item.title}</div>
+                          <div className="text-[11px] text-slate-500 font-mono truncate">
+                            {item.methodName ? `${item.methodName} · ` : ''}
+                            {new Date(item.createdAt).toLocaleDateString([], {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
                           </div>
                         </div>
                       </div>
 
-                      <div className="text-right">
+                      <div className="text-right shrink-0">
                         <div
                           className={`font-mono font-semibold tabular-nums ${
-                            isCredit ? 'text-emerald-400' : 'text-slate-200'
+                            isRejectedOrCancelled
+                              ? 'text-slate-500 line-through'
+                              : item.direction === 'credit'
+                              ? 'text-emerald-400'
+                              : 'text-slate-200'
                           }`}
                         >
-                          {isCredit ? '+' : '-'}${tx.amount.toFixed(2)}
+                          {item.direction === 'credit' && !isRejectedOrCancelled ? '+' : ''}
+                          {item.direction === 'debit' && !isRejectedOrCancelled ? '-' : ''}$
+                          {item.netAmount.toFixed(2)}
                         </div>
-                        <div className="text-[10px] text-slate-400 font-mono tabular-nums">
-                          Bal: ${tx.balanceAfter.toFixed(2)}
+                        <div className={`text-[10px] font-mono ${statusMeta.textClass}`}>
+                          {statusMeta.label}
                         </div>
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>

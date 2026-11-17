@@ -57,6 +57,12 @@ import {
   mergeTopupRequests,
   findRequestById,
 } from './requestSyncUtils';
+import {
+  computeCumulativeCompletedDeposits,
+  mapDbWalletRowToWallet,
+  mergeWalletTransactions,
+  reconcileWalletWithTopups,
+} from './walletActivityUtils';
 import { toProxyStorageUrl } from './storageUrlUtils';
 
 export type RealtimeSyncStatus = 'connected' | 'syncing' | 'sleeping' | 'disconnected' | 'reconnecting';
@@ -118,6 +124,12 @@ class DataService {
   private messageSaveDebounceTimer: any = null;
   private isVisibilityListenerAttached = false;
   private isSyncingDelta = false;
+  private isHydratingSession = false;
+  private hydrationUserId: string | null = null;
+  private activeHydrationPromise: Promise<void> | null = null;
+  private lastHydratedUserId: string | null = null;
+  private lastHydratedAt = 0;
+  private authoritativelyLoadedTopupsForUser: Set<string> = new Set();
   private conversationAliasMap: Map<string, string> = new Map();
 
   constructor() {
@@ -333,7 +345,12 @@ class DataService {
     if (isSupabaseConfigured() && supabase) {
       console.log('[SwiftSweeps] Supabase PostgreSQL mode active. Initializing Realtime stream.');
       this.initSupabaseRealtimeSync();
-      this.initialCompactLoad();
+      const activeUser = this.getCurrentUser();
+      if (activeUser) {
+        void this.hydrateForSession(activeUser, { force: true });
+      } else {
+        void this.initialCompactLoad();
+      }
     } else {
       console.log('[SwiftSweeps] Supabase credentials pending in .env. Running in in-memory mode with LocalStorage persistence.');
     }
@@ -365,6 +382,9 @@ class DataService {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'wallets' }, (p) => {
         this.queueRealtimeMutation('wallets', p.eventType, p.new, p.old);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions' }, (p) => {
+        this.queueRealtimeMutation('transactions', p.eventType, p.new, p.old);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_accounts' }, (p) => {
         this.queueRealtimeMutation('game_accounts', p.eventType, p.new, p.old);
@@ -416,6 +436,21 @@ class DataService {
       }
     }
 
+    const activeUser = this.getCurrentUser();
+    const scopeCustomerId =
+      activeUser && activeUser.role === 'customer' ? activeUser.id : null;
+    const filterCustomerRows = (rows?: any[]) => {
+      if (!rows || rows.length === 0) return [];
+      if (!scopeCustomerId) return rows;
+      return rows.filter((r) => !r.customer_id || r.customer_id === scopeCustomerId);
+    };
+
+    const topupRows = filterCustomerRows(rowsByTable['topups']);
+    const withdrawalRows = filterCustomerRows(rowsByTable['withdrawals']);
+    const transactionRows = filterCustomerRows(rowsByTable['transactions']);
+    const walletRows = filterCustomerRows(rowsByTable['wallets']);
+    const gameAccountRows = filterCustomerRows(rowsByTable['game_accounts']);
+
     if (rowsByTable['messages']?.length) {
       this.applyMessageRows(rowsByTable['messages']);
       tablesModified.add('messages');
@@ -424,20 +459,24 @@ class DataService {
       this.applyConversationRows(rowsByTable['conversations'], false);
       tablesModified.add('conversations');
     }
-    if (rowsByTable['topups']?.length) {
-      this.applyTopupRows(rowsByTable['topups'], false);
+    if (topupRows.length) {
+      this.applyTopupRows(topupRows, false);
       tablesModified.add('topups');
     }
-    if (rowsByTable['withdrawals']?.length) {
-      this.applyWithdrawalRows(rowsByTable['withdrawals'], false);
+    if (withdrawalRows.length) {
+      this.applyWithdrawalRows(withdrawalRows, false);
       tablesModified.add('withdrawals');
     }
-    if (rowsByTable['wallets']?.length) {
-      this.applyWalletRows(rowsByTable['wallets']);
+    if (transactionRows.length) {
+      this.applyTransactionRows(transactionRows, false);
+      tablesModified.add('transactions');
+    }
+    if (walletRows.length) {
+      this.applyWalletRows(walletRows);
       tablesModified.add('wallets');
     }
-    if (rowsByTable['game_accounts']?.length) {
-      this.applyGameAccountRows(rowsByTable['game_accounts'], false);
+    if (gameAccountRows.length) {
+      this.applyGameAccountRows(gameAccountRows, false);
       tablesModified.add('game_accounts');
     }
     if (rowsByTable['users']?.length) {
@@ -527,18 +566,57 @@ class DataService {
         if (gameAccsRes?.data) this.applyGameAccountRows(gameAccsRes.data, false);
       } else if (currentUserId) {
         // Customer session: strictly scoped to CURRENT user only (no global table downloads)
-        const [appConfigRes, cashoutsRes, catRes, userRes, walletRes, topupsRes, withdrawalsRes, gameAccsRes, convRes] =
-          await Promise.all([
-            appConfigPromise,
-            cashoutsPromise,
-            catPromise,
-            supabase.from('users').select('*').eq('id', currentUserId).maybeSingle(),
-            supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
-            supabase.from('topups').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20),
-            supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(20),
-            supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(20),
-            supabase.from('conversations').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: true }),
-          ]);
+        const [
+          appConfigRes,
+          cashoutsRes,
+          catRes,
+          userRes,
+          walletRes,
+          topupsRes,
+          latestCompletedTopupRes,
+          withdrawalsRes,
+          transactionsRes,
+          gameAccsRes,
+          convRes,
+        ] = await Promise.all([
+          appConfigPromise,
+          cashoutsPromise,
+          catPromise,
+          supabase.from('users').select('*').eq('id', currentUserId).maybeSingle(),
+          supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
+          supabase
+            .from('topups')
+            .select('*')
+            .eq('customer_id', currentUserId)
+            .order('created_at', { ascending: false })
+            .limit(30),
+          supabase
+            .from('topups')
+            .select('*')
+            .eq('customer_id', currentUserId)
+            .in('status', ['completed', 'approved'])
+            .order('updated_at', { ascending: false })
+            .limit(1),
+          supabase
+            .from('withdrawals')
+            .select('*')
+            .eq('customer_id', currentUserId)
+            .order('created_at', { ascending: false })
+            .limit(30),
+          supabase
+            .from('transactions')
+            .select('*')
+            .eq('customer_id', currentUserId)
+            .order('created_at', { ascending: false })
+            .limit(50),
+          supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(30),
+          supabase
+            .from('conversations')
+            .select('*')
+            .eq('customer_id', currentUserId)
+            .order('created_at', { ascending: true })
+            .limit(10),
+        ]);
 
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
         if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
@@ -582,10 +660,59 @@ class DataService {
           authSessionService.updateUserProfile(local);
           window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_profile_synced', user: local } }));
         }
-        if (walletRes.data) this.applyWalletRows([walletRes.data]);
-        if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
-        if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
-        if (gameAccsRes.data) this.applyGameAccountRows(gameAccsRes.data, false);
+
+        // Apply Order Invariant: apply topups, withdrawals, and transactions BEFORE wallet reconciliation
+        const combinedTopupRows: any[] = [];
+        const seenTopupIds = new Set<string>();
+        for (const row of [...(topupsRes.data || []), ...(latestCompletedTopupRes.data || [])]) {
+          if (row && row.id && !seenTopupIds.has(row.id)) {
+            seenTopupIds.add(row.id);
+            combinedTopupRows.push(row);
+          }
+        }
+        if (!topupsRes.error) {
+          this.authoritativelyLoadedTopupsForUser.add(currentUserId);
+          this.applyTopupRows(combinedTopupRows, true);
+        } else if (!latestCompletedTopupRes.error && Array.isArray(latestCompletedTopupRes.data) && latestCompletedTopupRes.data.length > 0) {
+          this.applyTopupRows(latestCompletedTopupRes.data, false);
+        }
+
+        if (!withdrawalsRes.error && Array.isArray(withdrawalsRes.data)) {
+          this.applyWithdrawalRows(withdrawalsRes.data, true);
+        }
+
+        if (!transactionsRes.error && Array.isArray(transactionsRes.data)) {
+          this.applyTransactionRows(transactionsRes.data, true);
+        }
+
+        if (walletRes.data) {
+          this.applyWalletRows([walletRes.data]);
+        } else {
+          this.reconcileCustomerWallet(currentUserId);
+        }
+
+        // Game Accounts hydration with authenticated server fallback
+        if (!gameAccsRes.error && Array.isArray(gameAccsRes.data) && gameAccsRes.data.length > 0) {
+          this.applyGameAccountRows(gameAccsRes.data, true);
+        } else {
+          try {
+            const url = `/api/game-accounts?customerId=${encodeURIComponent(currentUserId)}`;
+            const res = await fetch(url, { cache: 'no-store' });
+            if (res.ok) {
+              const json = await res.json();
+              if (Array.isArray(json.accounts)) {
+                this.applyGameAccountRows(json.accounts, true);
+              }
+            } else if (!gameAccsRes.error && Array.isArray(gameAccsRes.data)) {
+              this.applyGameAccountRows(gameAccsRes.data, true);
+            }
+          } catch {
+            if (!gameAccsRes.error && Array.isArray(gameAccsRes.data)) {
+              this.applyGameAccountRows(gameAccsRes.data, true);
+            }
+          }
+        }
+
         if (!convRes?.error && Array.isArray(convRes?.data)) {
           if (convRes.data.length > 0) {
             this.applyConversationRows(convRes.data, false);
@@ -675,24 +802,37 @@ class DataService {
               .order('created_at', { ascending: false })
               .limit(50);
 
-        const [walletRes, topupsRes, withdrawalsRes, msgsRes] = await Promise.all([
+        const [walletRes, topupsRes, withdrawalsRes, transactionsRes, gameAccsRes, msgsRes] = await Promise.all([
           supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
-          supabase.from('topups').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(10),
-          supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(10),
+          supabase.from('topups').select('*').eq('customer_id', currentUserId).order('updated_at', { ascending: false }).limit(15),
+          supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('updated_at', { ascending: false }).limit(15),
+          supabase.from('transactions').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(25),
+          supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(30),
           msgQuery,
         ]);
 
-        if (walletRes.data) {
-          this.applyWalletRows([walletRes.data]);
-          changed = true;
-        }
-        if (topupsRes.data && topupsRes.data.length > 0) {
+        // Apply requests & ledger BEFORE wallet reconciliation
+        if (!topupsRes.error && topupsRes.data && topupsRes.data.length > 0) {
           this.applyTopupRows(topupsRes.data, false);
           changed = true;
         }
-        if (withdrawalsRes.data && withdrawalsRes.data.length > 0) {
+        if (!withdrawalsRes.error && withdrawalsRes.data && withdrawalsRes.data.length > 0) {
           this.applyWithdrawalRows(withdrawalsRes.data, false);
           changed = true;
+        }
+        if (!transactionsRes.error && transactionsRes.data && transactionsRes.data.length > 0) {
+          this.applyTransactionRows(transactionsRes.data, false);
+          changed = true;
+        }
+        if (!gameAccsRes.error && gameAccsRes.data && gameAccsRes.data.length > 0) {
+          this.applyGameAccountRows(gameAccsRes.data, false);
+          changed = true;
+        }
+        if (walletRes.data) {
+          this.applyWalletRows([walletRes.data]);
+          changed = true;
+        } else if (topupsRes.data && topupsRes.data.length > 0) {
+          this.reconcileCustomerWallet(currentUserId);
         }
         if (msgsRes.data && msgsRes.data.length > 0) {
           this.applyMessageRows(msgsRes.data);
@@ -1175,7 +1315,7 @@ class DataService {
     if (!cleanCustomerId || !supabase || !isSupabaseConfigured()) return;
 
     try {
-      const [topupsRes, withdrawalsRes, accountsRes] = await Promise.all([
+      const [topupsRes, latestCompletedTopupRes, withdrawalsRes, transactionsRes, accountsRes] = await Promise.all([
         supabase
           .from('topups')
           .select('*')
@@ -1183,11 +1323,24 @@ class DataService {
           .order('created_at', { ascending: false })
           .limit(20),
         supabase
+          .from('topups')
+          .select('*')
+          .eq('customer_id', cleanCustomerId)
+          .in('status', ['completed', 'approved'])
+          .order('updated_at', { ascending: false })
+          .limit(1),
+        supabase
           .from('withdrawals')
           .select('*')
           .eq('customer_id', cleanCustomerId)
           .order('created_at', { ascending: false })
           .limit(20),
+        supabase
+          .from('transactions')
+          .select('*')
+          .eq('customer_id', cleanCustomerId)
+          .order('created_at', { ascending: false })
+          .limit(30),
         supabase
           .from('game_accounts')
           .select('*')
@@ -1196,12 +1349,17 @@ class DataService {
       ]);
 
       let changed = false;
-      if (!topupsRes.error && Array.isArray(topupsRes.data) && topupsRes.data.length > 0) {
-        this.applyTopupRows(topupsRes.data, false);
+      const topupRows = [...(topupsRes.data || []), ...(latestCompletedTopupRes.data || [])];
+      if (!topupsRes.error && topupRows.length > 0) {
+        this.applyTopupRows(topupRows, false);
         changed = true;
       }
       if (!withdrawalsRes.error && Array.isArray(withdrawalsRes.data) && withdrawalsRes.data.length > 0) {
         this.applyWithdrawalRows(withdrawalsRes.data, false);
+        changed = true;
+      }
+      if (!transactionsRes.error && Array.isArray(transactionsRes.data) && transactionsRes.data.length > 0) {
+        this.applyTransactionRows(transactionsRes.data, false);
         changed = true;
       }
       if (!accountsRes.error && Array.isArray(accountsRes.data) && accountsRes.data.length > 0) {
@@ -1273,6 +1431,17 @@ class DataService {
     const updated = mergeTopupRequests(current, rows, replaceAll);
     this.cache[STORAGE_KEYS.TOPUPS] = updated;
     this.saveToLocalStorage(STORAGE_KEYS.TOPUPS, updated);
+
+    const affectedCustomerIds = new Set<string>();
+    for (const r of rows || []) {
+      if (r?.customer_id) affectedCustomerIds.add(String(r.customer_id));
+    }
+    if (replaceAll && this.currentUserId) {
+      affectedCustomerIds.add(this.currentUserId);
+    }
+    for (const cid of affectedCustomerIds) {
+      this.reconcileCustomerWallet(cid);
+    }
   }
 
   private applyWithdrawalRows(rows: any[], replaceAll: boolean = false): void {
@@ -1282,32 +1451,42 @@ class DataService {
     this.saveToLocalStorage(STORAGE_KEYS.WITHDRAWALS, updated);
   }
 
+  private applyTransactionRows(rows: any[], replaceAll: boolean = false): void {
+    const current = (this.cache[STORAGE_KEYS.TRANSACTIONS] as WalletTransaction[]) || [];
+    const updated = mergeWalletTransactions(current, rows, replaceAll);
+    this.cache[STORAGE_KEYS.TRANSACTIONS] = updated;
+    this.saveToLocalStorage(STORAGE_KEYS.TRANSACTIONS, updated);
+  }
+
+  private reconcileCustomerWallet(customerId: string): void {
+    if (!customerId) return;
+    const walletMap = { ...((this.cache[STORAGE_KEYS.WALLETS] as Record<string, UserWallet>) || {}) };
+    const existing = walletMap[customerId];
+    if (!existing) return;
+    const customerTopups = this.getTopUpRequests(customerId);
+    const reconciled = reconcileWalletWithTopups(existing, customerTopups, {
+      authoritativeTopupsLoaded: this.authoritativelyLoadedTopupsForUser.has(customerId),
+    });
+    if (
+      reconciled.lastTopUpAmount !== existing.lastTopUpAmount ||
+      reconciled.lastTopUpGame !== existing.lastTopUpGame ||
+      reconciled.lastTopUpAt !== existing.lastTopUpAt
+    ) {
+      walletMap[customerId] = reconciled;
+      this.cache[STORAGE_KEYS.WALLETS] = walletMap;
+      this.saveToLocalStorage(STORAGE_KEYS.WALLETS, walletMap);
+    }
+  }
+
   private applyWalletRows(rows: any[]): void {
     const walletMap = { ...((this.cache[STORAGE_KEYS.WALLETS] as Record<string, UserWallet>) || {}) };
     for (const w of rows) {
+      if (!w || !w.customer_id) continue;
       const existing = walletMap[w.customer_id];
-      const completedTopups = this.getTopUpRequests(w.customer_id).filter((t) => t.status === 'completed');
-      const latestTopup = completedTopups[0];
-      const derivedTopUpAmount =
-        existing?.lastTopUpAmount ||
-        latestTopup?.finalWalletCredit ||
-        latestTopup?.amount ||
-        Number(w.total_deposited || 0);
-      const derivedTopUpGame = existing?.lastTopUpGame || latestTopup?.targetGameName;
-      const derivedTopUpAt = existing?.lastTopUpAt || latestTopup?.updatedAt || latestTopup?.createdAt;
-
-      walletMap[w.customer_id] = {
-        customerId: w.customer_id,
-        currency: w.currency || 'USD',
-        availableBalance: Number(w.balance || 0),
-        referralBonusBalance: existing?.referralBonusBalance || 0,
-        reservedBalance: Number(w.pending_withdrawal || 0),
-        pendingDepositBalance: Number(w.pending_deposit || 0),
-        lastTopUpAmount: derivedTopUpAmount,
-        lastTopUpGame: derivedTopUpGame,
-        lastTopUpAt: derivedTopUpAt,
-        lastUpdatedAt: w.updated_at || new Date().toISOString(),
-      };
+      const customerTopups = this.getTopUpRequests(w.customer_id);
+      walletMap[w.customer_id] = mapDbWalletRowToWallet(w, existing, customerTopups, {
+        authoritativeTopupsLoaded: this.authoritativelyLoadedTopupsForUser.has(w.customer_id),
+      });
     }
     this.cache[STORAGE_KEYS.WALLETS] = walletMap;
     this.saveToLocalStorage(STORAGE_KEYS.WALLETS, walletMap);
@@ -1655,13 +1834,17 @@ class DataService {
         const allWallets = Object.values(value as Record<string, UserWallet>);
         const target = currentUserId ? (value[currentUserId] || allWallets[0]) : allWallets[0];
         if (target && target.customerId) {
+          const cumulativeDeposited =
+            target.totalDeposited !== undefined
+              ? target.totalDeposited
+              : computeCumulativeCompletedDeposits(this.getTopUpRequests(target.customerId), target.customerId);
           await supabase.from('wallets').upsert({
             customer_id: target.customerId,
             balance: target.availableBalance || 0,
             pending_withdrawal: target.reservedBalance || 0,
             pending_deposit: target.pendingDepositBalance || 0,
-            total_deposited: target.lastTopUpAmount || 0,
-            total_withdrawn: 0,
+            total_deposited: cumulativeDeposited || 0,
+            total_withdrawn: target.totalWithdrawn || 0,
             currency: target.currency || 'USD',
           });
         }
@@ -1823,8 +2006,11 @@ class DataService {
           balance: w.availableBalance || 0,
           pending_withdrawal: w.reservedBalance || 0,
           pending_deposit: w.pendingDepositBalance || 0,
-          total_deposited: w.lastTopUpAmount || 0,
-          total_withdrawn: 0,
+          total_deposited:
+            w.totalDeposited !== undefined
+              ? w.totalDeposited
+              : computeCumulativeCompletedDeposits(this.getTopUpRequests(w.customerId), w.customerId),
+          total_withdrawn: w.totalWithdrawn || 0,
           currency: w.currency || 'USD',
         }));
         const { error } = await supabase.from('wallets').upsert(rows);
@@ -2108,13 +2294,45 @@ class DataService {
     return user;
   }
 
+  private clearUserScopedCache(): void {
+    const emptyState: Record<string, any> = {
+      [STORAGE_KEYS.WALLETS]: {},
+      [STORAGE_KEYS.TRANSACTIONS]: [],
+      [STORAGE_KEYS.TOPUPS]: [],
+      [STORAGE_KEYS.WITHDRAWALS]: [],
+      [STORAGE_KEYS.GAME_ACCOUNTS]: [],
+      [STORAGE_KEYS.CONVERSATIONS]: [],
+      [STORAGE_KEYS.MESSAGES]: {},
+      [STORAGE_KEYS.NOTIFICATIONS]: [],
+    };
+    for (const [key, val] of Object.entries(emptyState)) {
+      this.cache[key] = val;
+      this.saveToLocalStorage(key, val);
+    }
+    this.lastSyncTimestamp = null;
+    this.authoritativelyLoadedTopupsForUser.clear();
+  }
+
   public setCurrentUserId(userId: string): void {
+    if (this.currentUserId && this.currentUserId !== userId) {
+      this.clearUserScopedCache();
+    }
     this.currentUserId = userId;
+    const targetUser = this.getUserById(userId);
+    if (targetUser) {
+      void this.hydrateForSession(targetUser, { force: true });
+    }
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
   }
 
   public logout(): void {
     this.currentUserId = null;
+    this.isHydratingSession = false;
+    this.hydrationUserId = null;
+    this.activeHydrationPromise = null;
+    this.lastHydratedUserId = null;
+    this.lastHydratedAt = 0;
+    this.clearUserScopedCache();
     authSessionService.destroySession();
     supabaseAuthService.logout().catch(() => {});
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
@@ -3225,31 +3443,34 @@ class DataService {
         referralBonusBalance: 0,
         reservedBalance: 0,
         pendingDepositBalance: 0,
+        lastTopUpAmount: 0,
         lastUpdatedAt: new Date().toISOString(),
       };
-      this.save(STORAGE_KEYS.WALLETS, wallets);
+      this.cache[STORAGE_KEYS.WALLETS] = wallets;
+      this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
     } else if (wallets[customerId].referralBonusBalance === undefined) {
       wallets[customerId].referralBonusBalance = 0;
-      this.save(STORAGE_KEYS.WALLETS, wallets);
+      this.cache[STORAGE_KEYS.WALLETS] = wallets;
+      this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
     }
 
-    const w = wallets[customerId];
-    // Dynamic reconciliation: Ensure latest top-up metrics are populated from completed top-up history
-    if (!w.lastTopUpAmount || w.lastTopUpAmount === 0 || !w.lastTopUpGame) {
-      const completedTopups = this.getTopUpRequests(customerId).filter((t) => t.status === 'completed');
-      if (completedTopups.length > 0) {
-        const latest = completedTopups[0];
-        w.lastTopUpAmount = latest.finalWalletCredit || latest.amount;
-        if (!w.lastTopUpGame) {
-          w.lastTopUpGame = latest.targetGameName || 'Game';
-        }
-        if (!w.lastTopUpAt) {
-          w.lastTopUpAt = latest.updatedAt || latest.createdAt;
-        }
-      }
+    const existing = wallets[customerId];
+    const customerTopups = this.getTopUpRequests(customerId);
+    const reconciled = reconcileWalletWithTopups(existing, customerTopups, {
+      authoritativeTopupsLoaded: this.authoritativelyLoadedTopupsForUser.has(customerId),
+    });
+
+    if (
+      reconciled.lastTopUpAmount !== existing.lastTopUpAmount ||
+      reconciled.lastTopUpGame !== existing.lastTopUpGame ||
+      reconciled.lastTopUpAt !== existing.lastTopUpAt
+    ) {
+      wallets[customerId] = reconciled;
+      this.cache[STORAGE_KEYS.WALLETS] = wallets;
+      this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
     }
 
-    return w;
+    return wallets[customerId];
   }
 
   public getTransactions(customerId?: string): WalletTransaction[] {
@@ -3652,6 +3873,15 @@ class DataService {
     }
 
     if (supabase && isSupabaseConfigured()) {
+      const cumulativeDeposited = Math.max(
+        wallet.totalDeposited || 0,
+        computeCumulativeCompletedDeposits(allReqs, req.customerId)
+      );
+      wallet.totalDeposited = cumulativeDeposited;
+      wallets[req.customerId] = wallet;
+      this.cache[STORAGE_KEYS.WALLETS] = wallets;
+      this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
+
       supabase.from('topups').update({
         status: 'completed',
         amount: req.amount,
@@ -3663,7 +3893,7 @@ class DataService {
       }).eq('id', req.id).then(() => {}, (err) => console.warn('Supabase topup approve sync error:', err));
 
       supabase.from('wallets').update({
-        total_deposited: (wallet.availableBalance || 0) + req.amount,
+        total_deposited: cumulativeDeposited,
         updated_at: new Date().toISOString(),
       }).eq('customer_id', req.customerId).then(() => {}, (err) => console.warn('Supabase wallet topup sync error:', err));
     }
@@ -5131,7 +5361,11 @@ class DataService {
     return deduplicated;
   }
 
-  public hydrateForSession(user?: UserProfile): void {
+  public getIsHydrating(): boolean {
+    return this.isHydratingSession;
+  }
+
+  public async hydrateForSession(user?: UserProfile, options?: { force?: boolean }): Promise<void> {
     const activeSession = authSessionService.getActiveSession();
     const sessionUser = activeSession ? ({
       id: activeSession.userId,
@@ -5140,9 +5374,45 @@ class DataService {
       role: activeSession.role,
     } as any) : null;
     const target = user || this.getCurrentUser() || sessionUser;
-    if (target?.role === 'admin' || target?.role === 'agent') {
-      this.initialCompactLoad();
+    if (!target?.id) return;
+
+    // Clear stale cross-user caches whenever switching accounts
+    if (this.currentUserId && this.currentUserId !== target.id) {
+      this.clearUserScopedCache();
     }
+    this.currentUserId = target.id;
+
+    // Deduplicate concurrent hydration bursts for the same user session
+    if (this.activeHydrationPromise && this.hydrationUserId === target.id) {
+      return this.activeHydrationPromise;
+    }
+    if (
+      !options?.force &&
+      this.lastHydratedUserId === target.id &&
+      Date.now() - this.lastHydratedAt < 2500
+    ) {
+      return;
+    }
+
+    this.hydrationUserId = target.id;
+    this.isHydratingSession = true;
+    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'hydration_started', userId: target.id } }));
+
+    const run = this.initialCompactLoad()
+      .then(() => {
+        this.lastHydratedUserId = target.id;
+        this.lastHydratedAt = Date.now();
+      })
+      .finally(() => {
+        if (this.activeHydrationPromise === run) {
+          this.activeHydrationPromise = null;
+        }
+        this.isHydratingSession = false;
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'hydration_finished', userId: target.id } }));
+      });
+
+    this.activeHydrationPromise = run;
+    return run;
   }
 
   public async fetchConversations(): Promise<SupportConversation[]> {

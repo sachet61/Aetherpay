@@ -180,6 +180,7 @@ export default function App() {
         <AuthPage
           key="auth"
           onLoginSuccess={(user) => {
+            void dataService.hydrateForSession(user);
             setTimeoutNotice(null);
             const defaultTab = getDefaultTab(user.role);
             setActiveTab(defaultTab);
