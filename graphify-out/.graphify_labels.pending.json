@@ -19,7 +19,9 @@
   "17": "StartupSplash.tsx",
   "18": "authSessionService.ts",
   "19": "CustomerProfile.tsx",
-  "20": "CashoutFeedItem",
+  "20": "dependencies",
   "21": "vercel.json",
-  "22": "sw.js"
+  "22": "sw.js",
+  "23": "vite.config.ts",
+  "24": "scripts"
 }
