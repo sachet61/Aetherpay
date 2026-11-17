@@ -1,5 +1,6 @@
 import { supabase } from './supabaseClient';
 import { compressImageToWebP } from '../utils/imageCompressor';
+import { buildProxyStorageUrl, toProxyStorageUrl } from './storageUrlUtils';
 
 export interface StorageUploadResult {
   success: boolean;
@@ -9,6 +10,8 @@ export interface StorageUploadResult {
   originalSize?: number;
   compressedSize?: number;
 }
+
+const MAX_SERVER_FALLBACK_BYTES = 2_400_000;
 
 /**
  * Converts a File or Blob into a base64 encoded string
@@ -52,7 +55,7 @@ class StorageService {
   }
 
   /**
-   * Secure fallback upload via Express / Vercel service-role endpoint.
+   * Secure fallback upload via Vercel serverless service-role endpoint.
    * Auto-provisions bucket with service-role permissions and uploads file safely.
    */
   private async uploadViaServerFallback(
@@ -63,7 +66,17 @@ class StorageService {
     userId?: string
   ): Promise<{ success: boolean; url?: string; error?: string }> {
     try {
-      const base64Data = await fileToBase64(file);
+      let uploadCandidate: File | Blob = file;
+      if (uploadCandidate instanceof File && uploadCandidate.size > MAX_SERVER_FALLBACK_BYTES) {
+        const tighter = await compressImageToWebP(uploadCandidate, {
+          maxWidth: 960,
+          maxHeight: 960,
+          quality: 0.7,
+        });
+        uploadCandidate = tighter.file;
+      }
+
+      const base64Data = await fileToBase64(uploadCandidate);
       const res = await fetch('/api/storage/upload', {
         method: 'POST',
         headers: {
@@ -87,9 +100,14 @@ class StorageService {
       }
 
       const data = await res.json();
+      const resolvedUrl =
+        bucket === 'chat_attachments'
+          ? toProxyStorageUrl(data.proxyUrl || data.url) || buildProxyStorageUrl(bucket, data.path || filePath)
+          : data.url || data.publicUrl;
+
       return {
         success: true,
-        url: data.url,
+        url: resolvedUrl,
       };
     } catch (err: any) {
       return {
@@ -100,17 +118,26 @@ class StorageService {
   }
 
   /**
-   * Uploads an image attachment for Customer or Admin chat
-   * Auto-compresses to modern WebP format with automated server-side fallback
+   * Uploads an image attachment for Customer or Admin chat.
+   * Auto-compresses to WebP with automated server-side fallback and returns a
+   * proxy-backed URL (/api/storage/file) that works consistently across all browsers and environments.
    */
   public async uploadChatAttachment(file: File, conversationId: string): Promise<StorageUploadResult> {
     try {
       // Pre-compress to WebP (max 1200px)
-      const compressed = await compressImageToWebP(file, {
+      let compressed = await compressImageToWebP(file, {
         maxWidth: 1200,
         maxHeight: 1200,
         quality: 0.85,
       });
+
+      if (compressed.file.size > MAX_SERVER_FALLBACK_BYTES) {
+        compressed = await compressImageToWebP(compressed.file, {
+          maxWidth: 960,
+          maxHeight: 960,
+          quality: 0.72,
+        });
+      }
 
       const cleanFolder = conversationId.replace(/[^a-zA-Z0-9_-]/g, '_');
       const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -128,13 +155,9 @@ class StorageService {
         });
 
       if (!error && data?.path) {
-        const { data: publicUrlData } = supabase.storage
-          .from('chat_attachments')
-          .getPublicUrl(data.path);
-
         return {
           success: true,
-          url: publicUrlData.publicUrl,
+          url: buildProxyStorageUrl('chat_attachments', data.path),
           name: file.name,
           originalSize: compressed.originalSize,
           compressedSize: compressed.compressedSize,
@@ -153,7 +176,7 @@ class StorageService {
       if (fallbackResult.success && fallbackResult.url) {
         return {
           success: true,
-          url: fallbackResult.url,
+          url: toProxyStorageUrl(fallbackResult.url) || fallbackResult.url,
           name: file.name,
           originalSize: compressed.originalSize,
           compressedSize: compressed.compressedSize,
@@ -178,11 +201,19 @@ class StorageService {
    */
   public async uploadPaymentProof(file: File, customerId: string): Promise<StorageUploadResult> {
     try {
-      const compressed = await compressImageToWebP(file, {
+      let compressed = await compressImageToWebP(file, {
         maxWidth: 1400,
         maxHeight: 1400,
         quality: 0.88,
       });
+
+      if (compressed.file.size > MAX_SERVER_FALLBACK_BYTES) {
+        compressed = await compressImageToWebP(compressed.file, {
+          maxWidth: 1000,
+          maxHeight: 1000,
+          quality: 0.72,
+        });
+      }
 
       const cleanUserId = customerId.replace(/[^a-zA-Z0-9_-]/g, '_');
       const fileName = `receipts/${cleanUserId}_${Date.now()}.webp`;
@@ -199,13 +230,9 @@ class StorageService {
         });
 
       if (!error && data?.path) {
-        const { data: publicUrlData } = supabase.storage
-          .from('chat_attachments')
-          .getPublicUrl(data.path);
-
         return {
           success: true,
-          url: publicUrlData.publicUrl,
+          url: buildProxyStorageUrl('chat_attachments', data.path),
           name: file.name,
           originalSize: compressed.originalSize,
           compressedSize: compressed.compressedSize,
@@ -225,7 +252,7 @@ class StorageService {
       if (fallbackResult.success && fallbackResult.url) {
         return {
           success: true,
-          url: fallbackResult.url,
+          url: toProxyStorageUrl(fallbackResult.url) || fallbackResult.url,
           name: file.name,
           originalSize: compressed.originalSize,
           compressedSize: compressed.compressedSize,

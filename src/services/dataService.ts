@@ -45,7 +45,9 @@ import {
   mapDbMessageRowToChatMessage,
   sortAndDeduplicateMessages,
   mergeAuthoritativeMessages,
+  mergeSingleMessage,
 } from './chatOrderUtils';
+import { toProxyStorageUrl } from './storageUrlUtils';
 
 export type RealtimeSyncStatus = 'connected' | 'syncing' | 'sleeping' | 'disconnected' | 'reconnecting';
 
@@ -1420,7 +1422,11 @@ class DataService {
         const list = msgMap[tid] ? [...msgMap[tid]] : [];
         const idx = list.findIndex((x) => x.id === item.id);
         if (idx >= 0) {
-          list[idx] = { ...list[idx], ...item, deliveryStatus: 'sent', deliveryError: undefined };
+          list[idx] = mergeSingleMessage(list[idx], {
+            ...item,
+            deliveryStatus: 'sent',
+            deliveryError: undefined,
+          });
         } else {
           list.push(item);
         }
@@ -1794,17 +1800,35 @@ class DataService {
         allMsgs.push(...mList);
       }
       if (allMsgs.length > 0) {
-        const rows = allMsgs.map((m) => ({
-          id: m.id,
-          conversation_id: m.conversationId,
-          sender_id: m.senderId,
-          sender_name: m.senderName,
-          sender_role: m.senderRole,
-          content: m.text || '',
-          transaction_data: m.transactionData || null,
-          created_at: m.createdAt,
-        }));
-        const { error } = await supabase.from('messages').upsert(rows);
+        const rows = allMsgs.map((m) => {
+          const normalizedAtt = m.attachmentUrl ? toProxyStorageUrl(m.attachmentUrl) || m.attachmentUrl : null;
+          const txPayload =
+            m.transactionData || normalizedAtt || m.attachmentName
+              ? {
+                  ...(m.transactionData || {}),
+                  ...(normalizedAtt ? { attachmentUrl: normalizedAtt } : {}),
+                  ...(m.attachmentName ? { attachmentName: m.attachmentName } : {}),
+                }
+              : null;
+          return {
+            id: m.id,
+            conversation_id: m.conversationId,
+            sender_id: m.senderId,
+            sender_name: m.senderName,
+            sender_role: m.senderRole,
+            content: m.text || '',
+            attachment_url: normalizedAtt,
+            attachment_name: m.attachmentName || null,
+            transaction_data: txPayload,
+            created_at: m.createdAt,
+          };
+        });
+        let { error } = await supabase.from('messages').upsert(rows);
+        if (error && (error.code === '42703' || error.code === 'PGRST204' || String(error.message || '').includes('attachment_url'))) {
+          const fallbackRows = rows.map(({ attachment_url, attachment_name, ...rest }) => rest);
+          const retryRes = await supabase.from('messages').upsert(fallbackRows);
+          error = retryRes.error;
+        }
         if (!error) counts['messages'] = rows.length;
       }
 
@@ -5052,12 +5076,16 @@ class DataService {
         : '');
     const customerUser = customerId ? this.getUserById(customerId) : undefined;
 
+    const normalizedAttachmentUrl = newMsg.attachmentUrl
+      ? toProxyStorageUrl(newMsg.attachmentUrl) || newMsg.attachmentUrl
+      : undefined;
+
     const txPayload =
-      newMsg.transactionData || newMsg.attachmentUrl || newMsg.attachmentName || newMsg.isInternalNote
+      newMsg.transactionData || normalizedAttachmentUrl || newMsg.attachmentName || newMsg.isInternalNote
         ? {
             ...(newMsg.transactionData || {}),
-            ...(newMsg.attachmentUrl
-              ? { attachmentUrl: newMsg.attachmentUrl || (newMsg.transactionData as any)?.attachmentUrl }
+            ...(normalizedAttachmentUrl
+              ? { attachmentUrl: normalizedAttachmentUrl || (newMsg.transactionData as any)?.attachmentUrl }
               : {}),
             ...(newMsg.attachmentName
               ? { attachmentName: newMsg.attachmentName || (newMsg.transactionData as any)?.attachmentName }
@@ -5086,7 +5114,7 @@ class DataService {
           senderEmail: newMsg.senderRole === 'customer' ? customerUser?.email : undefined,
           recipientEmail: customerUser?.email || conv?.customerEmail,
           text: newMsg.text,
-          attachmentUrl: newMsg.attachmentUrl,
+          attachmentUrl: normalizedAttachmentUrl,
           attachmentName: newMsg.attachmentName,
           transactionData: txPayload,
           isInternalNote: newMsg.isInternalNote,
@@ -5100,6 +5128,8 @@ class DataService {
         confirmedMsg = {
           ...newMsg,
           ...mapped,
+          attachmentUrl: mapped.attachmentUrl || normalizedAttachmentUrl,
+          attachmentName: mapped.attachmentName || newMsg.attachmentName,
           intentAction: newMsg.intentAction,
           deliveryStatus: 'sent',
           deliveryError: undefined,
@@ -5122,7 +5152,7 @@ class DataService {
               customer_id: customerId,
               customer_name: conv?.customerName || customerUser?.displayName || 'Customer',
               status: conv?.status || 'open',
-              last_message: newMsg.isInternalNote ? conv?.lastMessageText || '' : newMsg.text || (newMsg.attachmentUrl ? '[Photo Attachment]' : ''),
+              last_message: newMsg.isInternalNote ? conv?.lastMessageText || '' : newMsg.text || (normalizedAttachmentUrl ? '[Photo Attachment]' : ''),
               last_message_at: newMsg.createdAt || new Date().toISOString(),
             },
             { onConflict: 'id' }
@@ -5136,7 +5166,7 @@ class DataService {
           sender_name: newMsg.senderName,
           sender_role: newMsg.senderRole,
           content: newMsg.text,
-          attachment_url: newMsg.attachmentUrl || null,
+          attachment_url: normalizedAttachmentUrl || null,
           attachment_name: newMsg.attachmentName || null,
           transaction_data: txPayload,
           created_at: newMsg.createdAt,
@@ -5301,6 +5331,9 @@ class DataService {
     }
 
     const nowIso = new Date().toISOString();
+    const normalizedParamAttachment = params.attachmentUrl
+      ? toProxyStorageUrl(params.attachmentUrl) || params.attachmentUrl
+      : undefined;
     const newMsg: ChatMessage = {
       id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       conversationId: targetConvId,
@@ -5308,7 +5341,7 @@ class DataService {
       senderName: params.senderName,
       senderRole: params.senderRole,
       text: params.text,
-      attachmentUrl: params.attachmentUrl,
+      attachmentUrl: normalizedParamAttachment,
       attachmentName: params.attachmentName,
       isInternalNote: !!params.isInternalNote,
       intentAction,

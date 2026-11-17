@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import handler, { handleGetChatMessages, handlePostChatSend } from './index';
+import handler, {
+  handleGetChatMessages,
+  handlePostChatSend,
+  handleStorageUpload,
+  handleStorageFileProxy,
+} from './index';
 
 function createMockRes() {
   const headers: Record<string, string> = {};
@@ -182,15 +187,67 @@ function createFakeAdminClient(options?: {
     return builder;
   };
 
+  const storageBuckets: Array<{ name: string; public: boolean }> = [
+    { name: 'chat_attachments', public: false },
+  ];
+  const storageObjects = new Map<string, { data: Buffer; contentType: string }>();
+
   return {
     tables,
     opLog,
+    storageBuckets,
+    storageObjects,
     client: {
       auth: {
         admin: {
           async getUserById(uid: string) {
             return { data: { user: { id: uid, email: `${uid}@auth.test`, email_confirmed_at: '2026-11-01T00:00:00Z' } } };
           },
+        },
+      },
+      storage: {
+        async listBuckets() {
+          return { data: storageBuckets, error: null };
+        },
+        async createBucket(name: string, opts: any) {
+          storageBuckets.push({ name, public: Boolean(opts?.public) });
+          return { data: { name }, error: null };
+        },
+        async updateBucket(name: string, opts: any) {
+          const found = storageBuckets.find((b) => b.name === name);
+          if (found) found.public = Boolean(opts?.public);
+          return { data: { name }, error: null };
+        },
+        from(bucket: string) {
+          return {
+            async upload(path: string, buf: Buffer, opts: any) {
+              storageObjects.set(`${bucket}/${path}`, {
+                data: Buffer.isBuffer(buf) ? buf : Buffer.from(buf),
+                contentType: opts?.contentType || 'image/webp',
+              });
+              return { data: { path }, error: null };
+            },
+            getPublicUrl(path: string) {
+              return {
+                data: {
+                  publicUrl: `https://fsykihwprqdptrqapxxg.supabase.co/storage/v1/object/public/${bucket}/${path}`,
+                },
+              };
+            },
+            async download(path: string) {
+              const hit = storageObjects.get(`${bucket}/${path}`);
+              if (!hit) return { data: null, error: { message: 'Object not found' } };
+              return {
+                data: {
+                  type: hit.contentType,
+                  async arrayBuffer() {
+                    return hit.data.buffer.slice(hit.data.byteOffset, hit.data.byteOffset + hit.data.byteLength);
+                  },
+                },
+                error: null,
+              };
+            },
+          };
         },
       },
       from(table: string) {
@@ -338,4 +395,79 @@ test('handleGetChatMessages returns newest N messages in strict ascending order 
     state.body.messages.map((m: any) => m.id),
     ['m2', 'm3']
   );
+});
+
+test('handleStorageUpload promotes private bucket to public, uploads file, and returns proxy-backed URL for chat_attachments', async () => {
+  const fake = createFakeAdminClient();
+  const { res, state } = createMockRes();
+  const sampleBytes = Buffer.from('RIFF....WEBP', 'utf8');
+
+  await handleStorageUpload(
+    fake.client,
+    {
+      bucket: 'chat_attachments',
+      path: 'conv_u1/receipt_test.webp',
+      fileBase64: sampleBytes.toString('base64'),
+      contentType: 'image/webp',
+    },
+    res
+  );
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.body.success, true);
+  assert.equal(state.body.url, '/api/storage/file?bucket=chat_attachments&path=conv_u1%2Freceipt_test.webp');
+  assert.equal(fake.storageBuckets.find((b) => b.name === 'chat_attachments')?.public, true);
+  assert.ok(fake.storageObjects.has('chat_attachments/conv_u1/receipt_test.webp'));
+});
+
+test('handleStorageFileProxy downloads object when given signed/public Supabase URL with query tokens', async () => {
+  const fake = createFakeAdminClient();
+  const imageBuf = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  fake.storageObjects.set('chat_attachments/conv_u1/photo 1.png', {
+    data: imageBuf,
+    contentType: 'image/png',
+  });
+
+  const { res, state, headers } = createMockRes();
+  const rawUrl =
+    'https://fsykihwprqdptrqapxxg.supabase.co/storage/v1/object/sign/chat_attachments/conv_u1/photo%201.png?token=expiring_123';
+  const parsedUrl = new URL(`https://localhost/api/storage/file?url=${encodeURIComponent(rawUrl)}`);
+
+  await handleStorageFileProxy(fake.client, parsedUrl, res);
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(headers['content-type'], 'image/png');
+  assert.deepEqual(state.body, imageBuf);
+});
+
+test('handleGetChatMessages enriches stringified transaction_data and normalizes Supabase URLs to proxy URLs', async () => {
+  const fake = createFakeAdminClient({
+    initialConversations: [{ id: 'conv_u1', customer_id: 'u1' }],
+    initialMessages: [
+      {
+        id: 'm_att',
+        conversation_id: 'conv_u1',
+        content: '',
+        transaction_data: JSON.stringify({
+          attachmentUrl:
+            'https://fsykihwprqdptrqapxxg.supabase.co/storage/v1/object/public/chat_attachments/conv_u1/ss.webp?t=555',
+          attachmentName: 'ss.webp',
+        }),
+        created_at: '2026-11-16T10:00:00.000Z',
+      },
+    ],
+  });
+
+  const { res, state } = createMockRes();
+  const parsedUrl = new URL('https://localhost/api/chat/messages?conversationId=conv_u1&customerId=u1&limit=10');
+
+  await handleGetChatMessages(fake.client, parsedUrl, res);
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.body.messages.length, 1);
+  assert.equal(
+    state.body.messages[0].attachment_url,
+    '/api/storage/file?bucket=chat_attachments&path=conv_u1%2Fss.webp'
+  );
+  assert.equal(state.body.messages[0].attachment_name, 'ss.webp');
 });

@@ -1,4 +1,5 @@
 import type { ChatMessage } from '../types';
+import { parseTransactionDataField, toProxyStorageUrl } from './storageUrlUtils';
 
 export function isBotGreetingMessage(content?: string, senderName?: string): boolean {
   if (!content) return false;
@@ -23,38 +24,53 @@ export function resolveCanonicalConversationId(conversationId?: string, customer
 }
 
 export function extractAttachmentMetadata(row: any): { url?: string; name?: string } {
-  const url =
+  const txData = parseTransactionDataField(row?.transaction_data ?? row?.transactionData);
+  const rawUrl =
     row?.attachment_url ||
     row?.attachmentUrl ||
-    row?.transaction_data?.attachmentUrl ||
-    row?.transaction_data?.proofUrl ||
-    row?.transaction_data?.proof_url ||
-    row?.transaction_data?.receiptUrl ||
-    row?.transaction_data?.receipt_url ||
-    row?.transaction_data?.imageUrl ||
-    row?.transaction_data?.image_url ||
-    row?.transactionData?.attachmentUrl ||
-    row?.transactionData?.proofUrl ||
-    row?.transactionData?.receiptUrl ||
+    txData?.attachmentUrl ||
+    txData?.attachment_url ||
+    txData?.proofUrl ||
+    txData?.proof_url ||
+    txData?.receiptUrl ||
+    txData?.receipt_url ||
+    txData?.imageUrl ||
+    txData?.image_url ||
     row?.proof_url ||
     undefined;
+
+  const url = typeof rawUrl === 'string' && rawUrl.trim()
+    ? toProxyStorageUrl(rawUrl) || rawUrl.trim()
+    : undefined;
 
   const name =
     row?.attachment_name ||
     row?.attachmentName ||
-    row?.transaction_data?.attachmentName ||
-    row?.transaction_data?.proofName ||
-    row?.transaction_data?.fileName ||
-    row?.transactionData?.attachmentName ||
-    row?.transactionData?.proofName ||
+    txData?.attachmentName ||
+    txData?.attachment_name ||
+    txData?.proofName ||
+    txData?.proof_name ||
+    txData?.fileName ||
     (url ? 'Attached image' : undefined);
 
   return { url, name };
 }
 
+function normalizeTransactionDataUrls(txData: Record<string, any> | undefined): Record<string, any> | undefined {
+  if (!txData) return undefined;
+  const normalized: Record<string, any> = { ...txData };
+  for (const field of ['attachmentUrl', 'proofUrl', 'receiptUrl', 'imageUrl'] as const) {
+    if (typeof normalized[field] === 'string' && normalized[field].trim()) {
+      normalized[field] = toProxyStorageUrl(normalized[field]) || normalized[field].trim();
+    }
+  }
+  return normalized;
+}
+
 export function mapDbMessageRowToChatMessage(row: any, overrideConversationId?: string): ChatMessage {
   const { url, name } = extractAttachmentMetadata(row);
-  const txData = row?.transaction_data ?? row?.transactionData ?? undefined;
+  const rawTxData = parseTransactionDataField(row?.transaction_data ?? row?.transactionData);
+  const txData = normalizeTransactionDataUrls(rawTxData);
   const resolvedConvId = overrideConversationId || resolveCanonicalConversationId(row?.conversation_id || row?.conversationId);
 
   return {
@@ -67,7 +83,7 @@ export function mapDbMessageRowToChatMessage(row: any, overrideConversationId?: 
     attachmentUrl: url,
     attachmentName: name,
     isInternalNote: Boolean(row.is_internal_note ?? row.isInternalNote ?? txData?.isInternalNote ?? false),
-    transactionData: txData,
+    transactionData: txData as any,
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
     isRead: true,
     deliveryStatus: 'sent',
@@ -83,7 +99,7 @@ export function compareMessagesChronologically(a: ChatMessage, b: ChatMessage): 
   return String(a.id || '').localeCompare(String(b.id || ''));
 }
 
-function mergeSingleMessage(existing: ChatMessage | undefined, incoming: ChatMessage): ChatMessage {
+export function mergeSingleMessage(existing: ChatMessage | undefined, incoming: ChatMessage): ChatMessage {
   if (!existing) return incoming;
   // Prefer confirmed ('sent') status over transient optimistic ('sending'/'failed') status
   const resolvedStatus =
@@ -91,13 +107,35 @@ function mergeSingleMessage(existing: ChatMessage | undefined, incoming: ChatMes
       ? 'sent'
       : incoming.deliveryStatus || existing.deliveryStatus;
 
+  const mergedTxData =
+    existing.transactionData || incoming.transactionData
+      ? {
+          ...(existing.transactionData || {}),
+          ...(incoming.transactionData || {}),
+          ...((incoming.transactionData as any)?.attachmentUrl || (existing.transactionData as any)?.attachmentUrl
+            ? {
+                attachmentUrl:
+                  (incoming.transactionData as any)?.attachmentUrl ||
+                  (existing.transactionData as any)?.attachmentUrl,
+              }
+            : {}),
+          ...((incoming.transactionData as any)?.proofUrl || (existing.transactionData as any)?.proofUrl
+            ? {
+                proofUrl:
+                  (incoming.transactionData as any)?.proofUrl ||
+                  (existing.transactionData as any)?.proofUrl,
+              }
+            : {}),
+        }
+      : undefined;
+
   return {
     ...existing,
     ...incoming,
     conversationId: incoming.conversationId || existing.conversationId,
     attachmentUrl: incoming.attachmentUrl || existing.attachmentUrl,
     attachmentName: incoming.attachmentName || existing.attachmentName,
-    transactionData: incoming.transactionData || existing.transactionData,
+    transactionData: mergedTxData as any,
     intentAction: existing.intentAction || incoming.intentAction,
     deliveryStatus: resolvedStatus,
     deliveryError: resolvedStatus === 'sent' ? undefined : incoming.deliveryError ?? existing.deliveryError,

@@ -20,7 +20,7 @@ test('resolves attachment metadata from direct columns', () => {
   assert.equal(result.name, 'receipt1.webp');
 });
 
-test('resolves attachment metadata from transaction_data JSONB proofUrl and receiptUrl', () => {
+test('resolves attachment metadata from transaction_data JSONB proofUrl and receiptUrl and normalizes Supabase URLs', () => {
   const row1 = {
     transaction_data: {
       proofUrl: '/uploads/chat/deposit_proof.webp',
@@ -33,12 +33,22 @@ test('resolves attachment metadata from transaction_data JSONB proofUrl and rece
 
   const row2 = {
     transaction_data: {
-      receiptUrl: 'https://fsykihwprqdptrqapxxg.supabase.co/storage/v1/object/public/chat_attachments/rec.webp',
+      receiptUrl: 'https://fsykihwprqdptrqapxxg.supabase.co/storage/v1/object/public/chat_attachments/rec.webp?t=123',
     },
   };
   const res2 = extractAttachmentMetadata(row2);
-  assert.equal(res2.url, 'https://fsykihwprqdptrqapxxg.supabase.co/storage/v1/object/public/chat_attachments/rec.webp');
+  assert.equal(res2.url, '/api/storage/file?bucket=chat_attachments&path=rec.webp');
   assert.equal(res2.name, 'Attached image');
+
+  const row3 = {
+    transaction_data: JSON.stringify({
+      attachmentUrl: 'https://fsykihwprqdptrqapxxg.supabase.co/storage/v1/object/sign/chat_attachments/conv_u1/p.webp?token=abc',
+      attachmentName: 'p.webp',
+    }),
+  };
+  const res3 = extractAttachmentMetadata(row3);
+  assert.equal(res3.url, '/api/storage/file?bucket=chat_attachments&path=conv_u1%2Fp.webp');
+  assert.equal(res3.name, 'p.webp');
 });
 
 test('computes deterministic canonical conversation IDs across legacy prefixes', () => {
@@ -73,11 +83,19 @@ test('sortAndDeduplicateMessages sorts strictly by (createdAt ASC, id ASC) and p
   assert.equal(sorted[3].deliveryStatus, 'sent');
 });
 
-test('mergeAuthoritativeMessages preserves failed local messages, paginated older history, and maps DB rows cleanly', () => {
+test('mergeAuthoritativeMessages preserves failed local messages, paginated older history, and existing attachmentUrl on partial rows', () => {
   const local: ChatMessage[] = [
     { id: 'old_0', conversationId: 'conv_1', text: 'older paginated', createdAt: '2026-11-16T09:00:00.000Z', deliveryStatus: 'sent' },
     { id: 'm_fail', conversationId: 'conv_1', text: 'offline msg', createdAt: '2026-11-16T10:05:00.000Z', deliveryStatus: 'failed', deliveryError: 'Network down' },
-    { id: 'm_confirm', conversationId: 'conv_1', text: 'pending confirm', createdAt: '2026-11-16T10:02:00.000Z', deliveryStatus: 'sending' },
+    {
+      id: 'm_confirm',
+      conversationId: 'conv_1',
+      text: 'pending confirm',
+      attachmentUrl: '/api/storage/file?bucket=chat_attachments&path=conv_1%2Fpic.webp',
+      attachmentName: 'pic.webp',
+      createdAt: '2026-11-16T10:02:00.000Z',
+      deliveryStatus: 'sending',
+    },
   ];
 
   const remoteRows = [
@@ -109,6 +127,8 @@ test('mergeAuthoritativeMessages preserves failed local messages, paginated olde
   );
   assert.equal(merged[1].deliveryStatus, 'sent');
   assert.equal(merged[1].deliveryError, undefined);
+  assert.equal(merged[1].attachmentUrl, '/api/storage/file?bucket=chat_attachments&path=conv_1%2Fpic.webp');
+  assert.equal(merged[1].attachmentName, 'pic.webp');
   assert.equal(merged[3].deliveryStatus, 'failed');
   assert.equal(merged[3].deliveryError, 'Network down');
 });

@@ -32,6 +32,8 @@ import {
 } from 'lucide-react';
 import { notificationSoundService } from '../../services/notificationSoundService';
 import { storageService } from '../../services/storageService';
+import { toProxyStorageUrl, toDirectSupabaseStorageUrl } from '../../services/storageUrlUtils';
+import { supabaseUrl } from '../../services/supabaseClient';
 
 interface CustomerChatProps {
   currentUser: UserProfile;
@@ -214,37 +216,44 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSendMessage = (e?: React.FormEvent) => {
+  const handleSendMessage = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!inputText.trim() && !attachmentUrl) return;
     const canonicalConvId = `conv_${currentUser.id}`;
-
-    const newMsg = dataService.sendChatMessage({
-      conversationId: canonicalConvId,
-      senderId: currentUser.id,
-      senderName: currentUser.displayName,
-      senderRole: 'customer',
-      text: inputText.trim(),
-      attachmentUrl: attachmentUrl || undefined,
-      attachmentName: attachmentName || undefined,
-      isInternalNote: false,
-    });
-
-    setMessages((prev) => sortAndDeduplicateMessages([...prev, newMsg], true));
+    const pendingText = inputText.trim();
+    const pendingAttachmentUrl = attachmentUrl || undefined;
+    const pendingAttachmentName = attachmentName || undefined;
 
     setInputText('');
     setAttachmentName(null);
     setAttachmentUrl(null);
+    setUploadError(null);
+
+    const confirmed = await dataService.sendChatMessageConfirmed({
+      conversationId: canonicalConvId,
+      senderId: currentUser.id,
+      senderName: currentUser.displayName,
+      senderRole: 'customer',
+      text: pendingText,
+      attachmentUrl: pendingAttachmentUrl,
+      attachmentName: pendingAttachmentName,
+      isInternalNote: false,
+    });
+
+    setMessages((prev) => sortAndDeduplicateMessages([...prev, confirmed], true));
   };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [failedImageKeys, setFailedImageKeys] = useState<Record<string, number>>({});
   const [lightboxImage, setLightboxImage] = useState<{ url: string; name: string } | null>(null);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !conversation) return;
 
+    setUploadError(null);
     setIsUploadingAttachment(true);
     const result = await storageService.uploadChatAttachment(file, conversation.id);
     setIsUploadingAttachment(false);
@@ -253,7 +262,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       setAttachmentUrl(result.url);
       setAttachmentName(result.name || file.name);
     } else {
-      alert(result.error || 'Failed to upload image. Please try again.');
+      setUploadError(result.error || 'Failed to upload image. Please try again.');
     }
 
     if (fileInputRef.current) {
@@ -480,11 +489,13 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
                     {/* Image Attachment preview */}
                     {(() => {
-                      const effectiveImgUrl =
+                      const rawImgUrl =
                         msg.attachmentUrl ||
                         (msg.transactionData as any)?.attachmentUrl ||
                         (msg.transactionData as any)?.proofUrl ||
                         (msg.transactionData as any)?.receiptUrl;
+                      const effectiveImgUrl = rawImgUrl ? toProxyStorageUrl(rawImgUrl) || rawImgUrl : undefined;
+                      const fallbackDirectUrl = rawImgUrl ? toDirectSupabaseStorageUrl(rawImgUrl, supabaseUrl) : undefined;
                       const effectiveImgName =
                         msg.attachmentName ||
                         (msg.transactionData as any)?.attachmentName ||
@@ -492,37 +503,61 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                         'Attachment image';
 
                       if (!effectiveImgUrl) return null;
+                      const retrySeed = failedImageKeys[msg.id] || 0;
+                      const hasFailed = retrySeed < 0;
+                      const renderSrc =
+                        retrySeed > 0
+                          ? `${effectiveImgUrl}${effectiveImgUrl.includes('?') ? '&' : '?'}r=${retrySeed}`
+                          : effectiveImgUrl;
 
                       return (
                         <div
-                          onClick={() =>
+                          onClick={() => {
+                            if (hasFailed) {
+                              setFailedImageKeys((prev) => ({ ...prev, [msg.id]: Date.now() }));
+                              return;
+                            }
                             setLightboxImage({
                               url: effectiveImgUrl,
                               name: effectiveImgName,
-                            })
-                          }
+                            });
+                          }}
                           className="mt-2 rounded-lg overflow-hidden border border-slate-700/60 bg-black/40 cursor-pointer group relative"
-                          title="Click to view full image"
+                          title={hasFailed ? 'Click to retry loading image' : 'Click to view full image'}
                         >
-                          <img
-                            src={effectiveImgUrl}
-                            alt={effectiveImgName}
-                            className="w-full max-h-48 object-cover group-hover:scale-105 transition-transform duration-200"
-                            referrerPolicy="no-referrer"
-                            onError={(e) => {
-                              const target = e.currentTarget;
-                              if (!target.dataset.retried) {
-                                target.dataset.retried = 'true';
-                                target.src = `/api/storage/file?url=${encodeURIComponent(effectiveImgUrl)}`;
-                              }
-                            }}
-                          />
-                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-amber-300">
-                            <ZoomIn className="w-5 h-5 drop-shadow-md" />
-                          </div>
+                          {hasFailed ? (
+                            <div className="p-4 flex flex-col items-center justify-center gap-1.5 text-center bg-slate-900/90 text-slate-300">
+                              <RefreshCw className="w-4 h-4 text-amber-400" />
+                              <span className="text-[11px] font-medium">Image failed to load · Tap to retry</span>
+                            </div>
+                          ) : (
+                            <img
+                              key={`${msg.id}_${retrySeed}`}
+                              src={renderSrc}
+                              alt={effectiveImgName}
+                              className="w-full max-h-48 object-cover group-hover:scale-105 transition-transform duration-200"
+                              referrerPolicy="no-referrer"
+                              onError={(e) => {
+                                const target = e.currentTarget;
+                                if (target.dataset.retried !== 'direct' && fallbackDirectUrl && target.src !== fallbackDirectUrl) {
+                                  target.dataset.retried = 'direct';
+                                  target.src = fallbackDirectUrl;
+                                  return;
+                                }
+                                setFailedImageKeys((prev) => ({ ...prev, [msg.id]: -1 }));
+                              }}
+                            />
+                          )}
+                          {!hasFailed && (
+                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-amber-300">
+                              <ZoomIn className="w-5 h-5 drop-shadow-md" />
+                            </div>
+                          )}
                           <div className="p-1.5 text-[10px] text-slate-300 font-mono truncate bg-slate-900/80 flex items-center justify-between">
                             <span className="truncate">{effectiveImgName}</span>
-                            <span className="text-[9px] text-amber-400 font-sans ml-1 shrink-0">Click to expand</span>
+                            <span className="text-[9px] text-amber-400 font-sans ml-1 shrink-0">
+                              {hasFailed ? 'Tap to retry' : 'Click to expand'}
+                            </span>
                           </div>
                         </div>
                       );
@@ -595,6 +630,20 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Attachment Upload Error Banner */}
+      {uploadError && (
+        <div className="px-4 py-2 bg-rose-950/60 border-x border-rose-800/50 flex items-center justify-between text-xs text-rose-300">
+          <span className="truncate">{uploadError}</span>
+          <button
+            type="button"
+            onClick={() => setUploadError(null)}
+            className="text-rose-200 hover:text-white ml-2 shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Attachment Preview Chip */}
       {attachmentName && (
         <div className="px-4 py-2 bg-[#0E1726] border-x border-slate-800 flex items-center justify-between text-xs text-amber-300">
@@ -603,6 +652,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
             <span className="font-mono">{attachmentName}</span>
           </div>
           <button
+            type="button"
             onClick={() => {
               setAttachmentName(null);
               setAttachmentUrl(null);
@@ -740,6 +790,14 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               alt={lightboxImage.name}
               className="max-w-full max-h-[82vh] object-contain rounded-xl border border-slate-700/80 shadow-2xl"
               referrerPolicy="no-referrer"
+              onError={(e) => {
+                const target = e.currentTarget;
+                const directUrl = toDirectSupabaseStorageUrl(lightboxImage.url, supabaseUrl);
+                if (!target.dataset.retried && directUrl && target.src !== directUrl) {
+                  target.dataset.retried = 'true';
+                  target.src = directUrl;
+                }
+              }}
             />
             <div className="mt-2 text-xs font-mono text-slate-300 bg-slate-900/90 px-3 py-1 rounded-full border border-slate-700">
               {lightboxImage.name}

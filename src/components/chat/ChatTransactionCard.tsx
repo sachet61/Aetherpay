@@ -19,6 +19,8 @@ import {
 } from 'lucide-react';
 import { ChatTransactionData } from '../../types';
 import { dataService } from '../../services/dataService';
+import { toProxyStorageUrl, toDirectSupabaseStorageUrl } from '../../services/storageUrlUtils';
+import { supabaseUrl } from '../../services/supabaseClient';
 
 interface ChatTransactionCardProps {
   transaction: ChatTransactionData;
@@ -37,6 +39,12 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
 }) => {
   const [showScreenshotModal, setShowScreenshotModal] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
+  const resolvedProofUrl = transaction.proofUrl
+    ? toProxyStorageUrl(transaction.proofUrl) || transaction.proofUrl
+    : undefined;
+  const fallbackDirectProofUrl = transaction.proofUrl
+    ? toDirectSupabaseStorageUrl(transaction.proofUrl, supabaseUrl)
+    : undefined;
   const [verifiedAmount, setVerifiedAmount] = useState(
     transaction.amount > 0 ? String(transaction.amount) : ''
   );
@@ -321,14 +329,22 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
         </div>
 
         {/* Proof Screenshot Attachment */}
-        {transaction.proofUrl && (
+        {resolvedProofUrl && (
           <div className="mt-1 pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
               <img
-                src={transaction.proofUrl}
+                src={resolvedProofUrl}
                 alt="Proof"
+                referrerPolicy="no-referrer"
                 className="w-9 h-9 rounded-lg object-cover border border-slate-700 shrink-0 cursor-pointer hover:opacity-80"
                 onClick={handleOpenReviewModal}
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  if (!target.dataset.retried && fallbackDirectProofUrl && target.src !== fallbackDirectProofUrl) {
+                    target.dataset.retried = 'true';
+                    target.src = fallbackDirectProofUrl;
+                  }
+                }}
               />
               <div className="min-w-0">
                 <span className="text-[10px] text-slate-400 block">Payment Receipt Attached</span>
@@ -498,12 +514,20 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
                 </span>
               </div>
 
-              {transaction.proofUrl ? (
+              {resolvedProofUrl ? (
                 <div className="relative group rounded-xl bg-slate-950 border border-slate-800 overflow-hidden flex flex-col items-center p-2">
                   <img
-                    src={transaction.proofUrl}
+                    src={resolvedProofUrl}
                     alt="Proof"
+                    referrerPolicy="no-referrer"
                     className="max-h-56 w-auto object-contain rounded-lg shadow-sm"
+                    onError={(e) => {
+                      const target = e.currentTarget;
+                      if (!target.dataset.retried && fallbackDirectProofUrl && target.src !== fallbackDirectProofUrl) {
+                        target.dataset.retried = 'true';
+                        target.src = fallbackDirectProofUrl;
+                      }
+                    }}
                   />
                   <div className="mt-2 flex items-center gap-2">
                     <button
@@ -514,9 +538,9 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
                       <ZoomIn className="w-3.5 h-3.5 text-amber-400" />
                       <span>Full Screen Zoom</span>
                     </button>
-                    {transaction.proofUrl && (
+                    {resolvedProofUrl && (
                       <a
-                        href={transaction.proofUrl}
+                        href={resolvedProofUrl}
                         target="_blank"
                         rel="noreferrer"
                         className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold flex items-center gap-1 transition-colors"
@@ -709,7 +733,7 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
       )}
 
       {/* Full-size proof screenshot modal */}
-      {showScreenshotModal && transaction.proofUrl && (
+      {showScreenshotModal && resolvedProofUrl && (
         <div 
           className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in overflow-y-auto"
           onClick={(e) => {
@@ -731,9 +755,17 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
             </div>
             <div className="max-h-[70vh] overflow-auto rounded-xl bg-black flex items-center justify-center">
               <img
-                src={transaction.proofUrl}
+                src={resolvedProofUrl}
                 alt="Proof Full"
+                referrerPolicy="no-referrer"
                 className="max-h-[68vh] object-contain w-auto rounded-lg"
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  if (!target.dataset.retried && fallbackDirectProofUrl && target.src !== fallbackDirectProofUrl) {
+                    target.dataset.retried = 'true';
+                    target.src = fallbackDirectProofUrl;
+                  }
+                }}
               />
             </div>
             <div className="flex items-center justify-between text-xs text-slate-400 pt-1">

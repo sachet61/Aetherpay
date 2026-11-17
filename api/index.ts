@@ -36,8 +36,87 @@ async function getWebPushClient() {
   }
 }
 
+function safeDecodeUri(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+export function parseJsonObject(raw: any): Record<string, any> | null {
+  if (!raw) return null;
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+export function extractStorageLocationFromUrl(
+  rawUrl?: string | null,
+  depth: number = 0
+): { bucket: string; path: string } | null {
+  if (!rawUrl || typeof rawUrl !== 'string' || depth > 2) return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return null;
+
+  if (trimmed.includes('/api/storage/file')) {
+    try {
+      const parsed = new URL(trimmed, 'https://localhost');
+      const paramPath = (parsed.searchParams.get('path') || '').replace(/^\/+/, '');
+      const paramBucket = (parsed.searchParams.get('bucket') || 'chat_attachments').trim();
+      const paramUrl = (parsed.searchParams.get('url') || '').trim();
+      if (paramPath) {
+        return {
+          bucket: safeDecodeUri(paramBucket) || 'chat_attachments',
+          path: safeDecodeUri(paramPath).split('?')[0].split('#')[0],
+        };
+      }
+      if (paramUrl) {
+        return extractStorageLocationFromUrl(paramUrl, depth + 1);
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  const match = trimmed.match(/\/object\/(?:public|sign|authenticated)\/([^/?#]+)\/([^?#]+)/i);
+  if (match) {
+    const bucket = safeDecodeUri(match[1]).trim();
+    const path = safeDecodeUri(match[2]).replace(/^\/+/, '').trim();
+    if (bucket && path) {
+      return { bucket, path };
+    }
+  }
+  return null;
+}
+
+export function buildProxyStorageUrl(bucket: string, path: string): string {
+  return `/api/storage/file?bucket=${encodeURIComponent(bucket.trim() || 'chat_attachments')}&path=${encodeURIComponent(path.replace(/^\/+/, '').trim())}`;
+}
+
+export function normalizeStorageUrlForChat(rawUrl?: string | null): string | undefined {
+  if (!rawUrl || typeof rawUrl !== 'string') return undefined;
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return undefined;
+  const loc = extractStorageLocationFromUrl(trimmed);
+  return loc ? buildProxyStorageUrl(loc.bucket, loc.path) : trimmed;
+}
+
 async function ensureStorageBuckets(adminClient: any) {
   if (!adminClient?.storage) return;
+  const allowedMimeTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
   const targetBuckets = [
     { name: 'avatars', limit: 10485760 },
     { name: 'chat_attachments', limit: 15728640 },
@@ -48,13 +127,20 @@ async function ensureStorageBuckets(adminClient: any) {
       console.warn('[Vercel Storage Provisioning Notice]:', error.message);
       return;
     }
-    const existingNames = new Set((existingBuckets || []).map((b: any) => b.name));
+    const existingMap = new Map<string, any>((existingBuckets || []).map((b: any) => [b.name, b]));
     for (const b of targetBuckets) {
-      if (!existingNames.has(b.name)) {
+      const existing = existingMap.get(b.name);
+      if (!existing) {
         await adminClient.storage.createBucket(b.name, {
           public: true,
           fileSizeLimit: b.limit,
-          allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'],
+          allowedMimeTypes,
+        }).catch(() => {});
+      } else if (existing.public === false && typeof adminClient.storage.updateBucket === 'function') {
+        await adminClient.storage.updateBucket(b.name, {
+          public: true,
+          fileSizeLimit: b.limit,
+          allowedMimeTypes,
         }).catch(() => {});
       }
     }
@@ -206,6 +292,51 @@ function sortRawMessagesChronologically(rows: any[]): any[] {
   });
 }
 
+function enrichMessageRowForClient(row: any): any {
+  const parsedTx = parseJsonObject(row?.transaction_data);
+  const rawUrl =
+    row?.attachment_url ||
+    parsedTx?.attachmentUrl ||
+    parsedTx?.attachment_url ||
+    parsedTx?.proofUrl ||
+    parsedTx?.proof_url ||
+    parsedTx?.receiptUrl ||
+    parsedTx?.receipt_url ||
+    parsedTx?.imageUrl ||
+    parsedTx?.image_url ||
+    undefined;
+
+  const normalizedUrl = normalizeStorageUrlForChat(rawUrl) || null;
+  const normalizedName =
+    row?.attachment_name ||
+    parsedTx?.attachmentName ||
+    parsedTx?.proofName ||
+    parsedTx?.fileName ||
+    (normalizedUrl ? 'Attached image' : null);
+
+  let nextTx = parsedTx ? { ...parsedTx } : row?.transaction_data ?? null;
+  if (nextTx && typeof nextTx === 'object') {
+    for (const field of ['attachmentUrl', 'proofUrl', 'receiptUrl', 'imageUrl'] as const) {
+      if (typeof nextTx[field] === 'string' && nextTx[field].trim()) {
+        nextTx[field] = normalizeStorageUrlForChat(nextTx[field]) || nextTx[field].trim();
+      }
+    }
+    if (normalizedUrl && !nextTx.attachmentUrl) {
+      nextTx.attachmentUrl = normalizedUrl;
+    }
+    if (normalizedName && !nextTx.attachmentName) {
+      nextTx.attachmentName = normalizedName;
+    }
+  }
+
+  return {
+    ...row,
+    attachment_url: normalizedUrl,
+    attachment_name: normalizedName,
+    transaction_data: nextTx,
+  };
+}
+
 export async function handleGetChatMessages(adminClient: any, parsedUrl: URL, res: any) {
   setNoStoreHeaders(res);
   try {
@@ -259,7 +390,56 @@ export async function handleGetChatMessages(adminClient: any, parsedUrl: URL, re
       return res.status(500).json({ error: msgErr.message, code: msgErr.code });
     }
 
-    const sortedMessages = sortRawMessagesChronologically(messages || []);
+    const sortedMessages = sortRawMessagesChronologically(messages || []).map(enrichMessageRowForClient);
+
+    // Hydrate topup receipt proof_url onto transaction cards if linked topup request exists without proofUrl
+    const missingTopupIds = sortedMessages
+      .filter(
+        (m: any) =>
+          m?.transaction_data?.transactionType === 'topup' &&
+          m?.transaction_data?.requestId &&
+          !m.attachment_url &&
+          !m.transaction_data?.proofUrl
+      )
+      .map((m: any) => String(m.transaction_data.requestId));
+
+    if (missingTopupIds.length > 0) {
+      try {
+        const { data: topupRows } = await adminClient
+          .from('topups')
+          .select('id, proof_url')
+          .in('id', missingTopupIds.slice(0, 50))
+          .limit(50);
+
+        if (Array.isArray(topupRows) && topupRows.length > 0) {
+          const proofById = new Map<string, string>();
+          for (const t of topupRows) {
+            if (t?.id && t?.proof_url) {
+              proofById.set(t.id, normalizeStorageUrlForChat(t.proof_url) || t.proof_url);
+            }
+          }
+          for (let i = 0; i < sortedMessages.length; i++) {
+            const m = sortedMessages[i];
+            const reqId = m?.transaction_data?.requestId;
+            const foundProof = reqId ? proofById.get(reqId) : undefined;
+            if (foundProof) {
+              sortedMessages[i] = {
+                ...m,
+                attachment_url: foundProof,
+                attachment_name: m.attachment_name || 'Payment Receipt',
+                transaction_data: {
+                  ...m.transaction_data,
+                  proofUrl: foundProof,
+                  attachmentUrl: m.transaction_data?.attachmentUrl || foundProof,
+                },
+              };
+            }
+          }
+        }
+      } catch {
+        // Non-fatal enrichment notice
+      }
+    }
 
     return res.status(200).json({
       success: true,
@@ -445,15 +625,28 @@ export async function handlePostChatSend(adminClient: any, body: any, res: any) 
         ? id.trim()
         : `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
+    const parsedTxInput = parseJsonObject(transactionData);
+    const rawAttachmentUrl =
+      attachmentUrl ||
+      parsedTxInput?.attachmentUrl ||
+      parsedTxInput?.proofUrl ||
+      parsedTxInput?.receiptUrl ||
+      undefined;
+    const normalizedAttachmentUrl = normalizeStorageUrlForChat(rawAttachmentUrl);
+
     const txPayload =
-      transactionData || attachmentUrl || attachmentName || isInternalNote
+      parsedTxInput || normalizedAttachmentUrl || attachmentName || isInternalNote
         ? {
-            ...(transactionData || {}),
-            ...(attachmentUrl
-              ? { attachmentUrl: attachmentUrl || transactionData?.attachmentUrl || transactionData?.proofUrl }
+            ...(parsedTxInput || {}),
+            ...(parsedTxInput?.proofUrl
+              ? { proofUrl: normalizeStorageUrlForChat(parsedTxInput.proofUrl) || parsedTxInput.proofUrl }
               : {}),
+            ...(parsedTxInput?.receiptUrl
+              ? { receiptUrl: normalizeStorageUrlForChat(parsedTxInput.receiptUrl) || parsedTxInput.receiptUrl }
+              : {}),
+            ...(normalizedAttachmentUrl ? { attachmentUrl: normalizedAttachmentUrl } : {}),
             ...(attachmentName
-              ? { attachmentName: attachmentName || transactionData?.attachmentName }
+              ? { attachmentName: attachmentName || parsedTxInput?.attachmentName }
               : {}),
             ...(isInternalNote ? { isInternalNote: true } : {}),
           }
@@ -470,8 +663,8 @@ export async function handlePostChatSend(adminClient: any, body: any, res: any) 
       created_at: now,
       is_internal_note: Boolean(isInternalNote),
     };
-    if (attachmentUrl) {
-      messageRow.attachment_url = attachmentUrl;
+    if (normalizedAttachmentUrl) {
+      messageRow.attachment_url = normalizedAttachmentUrl;
     }
     if (attachmentName) {
       messageRow.attachment_name = attachmentName;
@@ -516,9 +709,115 @@ export async function handlePostChatSend(adminClient: any, body: any, res: any) 
       savedMsg = data;
     }
 
-    return res.status(200).json({ success: true, message: savedMsg, canonicalId: canonicalConvId });
+    const enrichedSaved = enrichMessageRowForClient({
+      ...savedMsg,
+      attachment_url: savedMsg?.attachment_url || normalizedAttachmentUrl || null,
+      attachment_name: savedMsg?.attachment_name || attachmentName || null,
+      transaction_data: savedMsg?.transaction_data ?? txPayload,
+    });
+
+    return res.status(200).json({ success: true, message: enrichedSaved, canonicalId: canonicalConvId });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Failed to dispatch chat message' });
+  }
+}
+
+export async function handleStorageUpload(adminClient: any, body: any, res: any) {
+  try {
+    const { bucket, path: filePath, fileBase64, contentType, userId } = body || {};
+    if (!bucket || !filePath || !fileBase64) {
+      return res.status(400).json({ error: 'bucket, path, and fileBase64 are required' });
+    }
+
+    await ensureStorageBuckets(adminClient);
+
+    const buffer = Buffer.from(fileBase64, 'base64');
+    const { data, error } = await adminClient.storage
+      .from(bucket)
+      .upload(filePath, buffer, {
+        contentType: contentType || 'image/webp',
+        upsert: true,
+        cacheControl: '86400',
+      });
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const storedPath = data?.path || filePath;
+    const { data: urlData } = adminClient.storage
+      .from(bucket)
+      .getPublicUrl(storedPath);
+
+    const publicUrl = urlData?.publicUrl || '';
+    const proxyUrl = buildProxyStorageUrl(bucket, storedPath);
+
+    if (bucket === 'avatars' && userId) {
+      try {
+        await adminClient
+          .from('users')
+          .update({ avatar_url: publicUrl, updated_at: new Date().toISOString() })
+          .eq('id', userId);
+      } catch (e: any) {
+        console.warn('[Vercel Auto Avatar DB Update Notice]:', e?.message);
+      }
+
+      try {
+        await adminClient.auth.admin.updateUserById(userId, { user_metadata: { avatar_url: publicUrl } });
+      } catch (e: any) {
+        console.warn('[Vercel Auto Avatar Auth Update Notice]:', e?.message);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      url: bucket === 'chat_attachments' ? proxyUrl : publicUrl,
+      proxyUrl,
+      publicUrl,
+      path: storedPath,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Server storage upload failed' });
+  }
+}
+
+export async function handleStorageFileProxy(adminClient: any, parsedUrl: URL, res: any) {
+  try {
+    const bucket = (parsedUrl.searchParams.get('bucket') || 'chat_attachments').trim();
+    const filePath = (parsedUrl.searchParams.get('path') || '').trim();
+    const rawFileUrl = (parsedUrl.searchParams.get('url') || '').trim();
+
+    let targetPath = safeDecodeUri(filePath.replace(/^\/+/, '').split('?')[0].split('#')[0]);
+    let targetBucket = safeDecodeUri(bucket) || 'chat_attachments';
+
+    if (!targetPath && rawFileUrl) {
+      const extracted = extractStorageLocationFromUrl(rawFileUrl);
+      if (extracted) {
+        targetBucket = extracted.bucket;
+        targetPath = extracted.path;
+      }
+    }
+
+    if (!targetPath) {
+      return res.status(400).json({ error: 'path or url parameter is required' });
+    }
+
+    const { data: blob, error } = await adminClient.storage.from(targetBucket).download(targetPath);
+    if (error || !blob) {
+      return res.status(404).json({ error: error?.message || 'File not found' });
+    }
+
+    const buffer = Buffer.from(await blob.arrayBuffer());
+    const ext = targetPath.split('.').pop()?.toLowerCase() || '';
+    const mime =
+      blob.type ||
+      (ext === 'webp' ? 'image/webp' : ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg');
+
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    return res.status(200).send(buffer);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Error streaming file' });
   }
 }
 
@@ -1060,60 +1359,8 @@ export default async function handler(req: any, res: any) {
 
   // 5. Storage Fallback Upload Endpoint (Uses Service Role for Production Serverless)
   if (url.includes('/api/storage/upload') && req.method === 'POST') {
-    try {
-      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      const { bucket, path: filePath, fileBase64, contentType, userId } = body || {};
-      if (!bucket || !filePath || !fileBase64) {
-        return res.status(400).json({ error: 'bucket, path, and fileBase64 are required' });
-      }
-
-      await ensureStorageBuckets(supabaseAdmin);
-
-      const buffer = Buffer.from(fileBase64, 'base64');
-      const { data, error } = await supabaseAdmin.storage
-        .from(bucket)
-        .upload(filePath, buffer, {
-          contentType: contentType || 'image/webp',
-          upsert: true,
-          cacheControl: '86400',
-        });
-
-      if (error) {
-        return res.status(500).json({ error: error.message });
-      }
-
-      const { data: urlData } = supabaseAdmin.storage
-        .from(bucket)
-        .getPublicUrl(data?.path || filePath);
-
-      const publicUrl = urlData.publicUrl;
-
-      // If uploading an avatar and userId is provided, atomically update public.users and auth metadata
-      if (bucket === 'avatars' && userId) {
-        try {
-          await supabaseAdmin
-            .from('users')
-            .update({ avatar_url: publicUrl, updated_at: new Date().toISOString() })
-            .eq('id', userId);
-        } catch (e: any) {
-          console.warn('[Vercel Auto Avatar DB Update Notice]:', e?.message);
-        }
-
-        try {
-          await supabaseAdmin.auth.admin.updateUserById(userId, { user_metadata: { avatar_url: publicUrl } });
-        } catch (e: any) {
-          console.warn('[Vercel Auto Avatar Auth Update Notice]:', e?.message);
-        }
-      }
-
-      return res.status(200).json({
-        success: true,
-        url: publicUrl,
-        path: data?.path || filePath,
-      });
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message || 'Server storage upload failed' });
-    }
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    return handleStorageUpload(supabaseAdmin, body, res);
   }
 
   // 5b. Stateless QR & Catalog Icon Upload to Supabase Storage
@@ -1174,41 +1421,7 @@ export default async function handler(req: any, res: any) {
 
   // 5c. Stateless Storage Streaming Proxy Fallback
   if (url.includes('/api/storage/file') && req.method === 'GET') {
-    try {
-      const bucket = parsedUrl.searchParams.get('bucket') || 'chat_attachments';
-      const filePath = parsedUrl.searchParams.get('path') || '';
-      const rawFileUrl = parsedUrl.searchParams.get('url') || '';
-
-      let targetPath = filePath.replace(/^\/+/, '');
-      let targetBucket = bucket;
-
-      if (!targetPath && rawFileUrl) {
-        const match = rawFileUrl.match(/\/object\/public\/([^\/]+)\/(.+)$/);
-        if (match) {
-          targetBucket = match[1];
-          targetPath = match[2];
-        }
-      }
-
-      if (!targetPath) {
-        return res.status(400).json({ error: 'path or url parameter is required' });
-      }
-
-      const { data: blob, error } = await supabaseAdmin.storage.from(targetBucket).download(targetPath);
-      if (error || !blob) {
-        return res.status(404).json({ error: 'File not found' });
-      }
-
-      const buffer = Buffer.from(await blob.arrayBuffer());
-      const ext = targetPath.split('.').pop()?.toLowerCase() || '';
-      const mime = blob.type || (ext === 'webp' ? 'image/webp' : ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg');
-
-      res.setHeader('Content-Type', mime);
-      res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
-      return res.status(200).send(buffer);
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message || 'Error streaming file' });
-    }
+    return handleStorageFileProxy(supabaseAdmin, parsedUrl, res);
   }
 
   // Dedicated User Avatar & Profile Picture Persistence Endpoint (Vercel Serverless)
