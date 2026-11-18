@@ -293,6 +293,7 @@ export type ReferralPayoutTarget = 'referral_bonus' | 'available_balance';
 export type ReferralAwardStatus =
   | 'registered'
   | 'pending_deposit'
+  | 'processing'
   | 'held_for_review'
   | 'rewarded'
   | 'rejected'
@@ -372,6 +373,22 @@ export interface ReferredUser {
   source?: string;
 }
 
+export interface ReferralWelcomeBonus {
+  hasReferrer: boolean;
+  awardId?: string;
+  referrerId?: string;
+  referrerName?: string;
+  referralCodeUsed?: string;
+  status: 'none' | 'pending' | 'processing' | 'rewarded' | 'held' | 'rejected';
+  expectedAmount: number;
+  creditedAmount: number;
+  depositTotal: number;
+  qualifyingDepositMin: number;
+  payoutTarget: ReferralPayoutTarget;
+  txId?: string;
+  rewardedAt?: string;
+}
+
 export interface ReferralSummary {
   referralCode: string;
   referralLink: string;
@@ -389,6 +406,11 @@ export interface ReferralSummary {
   maxReferralsPerUser?: number;
   programEnabled?: boolean;
   referredUsers: ReferredUser[];
+  welcomeBonus?: ReferralWelcomeBonus;
+  walletBalances?: {
+    availableBalance: number;
+    referralBonusBalance: number;
+  };
 }
 
 export interface PaymentMethodConfig {

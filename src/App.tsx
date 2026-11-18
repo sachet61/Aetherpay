@@ -631,7 +631,7 @@ export default function App() {
                 <Gift className="w-5 h-5 text-amber-400" />
                 <div>
                   <div className="font-semibold text-white">Referrals</div>
-                  <div className="text-[10px] text-slate-400">Earn $25 cash rewards</div>
+                  <div className="text-[10px] text-slate-400">Invite friends &amp; earn bonuses</div>
                 </div>
               </button>
 

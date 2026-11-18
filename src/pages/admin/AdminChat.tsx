@@ -379,9 +379,6 @@ export const AdminChat: React.FC<AdminChatProps> = ({
           if (payload && payload.id) {
             dataService.appendIncomingMessage(payload);
             setMessages((prev) => sortAndDeduplicateMessages([...prev, payload], true));
-            if (payload.senderRole === 'customer') {
-              notificationSoundService.playIncomingMessageSound();
-            }
           }
         },
         onPostgresChange: (payload) => {
@@ -390,9 +387,6 @@ export const AdminChat: React.FC<AdminChatProps> = ({
             const incoming = mapDbMessageRowToChatMessage(row, canonicalConvId);
             dataService.appendIncomingMessage(incoming);
             setMessages((prev) => sortAndDeduplicateMessages([...prev, incoming], true));
-            if (incoming.senderRole === 'customer') {
-              notificationSoundService.playIncomingMessageSound();
-            }
           }
         },
       }
@@ -426,16 +420,6 @@ export const AdminChat: React.FC<AdminChatProps> = ({
             dataService.resolveCanonicalConvId(currentActive))
       ) {
         setMessages((prev) => sortAndDeduplicateMessages([...prev, incoming], true));
-      }
-
-      if (incoming.senderRole === 'customer') {
-        notificationSoundService.playIncomingMessageSound();
-        if (document.hidden) {
-          notificationSoundService.showDesktopNotification(
-            `New message from ${incoming.senderName}`,
-            { body: incoming.text }
-          );
-        }
       }
     };
 

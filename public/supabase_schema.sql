@@ -451,3 +451,329 @@ BEGIN
   END IF;
 END $$;
 
+-- ====================================================================
+-- 16. Idempotent Audit Logs Schema Alignment, Indexes & Realtime
+-- ====================================================================
+
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_id TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_name TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_role TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS entity_type TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS entity_id TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS details TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ DEFAULT timezone('utc'::text, now());
+
+ALTER TABLE public.audit_logs ALTER COLUMN actor_id SET DEFAULT 'system';
+ALTER TABLE public.audit_logs ALTER COLUMN actor_name SET DEFAULT 'System';
+ALTER TABLE public.audit_logs ALTER COLUMN actor_role SET DEFAULT 'customer';
+ALTER TABLE public.audit_logs ALTER COLUMN timestamp SET DEFAULT timezone('utc'::text, now());
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON public.audit_logs(timestamp DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_entity_timestamp ON public.audit_logs(entity_type, timestamp DESC);
+
+ALTER TABLE public.audit_logs REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_publication_tables
+      WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'audit_logs'
+    ) THEN
+      ALTER PUBLICATION supabase_realtime ADD TABLE public.audit_logs;
+    END IF;
+  END IF;
+END $$;
+
+-- ====================================================================
+-- 17. Referral Ledger, Vanity Codes, Fraud Telemetry & Wallet Bonus Alignment
+-- ====================================================================
+
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS referral_code TEXT;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS referred_by TEXT;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS signup_ip TEXT;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS device_fingerprint TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code_upper_unique
+  ON public.users (upper(referral_code))
+  WHERE referral_code IS NOT NULL AND btrim(referral_code) <> '';
+
+ALTER TABLE public.wallets
+  ADD COLUMN IF NOT EXISTS referral_bonus_balance NUMERIC(12, 2) NOT NULL DEFAULT 0.00;
+
+CREATE TABLE IF NOT EXISTS public.referral_awards (
+  id TEXT PRIMARY KEY,
+  referrer_id TEXT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  referee_id TEXT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  referral_code_used TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'signup_link',
+  reward_mode TEXT NOT NULL DEFAULT 'flat',
+  payout_target TEXT NOT NULL DEFAULT 'referral_bonus',
+  referrer_reward_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  referee_reward_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  qualifying_deposit_id TEXT,
+  qualifying_deposit_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  status TEXT NOT NULL DEFAULT 'registered',
+  fraud_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+  staff_reason TEXT,
+  assigned_by TEXT,
+  assigned_by_name TEXT,
+  reviewed_by TEXT,
+  reviewed_by_name TEXT,
+  review_notes TEXT,
+  rewarded_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  CONSTRAINT uq_referral_awards_referee UNIQUE (referee_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_referral_awards_referrer_status
+  ON public.referral_awards(referrer_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_referral_awards_status_created
+  ON public.referral_awards(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_referral_awards_rewarded_at
+  ON public.referral_awards(rewarded_at DESC);
+
+ALTER TABLE public.referral_awards ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public' AND tablename = 'referral_awards' AND policyname = 'Allow authenticated referral read'
+  ) THEN
+    CREATE POLICY "Allow authenticated referral read" ON public.referral_awards
+      FOR SELECT USING (
+        auth.uid()::text = referrer_id
+        OR auth.uid()::text = referee_id
+        OR EXISTS (
+          SELECT 1 FROM public.users u
+          WHERE u.id = auth.uid()::text AND u.role IN ('admin', 'agent')
+        )
+      );
+  END IF;
+END $$;
+
+ALTER TABLE public.referral_awards REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_publication_tables
+      WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'referral_awards'
+    ) THEN
+      ALTER PUBLICATION supabase_realtime ADD TABLE public.referral_awards;
+    END IF;
+  END IF;
+END $$;
+
+-- ====================================================================
+-- 18. Atomic & Idempotent Referral Payout RPC + Ledger Safeguards
+-- ====================================================================
+
+CREATE INDEX IF NOT EXISTS idx_transactions_reference_type
+  ON public.transactions(reference_id, type)
+  WHERE reference_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.credit_referral_award_atomic(
+  p_award_id TEXT,
+  p_referrer_id TEXT,
+  p_referee_id TEXT,
+  p_payout_target TEXT DEFAULT 'referral_bonus',
+  p_referrer_amount NUMERIC DEFAULT 0,
+  p_referee_amount NUMERIC DEFAULT 0,
+  p_referrer_tx_id TEXT DEFAULT NULL,
+  p_referee_tx_id TEXT DEFAULT NULL,
+  p_referrer_desc TEXT DEFAULT NULL,
+  p_referee_desc TEXT DEFAULT NULL,
+  p_referrer_notif_title TEXT DEFAULT 'Referral Reward Credited!',
+  p_referrer_notif_msg TEXT DEFAULT NULL,
+  p_referee_notif_title TEXT DEFAULT 'Welcome Referral Bonus Credited!',
+  p_referee_notif_msg TEXT DEFAULT NULL,
+  p_qualifying_deposit_id TEXT DEFAULT NULL,
+  p_qualifying_deposit_amount NUMERIC DEFAULT 0,
+  p_reward_mode TEXT DEFAULT 'flat',
+  p_reviewed_by TEXT DEFAULT NULL,
+  p_reviewed_by_name TEXT DEFAULT NULL,
+  p_review_notes TEXT DEFAULT NULL,
+  p_fraud_flags JSONB DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_award RECORD;
+  v_now TIMESTAMPTZ := timezone('utc'::text, now());
+  v_ref_amt NUMERIC(12, 2) := ROUND(GREATEST(0, COALESCE(p_referrer_amount, 0)), 2);
+  v_ee_amt NUMERIC(12, 2) := ROUND(GREATEST(0, COALESCE(p_referee_amount, 0)), 2);
+  v_target TEXT := CASE WHEN p_payout_target = 'available_balance' THEN 'available_balance' ELSE 'referral_bonus' END;
+  v_ref_tx_id TEXT := COALESCE(NULLIF(btrim(p_referrer_tx_id), ''), 'tx_ref_r_' || p_award_id);
+  v_ee_tx_id TEXT := COALESCE(NULLIF(btrim(p_referee_tx_id), ''), 'tx_ref_f_' || p_award_id);
+  v_ref_credited BOOLEAN := false;
+  v_ee_credited BOOLEAN := false;
+  v_ref_already BOOLEAN := false;
+  v_ee_already BOOLEAN := false;
+  v_first_id TEXT;
+  v_second_id TEXT;
+BEGIN
+  SELECT * INTO v_award
+  FROM public.referral_awards
+  WHERE id = p_award_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Referral award % not found', p_award_id;
+  END IF;
+
+  v_first_id := LEAST(p_referrer_id, p_referee_id);
+  v_second_id := GREATEST(p_referrer_id, p_referee_id);
+
+  IF v_first_id IS NOT NULL AND btrim(v_first_id) <> '' THEN
+    INSERT INTO public.wallets (customer_id, balance, referral_bonus_balance, currency, updated_at)
+    VALUES (v_first_id, 0, 0, 'USD', v_now)
+    ON CONFLICT (customer_id) DO NOTHING;
+    PERFORM 1 FROM public.wallets WHERE customer_id = v_first_id FOR UPDATE;
+  END IF;
+
+  IF v_second_id IS NOT NULL AND btrim(v_second_id) <> '' AND v_second_id <> v_first_id THEN
+    INSERT INTO public.wallets (customer_id, balance, referral_bonus_balance, currency, updated_at)
+    VALUES (v_second_id, 0, 0, 'USD', v_now)
+    ON CONFLICT (customer_id) DO NOTHING;
+    PERFORM 1 FROM public.wallets WHERE customer_id = v_second_id FOR UPDATE;
+  END IF;
+
+  IF v_ref_amt > 0 AND p_referrer_id IS NOT NULL AND btrim(p_referrer_id) <> '' THEN
+    IF EXISTS (
+      SELECT 1 FROM public.transactions
+      WHERE id = v_ref_tx_id
+         OR (customer_id = p_referrer_id AND reference_id = p_award_id AND type = 'referral_reward' AND status = 'completed')
+    ) THEN
+      v_ref_already := true;
+    ELSE
+      IF v_target = 'available_balance' THEN
+        UPDATE public.wallets
+        SET balance = ROUND((COALESCE(balance, 0) + v_ref_amt)::numeric, 2),
+            updated_at = v_now
+        WHERE customer_id = p_referrer_id;
+      ELSE
+        UPDATE public.wallets
+        SET referral_bonus_balance = ROUND((COALESCE(referral_bonus_balance, 0) + v_ref_amt)::numeric, 2),
+            updated_at = v_now
+        WHERE customer_id = p_referrer_id;
+      END IF;
+
+      INSERT INTO public.transactions (
+        id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+      ) VALUES (
+        v_ref_tx_id,
+        p_referrer_id,
+        v_ref_amt,
+        'referral_reward',
+        'completed',
+        COALESCE(NULLIF(btrim(p_referrer_desc), ''), 'Referral Bonus Reward'),
+        p_award_id,
+        'Swift Sweeps Referral',
+        v_now
+      );
+
+      INSERT INTO public.notifications (
+        id, user_id, title, message, type, read, link_tab, link_request_id, created_at
+      ) VALUES (
+        'notif_' || v_ref_tx_id,
+        p_referrer_id,
+        COALESCE(NULLIF(btrim(p_referrer_notif_title), ''), 'Referral Reward Credited!'),
+        COALESCE(NULLIF(btrim(p_referrer_notif_msg), ''), 'Your referral reward has been credited to your wallet.'),
+        'referral',
+        false,
+        'referrals',
+        p_award_id,
+        v_now
+      ) ON CONFLICT (id) DO NOTHING;
+
+      v_ref_credited := true;
+    END IF;
+  END IF;
+
+  IF v_ee_amt > 0 AND p_referee_id IS NOT NULL AND btrim(p_referee_id) <> '' THEN
+    IF EXISTS (
+      SELECT 1 FROM public.transactions
+      WHERE id = v_ee_tx_id
+         OR (customer_id = p_referee_id AND reference_id = p_award_id AND type = 'referral_reward' AND status = 'completed')
+    ) THEN
+      v_ee_already := true;
+    ELSE
+      IF v_target = 'available_balance' THEN
+        UPDATE public.wallets
+        SET balance = ROUND((COALESCE(balance, 0) + v_ee_amt)::numeric, 2),
+            updated_at = v_now
+        WHERE customer_id = p_referee_id;
+      ELSE
+        UPDATE public.wallets
+        SET referral_bonus_balance = ROUND((COALESCE(referral_bonus_balance, 0) + v_ee_amt)::numeric, 2),
+            updated_at = v_now
+        WHERE customer_id = p_referee_id;
+      END IF;
+
+      INSERT INTO public.transactions (
+        id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+      ) VALUES (
+        v_ee_tx_id,
+        p_referee_id,
+        v_ee_amt,
+        'referral_reward',
+        'completed',
+        COALESCE(NULLIF(btrim(p_referee_desc), ''), 'Welcome Referral Bonus'),
+        p_award_id,
+        'Swift Sweeps Referral',
+        v_now
+      );
+
+      INSERT INTO public.notifications (
+        id, user_id, title, message, type, read, link_tab, link_request_id, created_at
+      ) VALUES (
+        'notif_' || v_ee_tx_id,
+        p_referee_id,
+        COALESCE(NULLIF(btrim(p_referee_notif_title), ''), 'Welcome Referral Bonus Credited!'),
+        COALESCE(NULLIF(btrim(p_referee_notif_msg), ''), 'Your welcome referral bonus has been credited to your wallet.'),
+        'referral',
+        false,
+        'wallet',
+        p_award_id,
+        v_now
+      ) ON CONFLICT (id) DO NOTHING;
+
+      v_ee_credited := true;
+    END IF;
+  END IF;
+
+  UPDATE public.referral_awards
+  SET
+    status = 'rewarded',
+    payout_target = v_target,
+    reward_mode = COALESCE(NULLIF(btrim(p_reward_mode), ''), reward_mode),
+    referrer_reward_amount = v_ref_amt,
+    referee_reward_amount = v_ee_amt,
+    qualifying_deposit_id = COALESCE(NULLIF(btrim(p_qualifying_deposit_id), ''), qualifying_deposit_id),
+    qualifying_deposit_amount = GREATEST(COALESCE(qualifying_deposit_amount, 0), COALESCE(p_qualifying_deposit_amount, 0)),
+    reviewed_by = COALESCE(NULLIF(btrim(p_reviewed_by), ''), reviewed_by),
+    reviewed_by_name = COALESCE(NULLIF(btrim(p_reviewed_by_name), ''), reviewed_by_name),
+    review_notes = COALESCE(NULLIF(btrim(p_review_notes), ''), review_notes),
+    fraud_flags = COALESCE(p_fraud_flags, fraud_flags),
+    rewarded_at = COALESCE(rewarded_at, v_now),
+    updated_at = v_now
+  WHERE id = p_award_id;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'awardId', p_award_id,
+    'referrerCredited', v_ref_credited,
+    'referrerAlreadyCredited', v_ref_already,
+    'refereeCredited', v_ee_credited,
+    'refereeAlreadyCredited', v_ee_already
+  );
+END;
+$$;
+

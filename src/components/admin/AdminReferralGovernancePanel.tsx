@@ -31,6 +31,7 @@ const STATUS_TABS: Array<{ id: string; label: string }> = [
 const STATUS_DISPLAY: Record<ReferralAwardStatus, { label: string; cls: string }> = {
   registered: { label: 'Registered', cls: 'bg-slate-800 text-slate-300 border-slate-700' },
   pending_deposit: { label: 'Awaiting Deposit', cls: 'bg-indigo-950/70 text-indigo-300 border-indigo-800/70' },
+  processing: { label: 'Processing', cls: 'bg-cyan-950/70 text-cyan-300 border-cyan-800/70' },
   held_for_review: { label: 'Held for Review', cls: 'bg-amber-950/70 text-amber-300 border-amber-700/70' },
   rewarded: { label: 'Rewarded', cls: 'bg-emerald-950/70 text-emerald-300 border-emerald-800/70' },
   rejected: { label: 'Rejected', cls: 'bg-rose-950/70 text-rose-300 border-rose-800/70' },
@@ -63,6 +64,7 @@ export const AdminReferralGovernancePanel: React.FC<AdminReferralGovernancePanel
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [reviewNotesMap, setReviewNotesMap] = useState<Record<string, string>>({});
   const [busyAwardId, setBusyAwardId] = useState<string | null>(null);
+  const [isReconciling, setIsReconciling] = useState(false);
   const [actionMsg, setActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const loadLedger = async (showSpinner = false) => {
@@ -120,6 +122,26 @@ export const AdminReferralGovernancePanel: React.FC<AdminReferralGovernancePanel
     }
   };
 
+  const handleReconcileMissing = async () => {
+    if (!isAdmin || isReconciling) return;
+    setIsReconciling(true);
+    setActionMsg(null);
+    const res = await dataService.reconcileReferralRewards();
+    setIsReconciling(false);
+    if (res.success) {
+      setActionMsg({
+        type: 'success',
+        text:
+          (res.reconciledAwards || 0) > 0
+            ? `Reconciled ${res.reconciledAwards} referral award(s) across ${res.creditedLegs || 0} wallet leg(s) ($${(res.totalCreditedAmount || 0).toFixed(2)}).`
+            : `Audit complete across ${res.checkedAwards || 0} rewarded record(s). All wallet credits are already synced.`,
+      });
+      void loadLedger(false);
+    } else {
+      setActionMsg({ type: 'error', text: res.error || 'Failed to reconcile missing referral rewards.' });
+    }
+  };
+
   return (
     <section className="space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -133,14 +155,31 @@ export const AdminReferralGovernancePanel: React.FC<AdminReferralGovernancePanel
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => void loadLedger(true)}
-          className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-slate-300 font-medium flex items-center gap-1.5 self-start sm:self-auto whitespace-nowrap shrink-0"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-          <span>Refresh Ledger</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          {isAdmin && (
+            <button
+              type="button"
+              disabled={isReconciling}
+              onClick={() => void handleReconcileMissing()}
+              className="px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 disabled:opacity-50 text-xs text-amber-300 font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              {isReconciling ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Award className="w-3.5 h-3.5" />
+              )}
+              <span>Reconcile Missing Rewards</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void loadLedger(true)}
+            className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-slate-300 font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+            <span>Refresh Ledger</span>
+          </button>
+        </div>
       </div>
 
       {actionMsg && (

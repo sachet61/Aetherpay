@@ -625,5 +625,220 @@ BEGIN
   END IF;
 END $$;
 
+-- ====================================================================
+-- 18. Atomic & Idempotent Referral Payout RPC + Ledger Safeguards
+-- Guarantees wallets + transactions + referral_awards update atomically
+-- inside a single PostgreSQL transaction (never marks rewarded if credit fails).
+-- ====================================================================
+
+CREATE INDEX IF NOT EXISTS idx_transactions_reference_type
+  ON public.transactions(reference_id, type)
+  WHERE reference_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.credit_referral_award_atomic(
+  p_award_id TEXT,
+  p_referrer_id TEXT,
+  p_referee_id TEXT,
+  p_payout_target TEXT DEFAULT 'referral_bonus',
+  p_referrer_amount NUMERIC DEFAULT 0,
+  p_referee_amount NUMERIC DEFAULT 0,
+  p_referrer_tx_id TEXT DEFAULT NULL,
+  p_referee_tx_id TEXT DEFAULT NULL,
+  p_referrer_desc TEXT DEFAULT NULL,
+  p_referee_desc TEXT DEFAULT NULL,
+  p_referrer_notif_title TEXT DEFAULT 'Referral Reward Credited!',
+  p_referrer_notif_msg TEXT DEFAULT NULL,
+  p_referee_notif_title TEXT DEFAULT 'Welcome Referral Bonus Credited!',
+  p_referee_notif_msg TEXT DEFAULT NULL,
+  p_qualifying_deposit_id TEXT DEFAULT NULL,
+  p_qualifying_deposit_amount NUMERIC DEFAULT 0,
+  p_reward_mode TEXT DEFAULT 'flat',
+  p_reviewed_by TEXT DEFAULT NULL,
+  p_reviewed_by_name TEXT DEFAULT NULL,
+  p_review_notes TEXT DEFAULT NULL,
+  p_fraud_flags JSONB DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_award RECORD;
+  v_now TIMESTAMPTZ := timezone('utc'::text, now());
+  v_ref_amt NUMERIC(12, 2) := ROUND(GREATEST(0, COALESCE(p_referrer_amount, 0)), 2);
+  v_ee_amt NUMERIC(12, 2) := ROUND(GREATEST(0, COALESCE(p_referee_amount, 0)), 2);
+  v_target TEXT := CASE WHEN p_payout_target = 'available_balance' THEN 'available_balance' ELSE 'referral_bonus' END;
+  v_ref_tx_id TEXT := COALESCE(NULLIF(btrim(p_referrer_tx_id), ''), 'tx_ref_r_' || p_award_id);
+  v_ee_tx_id TEXT := COALESCE(NULLIF(btrim(p_referee_tx_id), ''), 'tx_ref_f_' || p_award_id);
+  v_ref_credited BOOLEAN := false;
+  v_ee_credited BOOLEAN := false;
+  v_ref_already BOOLEAN := false;
+  v_ee_already BOOLEAN := false;
+  v_first_id TEXT;
+  v_second_id TEXT;
+BEGIN
+  SELECT * INTO v_award
+  FROM public.referral_awards
+  WHERE id = p_award_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Referral award % not found', p_award_id;
+  END IF;
+
+  -- Lock wallets in deterministic customer_id order to prevent deadlocks
+  v_first_id := LEAST(p_referrer_id, p_referee_id);
+  v_second_id := GREATEST(p_referrer_id, p_referee_id);
+
+  IF v_first_id IS NOT NULL AND btrim(v_first_id) <> '' THEN
+    INSERT INTO public.wallets (customer_id, balance, referral_bonus_balance, currency, updated_at)
+    VALUES (v_first_id, 0, 0, 'USD', v_now)
+    ON CONFLICT (customer_id) DO NOTHING;
+    PERFORM 1 FROM public.wallets WHERE customer_id = v_first_id FOR UPDATE;
+  END IF;
+
+  IF v_second_id IS NOT NULL AND btrim(v_second_id) <> '' AND v_second_id <> v_first_id THEN
+    INSERT INTO public.wallets (customer_id, balance, referral_bonus_balance, currency, updated_at)
+    VALUES (v_second_id, 0, 0, 'USD', v_now)
+    ON CONFLICT (customer_id) DO NOTHING;
+    PERFORM 1 FROM public.wallets WHERE customer_id = v_second_id FOR UPDATE;
+  END IF;
+
+  -- 1. Referrer credit (strictly idempotent via deterministic tx id)
+  IF v_ref_amt > 0 AND p_referrer_id IS NOT NULL AND btrim(p_referrer_id) <> '' THEN
+    IF EXISTS (
+      SELECT 1 FROM public.transactions
+      WHERE id = v_ref_tx_id
+         OR (customer_id = p_referrer_id AND reference_id = p_award_id AND type = 'referral_reward' AND status = 'completed')
+    ) THEN
+      v_ref_already := true;
+    ELSE
+      IF v_target = 'available_balance' THEN
+        UPDATE public.wallets
+        SET balance = ROUND((COALESCE(balance, 0) + v_ref_amt)::numeric, 2),
+            updated_at = v_now
+        WHERE customer_id = p_referrer_id;
+      ELSE
+        UPDATE public.wallets
+        SET referral_bonus_balance = ROUND((COALESCE(referral_bonus_balance, 0) + v_ref_amt)::numeric, 2),
+            updated_at = v_now
+        WHERE customer_id = p_referrer_id;
+      END IF;
+
+      INSERT INTO public.transactions (
+        id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+      ) VALUES (
+        v_ref_tx_id,
+        p_referrer_id,
+        v_ref_amt,
+        'referral_reward',
+        'completed',
+        COALESCE(NULLIF(btrim(p_referrer_desc), ''), 'Referral Bonus Reward'),
+        p_award_id,
+        'Swift Sweeps Referral',
+        v_now
+      );
+
+      INSERT INTO public.notifications (
+        id, user_id, title, message, type, read, link_tab, link_request_id, created_at
+      ) VALUES (
+        'notif_' || v_ref_tx_id,
+        p_referrer_id,
+        COALESCE(NULLIF(btrim(p_referrer_notif_title), ''), 'Referral Reward Credited!'),
+        COALESCE(NULLIF(btrim(p_referrer_notif_msg), ''), 'Your referral reward has been credited to your wallet.'),
+        'referral',
+        false,
+        'referrals',
+        p_award_id,
+        v_now
+      ) ON CONFLICT (id) DO NOTHING;
+
+      v_ref_credited := true;
+    END IF;
+  END IF;
+
+  -- 2. Referee welcome bonus credit (strictly idempotent via deterministic tx id)
+  IF v_ee_amt > 0 AND p_referee_id IS NOT NULL AND btrim(p_referee_id) <> '' THEN
+    IF EXISTS (
+      SELECT 1 FROM public.transactions
+      WHERE id = v_ee_tx_id
+         OR (customer_id = p_referee_id AND reference_id = p_award_id AND type = 'referral_reward' AND status = 'completed')
+    ) THEN
+      v_ee_already := true;
+    ELSE
+      IF v_target = 'available_balance' THEN
+        UPDATE public.wallets
+        SET balance = ROUND((COALESCE(balance, 0) + v_ee_amt)::numeric, 2),
+            updated_at = v_now
+        WHERE customer_id = p_referee_id;
+      ELSE
+        UPDATE public.wallets
+        SET referral_bonus_balance = ROUND((COALESCE(referral_bonus_balance, 0) + v_ee_amt)::numeric, 2),
+            updated_at = v_now
+        WHERE customer_id = p_referee_id;
+      END IF;
+
+      INSERT INTO public.transactions (
+        id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+      ) VALUES (
+        v_ee_tx_id,
+        p_referee_id,
+        v_ee_amt,
+        'referral_reward',
+        'completed',
+        COALESCE(NULLIF(btrim(p_referee_desc), ''), 'Welcome Referral Bonus'),
+        p_award_id,
+        'Swift Sweeps Referral',
+        v_now
+      );
+
+      INSERT INTO public.notifications (
+        id, user_id, title, message, type, read, link_tab, link_request_id, created_at
+      ) VALUES (
+        'notif_' || v_ee_tx_id,
+        p_referee_id,
+        COALESCE(NULLIF(btrim(p_referee_notif_title), ''), 'Welcome Referral Bonus Credited!'),
+        COALESCE(NULLIF(btrim(p_referee_notif_msg), ''), 'Your welcome referral bonus has been credited to your wallet.'),
+        'referral',
+        false,
+        'wallet',
+        p_award_id,
+        v_now
+      ) ON CONFLICT (id) DO NOTHING;
+
+      v_ee_credited := true;
+    END IF;
+  END IF;
+
+  -- 3. Mark award rewarded ONLY after wallet & ledger mutations succeeded
+  UPDATE public.referral_awards
+  SET
+    status = 'rewarded',
+    payout_target = v_target,
+    reward_mode = COALESCE(NULLIF(btrim(p_reward_mode), ''), reward_mode),
+    referrer_reward_amount = v_ref_amt,
+    referee_reward_amount = v_ee_amt,
+    qualifying_deposit_id = COALESCE(NULLIF(btrim(p_qualifying_deposit_id), ''), qualifying_deposit_id),
+    qualifying_deposit_amount = GREATEST(COALESCE(qualifying_deposit_amount, 0), COALESCE(p_qualifying_deposit_amount, 0)),
+    reviewed_by = COALESCE(NULLIF(btrim(p_reviewed_by), ''), reviewed_by),
+    reviewed_by_name = COALESCE(NULLIF(btrim(p_reviewed_by_name), ''), reviewed_by_name),
+    review_notes = COALESCE(NULLIF(btrim(p_review_notes), ''), review_notes),
+    fraud_flags = COALESCE(p_fraud_flags, fraud_flags),
+    rewarded_at = COALESCE(rewarded_at, v_now),
+    updated_at = v_now
+  WHERE id = p_award_id;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'awardId', p_award_id,
+    'referrerCredited', v_ref_credited,
+    'referrerAlreadyCredited', v_ref_already,
+    'refereeCredited', v_ee_credited,
+    'refereeAlreadyCredited', v_ee_already
+  );
+END;
+$$;
+
 
 

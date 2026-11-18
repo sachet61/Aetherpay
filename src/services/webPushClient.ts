@@ -482,6 +482,7 @@ class WebPushClient {
     url?: string;
     tag?: string;
     conversationId?: string;
+    messageId?: string;
     actionType?: 'chat' | 'payout' | 'deposit' | 'game';
   }): Promise<void> {
     try {
@@ -500,8 +501,13 @@ class WebPushClient {
           title: params.title,
           body: params.body.slice(0, 160),
           url: params.url || '/#chat',
-          tag: params.tag || `alert_${params.actionType || 'msg'}_${Date.now()}`,
+          tag:
+            params.tag ||
+            (params.messageId
+              ? `msg_${params.messageId}`
+              : `alert_${params.actionType || 'msg'}_${Date.now()}`),
           conversationId: params.conversationId,
+          messageId: params.messageId,
           actionType: params.actionType,
         }),
       });
@@ -518,6 +524,7 @@ class WebPushClient {
     senderName: string;
     messageText: string;
     conversationId: string;
+    messageId?: string;
   }): Promise<void> {
     const isToStaff = params.recipientRole === 'agent' || params.recipientRole === 'admin' || params.recipientId === 'staff';
     return this.dispatchPushAlert({
@@ -527,8 +534,9 @@ class WebPushClient {
       title: `Swift Sweeps: ${params.senderName}`,
       body: params.messageText,
       url: isToStaff ? '/#ops_chat' : '/#chat',
-      tag: `chat_${params.conversationId}`,
+      tag: params.messageId ? `msg_${params.messageId}` : `chat_${params.conversationId}`,
       conversationId: params.conversationId,
+      messageId: params.messageId,
       actionType: 'chat',
     });
   }

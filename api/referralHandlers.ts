@@ -94,43 +94,124 @@ async function creditPlayerWallet(params: {
   referenceId: string;
   notificationTitle: string;
   notificationMessage: string;
-}) {
+  linkTab?: string;
+}): Promise<{
+  ok: boolean;
+  credited: boolean;
+  alreadyCredited: boolean;
+  error?: string;
+  balanceAfter?: number;
+}> {
   const { adminClient, customerId, amount, target } = params;
-  if (amount <= 0) return;
+  const roundedAmount = Number((Number(amount) || 0).toFixed(2));
+  if (!customerId || roundedAmount <= 0) {
+    return { ok: true, credited: false, alreadyCredited: false };
+  }
 
+  // 1. Strict idempotency check BEFORE touching wallet balance
+  const { data: existingById, error: txLookupErr } = await adminClient
+    .from('transactions')
+    .select('id, amount, status')
+    .eq('id', params.txId)
+    .maybeSingle();
+
+  if (txLookupErr) {
+    return {
+      ok: false,
+      credited: false,
+      alreadyCredited: false,
+      error: txLookupErr.message || 'Failed to verify existing referral transaction.',
+    };
+  }
+  if (existingById && String(existingById.status || '').toLowerCase() === 'completed') {
+    return { ok: true, credited: false, alreadyCredited: true };
+  }
+
+  const { data: existingByRefRows, error: refLookupErr } = await adminClient
+    .from('transactions')
+    .select('id, amount, status, reference_id, type')
+    .eq('customer_id', customerId)
+    .eq('reference_id', params.referenceId)
+    .eq('type', 'referral_reward')
+    .limit(5);
+
+  if (refLookupErr) {
+    return {
+      ok: false,
+      credited: false,
+      alreadyCredited: false,
+      error: refLookupErr.message || 'Failed to verify referral ledger reference.',
+    };
+  }
+  const hasCompletedRefTx = (Array.isArray(existingByRefRows) ? existingByRefRows : []).some(
+    (r: any) => String(r?.status || '').toLowerCase() === 'completed'
+  );
+  if (hasCompletedRefTx) {
+    return { ok: true, credited: false, alreadyCredited: true };
+  }
+
+  // 2. Read current wallet state cleanly
   const nowIso = new Date().toISOString();
-  const { data: wallet } = await adminClient
+  const { data: wallet, error: wReadErr } = await adminClient
     .from('wallets')
     .select('*')
     .eq('customer_id', customerId)
     .maybeSingle();
 
+  if (wReadErr) {
+    return {
+      ok: false,
+      credited: false,
+      alreadyCredited: false,
+      error: wReadErr.message || 'Failed to read customer wallet.',
+    };
+  }
+
   const currentCash = Number(wallet?.balance ?? wallet?.available_balance ?? 0);
   const currentRefBonus = Number(wallet?.referral_bonus_balance ?? 0);
 
-  const nextCash = target === 'available_balance' ? Number((currentCash + amount).toFixed(2)) : currentCash;
-  const nextRefBonus =
-    target === 'referral_bonus' ? Number((currentRefBonus + amount).toFixed(2)) : currentRefBonus;
+  let effectiveTarget: ReferralPayoutTarget = target;
+  let nextCash =
+    effectiveTarget === 'available_balance'
+      ? Number((currentCash + roundedAmount).toFixed(2))
+      : currentCash;
+  let nextRefBonus =
+    effectiveTarget === 'referral_bonus'
+      ? Number((currentRefBonus + roundedAmount).toFixed(2))
+      : currentRefBonus;
 
   if (wallet) {
     const updatePayload: Record<string, any> = {
       updated_at: nowIso,
     };
-    if (target === 'available_balance') {
+    if (effectiveTarget === 'available_balance') {
       updatePayload.balance = nextCash;
     } else {
       updatePayload.referral_bonus_balance = nextRefBonus;
     }
-    const { error: wErr } = await adminClient
+    let { error: wErr } = await adminClient
       .from('wallets')
       .update(updatePayload)
       .eq('customer_id', customerId);
+
     if (wErr && String(wErr.message || '').includes('referral_bonus_balance')) {
-      // Fallback if referral_bonus_balance column has not been added yet
-      await adminClient
+      effectiveTarget = 'available_balance';
+      nextCash = Number((currentCash + roundedAmount).toFixed(2));
+      nextRefBonus = currentRefBonus;
+      const retryRes = await adminClient
         .from('wallets')
-        .update({ balance: Number((currentCash + amount).toFixed(2)), updated_at: nowIso })
+        .update({ balance: nextCash, updated_at: nowIso })
         .eq('customer_id', customerId);
+      wErr = retryRes.error;
+    }
+
+    if (wErr) {
+      return {
+        ok: false,
+        credited: false,
+        alreadyCredited: false,
+        error: wErr.message || 'Failed to update customer wallet.',
+      };
     }
   } else {
     const insertPayload: Record<string, any> = {
@@ -144,37 +225,294 @@ async function creditPlayerWallet(params: {
       currency: 'USD',
       updated_at: nowIso,
     };
-    const { error: iErr } = await adminClient.from('wallets').insert(insertPayload);
+    let { error: iErr } = await adminClient.from('wallets').insert(insertPayload);
     if (iErr && String(iErr.message || '').includes('referral_bonus_balance')) {
+      effectiveTarget = 'available_balance';
+      nextCash = Number((currentCash + roundedAmount).toFixed(2));
+      nextRefBonus = currentRefBonus;
       delete insertPayload.referral_bonus_balance;
-      insertPayload.balance = Number((currentCash + amount).toFixed(2));
-      await adminClient.from('wallets').insert(insertPayload);
+      insertPayload.balance = nextCash;
+      const retryInsert = await adminClient.from('wallets').insert(insertPayload);
+      iErr = retryInsert.error;
+    }
+    if (iErr) {
+      return {
+        ok: false,
+        credited: false,
+        alreadyCredited: false,
+        error: iErr.message || 'Failed to create customer wallet.',
+      };
     }
   }
 
-  // Idempotent transaction record
-  await adminClient.from('transactions').upsert({
+  // 3. Insert authoritative transaction ledger record; rollback wallet on failure
+  const { error: txErr } = await adminClient.from('transactions').upsert({
     id: params.txId,
     customer_id: customerId,
-    amount,
+    amount: roundedAmount,
     type: 'referral_reward',
     status: 'completed',
     description: params.description,
     reference_id: params.referenceId,
+    game_name: 'Swift Sweeps Referral',
     created_at: nowIso,
   });
 
-  // In-app notification
-  await adminClient.from('notifications').insert({
-    id: `notif_ref_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-    user_id: customerId,
-    title: params.notificationTitle,
-    message: params.notificationMessage,
-    type: 'referral',
-    read: false,
-    link_tab: 'referrals',
-    created_at: nowIso,
-  });
+  if (txErr) {
+    // Compensating rollback to preserve wallet/ledger consistency
+    try {
+      const rollbackPayload: Record<string, any> = { updated_at: new Date().toISOString() };
+      if (effectiveTarget === 'available_balance') {
+        rollbackPayload.balance = currentCash;
+      } else {
+        rollbackPayload.referral_bonus_balance = currentRefBonus;
+      }
+      await adminClient.from('wallets').update(rollbackPayload).eq('customer_id', customerId);
+    } catch {}
+    return {
+      ok: false,
+      credited: false,
+      alreadyCredited: false,
+      error: txErr.message || 'Failed to record referral transaction.',
+    };
+  }
+
+  // 4. Deterministic notification upsert (prevents duplicate notifications on retry)
+  try {
+    await adminClient.from('notifications').upsert({
+      id: `notif_${params.txId}`,
+      user_id: customerId,
+      title: params.notificationTitle,
+      message: params.notificationMessage,
+      type: 'referral',
+      read: false,
+      link_tab: params.linkTab || 'referrals',
+      link_request_id: params.referenceId,
+      created_at: nowIso,
+    });
+  } catch {}
+
+  return {
+    ok: true,
+    credited: true,
+    alreadyCredited: false,
+    balanceAfter: effectiveTarget === 'available_balance' ? nextCash : nextRefBonus,
+  };
+}
+
+function isRpcUnavailableError(err: any): boolean {
+  const msg = String(err?.message || '').toLowerCase();
+  const code = String(err?.code || '');
+  return (
+    code === 'PGRST202' ||
+    code === '42883' ||
+    msg.includes('could not find the function') ||
+    msg.includes('credit_referral_award_atomic') && msg.includes('does not exist')
+  );
+}
+
+async function awardReferralAtomically(params: {
+  adminClient: any;
+  awardId: string;
+  referrerId: string;
+  refereeId: string;
+  referralCodeUsed: string;
+  source: string;
+  rewardMode: string;
+  payoutTarget: ReferralPayoutTarget;
+  referrerRewardAmount: number;
+  refereeRewardAmount: number;
+  qualifyingDepositId?: string | null;
+  qualifyingDepositAmount: number;
+  fraudFlags: string[];
+  staffReason?: string | null;
+  assignedBy?: string | null;
+  assignedByName?: string | null;
+  reviewedBy?: string | null;
+  reviewedByName?: string | null;
+  reviewNotes?: string | null;
+  referrerDescription: string;
+  refereeDescription: string;
+  referrerNotifTitle: string;
+  referrerNotifMessage: string;
+  refereeNotifTitle: string;
+  refereeNotifMessage: string;
+  existingRewardedAt?: string | null;
+}): Promise<{ ok: boolean; status: 'rewarded' | 'processing'; awardRow?: any; error?: string }> {
+  const nowIso = new Date().toISOString();
+  const refTxId = `tx_ref_r_${params.awardId}`;
+  const eeTxId = `tx_ref_f_${params.awardId}`;
+
+  // Step 1: Ensure non-rewarded 'processing' row exists BEFORE crediting wallets
+  const processingPayload: Record<string, any> = {
+    id: params.awardId,
+    referrer_id: params.referrerId,
+    referee_id: params.refereeId,
+    referral_code_used: params.referralCodeUsed,
+    source: params.source,
+    reward_mode: params.rewardMode,
+    payout_target: params.payoutTarget,
+    referrer_reward_amount: params.referrerRewardAmount,
+    referee_reward_amount: params.refereeRewardAmount,
+    qualifying_deposit_id: params.qualifyingDepositId || null,
+    qualifying_deposit_amount: params.qualifyingDepositAmount,
+    status: 'processing',
+    fraud_flags: params.fraudFlags,
+    updated_at: nowIso,
+  };
+  if (params.staffReason !== undefined) processingPayload.staff_reason = params.staffReason;
+  if (params.assignedBy !== undefined) processingPayload.assigned_by = params.assignedBy;
+  if (params.assignedByName !== undefined) processingPayload.assigned_by_name = params.assignedByName;
+  if (params.reviewedBy !== undefined) processingPayload.reviewed_by = params.reviewedBy;
+  if (params.reviewedByName !== undefined) processingPayload.reviewed_by_name = params.reviewedByName;
+  if (params.reviewNotes !== undefined) processingPayload.review_notes = params.reviewNotes;
+
+  const { error: prepErr } = await params.adminClient
+    .from('referral_awards')
+    .upsert(processingPayload);
+
+  if (prepErr) {
+    return {
+      ok: false,
+      status: 'processing',
+      error: prepErr.message || 'Failed to prepare referral award record.',
+    };
+  }
+
+  // Step 2: Prefer atomic PostgreSQL PL/pgSQL transaction RPC when deployed
+  if (typeof params.adminClient?.rpc === 'function') {
+    try {
+      const rpcRes = await params.adminClient.rpc('credit_referral_award_atomic', {
+        p_award_id: params.awardId,
+        p_referrer_id: params.referrerId,
+        p_referee_id: params.refereeId,
+        p_payout_target: params.payoutTarget,
+        p_referrer_amount: params.referrerRewardAmount,
+        p_referee_amount: params.refereeRewardAmount,
+        p_referrer_tx_id: refTxId,
+        p_referee_tx_id: eeTxId,
+        p_referrer_desc: params.referrerDescription,
+        p_referee_desc: params.refereeDescription,
+        p_referrer_notif_title: params.referrerNotifTitle,
+        p_referrer_notif_msg: params.referrerNotifMessage,
+        p_referee_notif_title: params.refereeNotifTitle,
+        p_referee_notif_msg: params.refereeNotifMessage,
+        p_qualifying_deposit_id: params.qualifyingDepositId || null,
+        p_qualifying_deposit_amount: params.qualifyingDepositAmount,
+        p_reward_mode: params.rewardMode,
+        p_reviewed_by: params.reviewedBy || null,
+        p_reviewed_by_name: params.reviewedByName || null,
+        p_review_notes: params.reviewNotes || null,
+        p_fraud_flags: params.fraudFlags,
+      });
+
+      if (!rpcRes?.error) {
+        const { data: finalized } = await params.adminClient
+          .from('referral_awards')
+          .select('*')
+          .eq('id', params.awardId)
+          .maybeSingle();
+        return { ok: true, status: 'rewarded', awardRow: finalized || processingPayload };
+      }
+
+      if (!isRpcUnavailableError(rpcRes.error)) {
+        return {
+          ok: false,
+          status: 'processing',
+          error: rpcRes.error.message || 'Atomic referral payout RPC failed.',
+        };
+      }
+    } catch (rpcErr: any) {
+      if (!isRpcUnavailableError(rpcErr)) {
+        return {
+          ok: false,
+          status: 'processing',
+          error: rpcErr?.message || 'Atomic referral payout RPC failed.',
+        };
+      }
+    }
+  }
+
+  // Step 3: Ordered idempotent fallback (never marks rewarded until all required credits succeed)
+  if (params.referrerRewardAmount > 0) {
+    const refCredit = await creditPlayerWallet({
+      adminClient: params.adminClient,
+      customerId: params.referrerId,
+      amount: params.referrerRewardAmount,
+      target: params.payoutTarget,
+      txId: refTxId,
+      idempotencyKey: `idemp_ref_r_${params.awardId}`,
+      description: params.referrerDescription,
+      referenceId: params.awardId,
+      notificationTitle: params.referrerNotifTitle,
+      notificationMessage: params.referrerNotifMessage,
+      linkTab: 'referrals',
+    });
+
+    if (!refCredit.ok) {
+      return {
+        ok: false,
+        status: 'processing',
+        error: refCredit.error || 'Failed to credit referrer wallet.',
+      };
+    }
+  }
+
+  if (params.refereeRewardAmount > 0) {
+    const eeCredit = await creditPlayerWallet({
+      adminClient: params.adminClient,
+      customerId: params.refereeId,
+      amount: params.refereeRewardAmount,
+      target: params.payoutTarget,
+      txId: eeTxId,
+      idempotencyKey: `idemp_ref_f_${params.awardId}`,
+      description: params.refereeDescription,
+      referenceId: params.awardId,
+      notificationTitle: params.refereeNotifTitle,
+      notificationMessage: params.refereeNotifMessage,
+      linkTab: 'wallet',
+    });
+
+    if (!eeCredit.ok) {
+      return {
+        ok: false,
+        status: 'processing',
+        error: eeCredit.error || 'Failed to credit referee welcome bonus wallet.',
+      };
+    }
+  }
+
+  // Step 4: Mark status = 'rewarded' ONLY AFTER both wallet credits + ledger transactions succeeded
+  const finalizedAt = params.existingRewardedAt || nowIso;
+  const { data: rewardedRow, error: finalizeErr } = await params.adminClient
+    .from('referral_awards')
+    .update({
+      status: 'rewarded',
+      payout_target: params.payoutTarget,
+      referrer_reward_amount: params.referrerRewardAmount,
+      referee_reward_amount: params.refereeRewardAmount,
+      qualifying_deposit_id: params.qualifyingDepositId || null,
+      qualifying_deposit_amount: params.qualifyingDepositAmount,
+      rewarded_at: finalizedAt,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', params.awardId)
+    .select()
+    .maybeSingle();
+
+  if (finalizeErr) {
+    return {
+      ok: false,
+      status: 'processing',
+      error: finalizeErr.message || 'Wallet credited, failed to finalize referral award status.',
+    };
+  }
+
+  return {
+    ok: true,
+    status: 'rewarded',
+    awardRow: rewardedRow || { ...processingPayload, status: 'rewarded', rewarded_at: finalizedAt },
+  };
 }
 
 async function computeBudgetUsage(adminClient: any, referrerId: string) {
@@ -216,6 +554,347 @@ async function computeRefereeRealCashDeposits(adminClient: any, refereeId: strin
     realDepositTotal: Number(total.toFixed(2)),
     qualifyingDepositId: latest?.id ? String(latest.id) : undefined,
     qualifyingDepositAmount: latest ? Number(latest.amount || 0) : 0,
+  };
+}
+
+function getAwardCreditedStatus(
+  awardId: string,
+  txList: any[],
+  referrerId?: string,
+  refereeId?: string
+): {
+  referrerCredited: boolean;
+  referrerAmount: number;
+  referrerTxId?: string;
+  refereeCredited: boolean;
+  refereeAmount: number;
+  refereeTxId?: string;
+} {
+  const expectedRefTxId = `tx_ref_r_${awardId}`;
+  const expectedEeTxId = `tx_ref_f_${awardId}`;
+  let referrerTx: any = null;
+  let refereeTx: any = null;
+
+  for (const tx of txList) {
+    if (!tx || tx.type !== 'referral_reward' || String(tx.status || '').toLowerCase() !== 'completed') {
+      continue;
+    }
+    if (tx.id === expectedRefTxId || (referrerId && tx.customer_id === referrerId && tx.reference_id === awardId && tx.id !== expectedEeTxId)) {
+      referrerTx = tx;
+    }
+    if (tx.id === expectedEeTxId || (refereeId && tx.customer_id === refereeId && tx.reference_id === awardId && tx.id !== expectedRefTxId)) {
+      refereeTx = tx;
+    }
+  }
+
+  return {
+    referrerCredited: Boolean(referrerTx),
+    referrerAmount: referrerTx ? Number(referrerTx.amount || 0) : 0,
+    referrerTxId: referrerTx?.id,
+    refereeCredited: Boolean(refereeTx),
+    refereeAmount: refereeTx ? Number(refereeTx.amount || 0) : 0,
+    refereeTxId: refereeTx?.id,
+  };
+}
+
+export async function reconcileMissingReferralRewards(
+  deps: ReferralHandlerDeps,
+  options?: {
+    userId?: string;
+    awardIds?: string[];
+    limit?: number;
+    actor?: { id: string; name: string; role: string };
+  }
+): Promise<{
+  scanned: number;
+  reconciledCount: number;
+  skippedCount: number;
+  details: Array<{
+    awardId: string;
+    referrerId: string;
+    refereeId: string;
+    referrerCredited: number;
+    refereeCredited: number;
+    reason?: string;
+  }>;
+}> {
+  const limit = Math.min(Math.max(Number(options?.limit || 50), 1), 200);
+  const targetUserId = options?.userId ? String(options.userId).trim() : '';
+
+  let candidateAwards: any[] = [];
+  if (Array.isArray(options?.awardIds) && options!.awardIds!.length > 0) {
+    const { data } = await deps.adminClient
+      .from('referral_awards')
+      .select('*')
+      .in('id', options!.awardIds!)
+      .limit(limit);
+    candidateAwards = Array.isArray(data) ? data : [];
+  } else if (targetUserId) {
+    const [{ data: asReferrer }, { data: asReferee }] = await Promise.all([
+      deps.adminClient
+        .from('referral_awards')
+        .select('*')
+        .eq('referrer_id', targetUserId)
+        .in('status', ['rewarded', 'processing'])
+        .order('updated_at', { ascending: false })
+        .limit(limit),
+      deps.adminClient
+        .from('referral_awards')
+        .select('*')
+        .eq('referee_id', targetUserId)
+        .in('status', ['rewarded', 'processing'])
+        .limit(5),
+    ]);
+    const seen = new Map<string, any>();
+    for (const row of [...(asReferrer || []), ...(asReferee || [])]) {
+      if (row?.id) seen.set(row.id, row);
+    }
+    candidateAwards = Array.from(seen.values());
+  } else {
+    const { data } = await deps.adminClient
+      .from('referral_awards')
+      .select('*')
+      .in('status', ['rewarded', 'processing'])
+      .order('updated_at', { ascending: false })
+      .limit(limit);
+    candidateAwards = Array.isArray(data) ? data : [];
+  }
+
+  if (candidateAwards.length === 0) {
+    return { scanned: 0, reconciledCount: 0, skippedCount: 0, details: [] };
+  }
+
+  const config = await loadReferralProgramConfig(deps.adminClient);
+  const participantIds = Array.from(
+    new Set(candidateAwards.flatMap((a: any) => [a.referrer_id, a.referee_id]).filter(Boolean))
+  );
+
+  const [{ data: participantUsers }, { data: existingTxs }] = await Promise.all([
+    participantIds.length > 0
+      ? deps.adminClient
+          .from('users')
+          .select('id, display_name, email, email_verified, referral_code, referred_by')
+          .in('id', participantIds)
+      : Promise.resolve({ data: [] }),
+    participantIds.length > 0
+      ? deps.adminClient
+          .from('transactions')
+          .select('id, customer_id, amount, type, status, reference_id')
+          .in('customer_id', participantIds)
+          .eq('type', 'referral_reward')
+          .limit(500)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  const usersById: Record<string, any> = {};
+  for (const u of participantUsers || []) {
+    usersById[u.id] = u;
+  }
+  const txsList = Array.isArray(existingTxs) ? existingTxs : [];
+
+  const details: Array<{
+    awardId: string;
+    referrerId: string;
+    refereeId: string;
+    referrerCredited: number;
+    refereeCredited: number;
+    reason?: string;
+  }> = [];
+  let reconciledCount = 0;
+  let skippedCount = 0;
+
+  for (const award of candidateAwards) {
+    if (!award?.id || !award.referrer_id || !award.referee_id) continue;
+
+    const referee = usersById[award.referee_id];
+    const referrer = usersById[award.referrer_id];
+    const depositProgress = await computeRefereeRealCashDeposits(deps.adminClient, award.referee_id);
+    const effectiveDepositTotal = Math.max(
+      Number(award.qualifying_deposit_amount || 0),
+      depositProgress.realDepositTotal
+    );
+
+    const isStaffAuthorized =
+      award.source === 'manual_link_and_reward' ||
+      Boolean(award.reviewed_by) ||
+      Boolean(award.assigned_by && award.source === 'manual_link_and_reward');
+    const meetsQualification =
+      effectiveDepositTotal >= config.qualificationDepositMin &&
+      (!config.requireEmailVerified || Boolean(referee?.email_verified ?? true));
+
+    const storedRefAmt = Number(award.referrer_reward_amount || 0);
+    const storedEeAmt = Number(award.referee_reward_amount || 0);
+    const calculated = calculateReferralPayouts(
+      config,
+      effectiveDepositTotal > 0 ? effectiveDepositTotal : config.qualificationDepositMin
+    );
+
+    // Verify entitlement before ever crediting missing rewards
+    const entitled = isStaffAuthorized || meetsQualification || storedRefAmt > 0 || storedEeAmt > 0;
+    if (!entitled) {
+      skippedCount += 1;
+      details.push({
+        awardId: award.id,
+        referrerId: award.referrer_id,
+        refereeId: award.referee_id,
+        referrerCredited: 0,
+        refereeCredited: 0,
+        reason: 'Not entitled (deposit/email/staff authorization criteria not met)',
+      });
+      continue;
+    }
+
+    const expectedRefAmt = storedRefAmt > 0 ? storedRefAmt : calculated.referrerAmount;
+    const expectedEeAmt = storedEeAmt > 0 ? storedEeAmt : calculated.refereeAmount;
+
+    const existingCredits = getAwardCreditedStatus(
+      award.id,
+      txsList,
+      award.referrer_id,
+      award.referee_id
+    );
+
+    const needsRefCredit = expectedRefAmt > 0 && !existingCredits.referrerCredited;
+    const needsEeCredit = expectedEeAmt > 0 && !existingCredits.refereeCredited;
+
+    if (!needsRefCredit && !needsEeCredit) {
+      // Ensure processing award finishes transitioning to rewarded if both required legs are already paid
+      if (award.status === 'processing') {
+        await deps.adminClient
+          .from('referral_awards')
+          .update({
+            status: 'rewarded',
+            rewarded_at: award.rewarded_at || new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', award.id);
+      }
+      continue;
+    }
+
+    const payoutTarget: ReferralPayoutTarget =
+      award.payout_target === 'available_balance' ? 'available_balance' : config.payoutTarget;
+
+    let refCreditedAmt = 0;
+    let eeCreditedAmt = 0;
+    let legFailed = false;
+    let legError = '';
+
+    if (needsRefCredit) {
+      const refRes = await creditPlayerWallet({
+        adminClient: deps.adminClient,
+        customerId: award.referrer_id,
+        amount: expectedRefAmt,
+        target: payoutTarget,
+        txId: `tx_ref_r_${award.id}`,
+        idempotencyKey: `idemp_ref_r_${award.id}`,
+        description: `Referral Reward Reconciliation (Award #${award.id.slice(-6)}): ${referee?.display_name || referee?.email || award.referee_id}`,
+        referenceId: award.id,
+        notificationTitle: 'Referral Reward Credited',
+        notificationMessage: `Your missing $${expectedRefAmt.toFixed(2)} referral bonus for ${referee?.display_name || 'your referred friend'} has been credited to your wallet.`,
+        linkTab: 'referrals',
+      });
+      if (refRes.ok && refRes.credited) {
+        refCreditedAmt = expectedRefAmt;
+        txsList.push({
+          id: `tx_ref_r_${award.id}`,
+          customer_id: award.referrer_id,
+          amount: expectedRefAmt,
+          type: 'referral_reward',
+          status: 'completed',
+          reference_id: award.id,
+        });
+      } else if (!refRes.ok) {
+        legFailed = true;
+        legError = refRes.error || 'Referrer reconciliation failed';
+      }
+    }
+
+    if (needsEeCredit) {
+      const eeRes = await creditPlayerWallet({
+        adminClient: deps.adminClient,
+        customerId: award.referee_id,
+        amount: expectedEeAmt,
+        target: payoutTarget,
+        txId: `tx_ref_f_${award.id}`,
+        idempotencyKey: `idemp_ref_f_${award.id}`,
+        description: `Welcome Referral Bonus Reconciliation (Award #${award.id.slice(-6)}): Code ${award.referral_code_used}`,
+        referenceId: award.id,
+        notificationTitle: 'Welcome Referral Bonus Credited',
+        notificationMessage: `Your $${expectedEeAmt.toFixed(2)} welcome referral bonus has been credited to your wallet!`,
+        linkTab: 'wallet',
+      });
+      if (eeRes.ok && eeRes.credited) {
+        eeCreditedAmt = expectedEeAmt;
+        txsList.push({
+          id: `tx_ref_f_${award.id}`,
+          customer_id: award.referee_id,
+          amount: expectedEeAmt,
+          type: 'referral_reward',
+          status: 'completed',
+          reference_id: award.id,
+        });
+      } else if (!eeRes.ok) {
+        legFailed = true;
+        legError = eeRes.error || 'Referee reconciliation failed';
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    if (!legFailed && (refCreditedAmt > 0 || eeCreditedAmt > 0 || award.status === 'processing')) {
+      await deps.adminClient
+        .from('referral_awards')
+        .update({
+          status: 'rewarded',
+          payout_target: payoutTarget,
+          referrer_reward_amount: expectedRefAmt,
+          referee_reward_amount: expectedEeAmt,
+          qualifying_deposit_id: depositProgress.qualifyingDepositId || award.qualifying_deposit_id || null,
+          qualifying_deposit_amount: effectiveDepositTotal,
+          rewarded_at: award.rewarded_at || nowIso,
+          updated_at: nowIso,
+        })
+        .eq('id', award.id);
+    }
+
+    if (refCreditedAmt > 0 || eeCreditedAmt > 0) {
+      reconciledCount += 1;
+      details.push({
+        awardId: award.id,
+        referrerId: award.referrer_id,
+        refereeId: award.referee_id,
+        referrerCredited: refCreditedAmt,
+        refereeCredited: eeCreditedAmt,
+        reason: legFailed ? legError : undefined,
+      });
+
+      await deps.writeAudit(deps.adminClient, {
+        actorId: options?.actor?.id || 'system',
+        actorName: options?.actor?.name || 'Referral Auto-Reconciler',
+        actorRole: options?.actor?.role || 'admin',
+        action: 'REFERRAL_REWARD_RECONCILED',
+        entityType: 'referral',
+        entityId: award.id,
+        details: `Reconciled missing referral wallet credit(s) for award ${award.id} (Referrer ${referrer?.display_name || award.referrer_id}: +$${refCreditedAmt.toFixed(2)}, Friend ${referee?.display_name || award.referee_id}: +$${eeCreditedAmt.toFixed(2)}, target=${payoutTarget}).`,
+      });
+    } else if (legFailed) {
+      skippedCount += 1;
+      details.push({
+        awardId: award.id,
+        referrerId: award.referrer_id,
+        refereeId: award.referee_id,
+        referrerCredited: 0,
+        refereeCredited: 0,
+        reason: legError,
+      });
+    }
+  }
+
+  return {
+    scanned: candidateAwards.length,
+    reconciledCount,
+    skippedCount,
+    details,
   };
 }
 
@@ -472,13 +1151,54 @@ export async function handlePostReferralEvaluate(
 
     if (
       existingAward?.status === 'rewarded' ||
-      existingAward?.status === 'rejected'
+      existingAward?.status === 'rejected' ||
+      existingAward?.status === 'capped' ||
+      existingAward?.status === 'held_for_review'
     ) {
+      // Issue 5: Always synchronize cumulative eligible deposits onto existing referral ledger rows
+      // without issuing duplicate referral rewards.
+      const depositProgress = await computeRefereeRealCashDeposits(deps.adminClient, referee.id);
+      let syncedAward = existingAward;
+      const storedDeposit = Number(existingAward.qualifying_deposit_amount || 0);
+      const nextDepositId = depositProgress.qualifyingDepositId || existingAward.qualifying_deposit_id || null;
+
+      if (
+        depositProgress.realDepositTotal !== storedDeposit ||
+        (nextDepositId && nextDepositId !== existingAward.qualifying_deposit_id)
+      ) {
+        const { data: updatedDepositRow } = await deps.adminClient
+          .from('referral_awards')
+          .update({
+            qualifying_deposit_amount: depositProgress.realDepositTotal,
+            qualifying_deposit_id: nextDepositId,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', existingAward.id)
+          .select()
+          .maybeSingle();
+        if (updatedDepositRow) {
+          syncedAward = updatedDepositRow;
+        }
+      }
+
+      if (syncedAward.status === 'rewarded') {
+        await reconcileMissingReferralRewards(deps, { awardIds: [syncedAward.id] });
+        const { data: refreshed } = await deps.adminClient
+          .from('referral_awards')
+          .select('*')
+          .eq('id', syncedAward.id)
+          .maybeSingle();
+        if (refreshed) syncedAward = refreshed;
+      }
+
       return res.status(200).json({
         success: true,
-        alreadyFinalized: true,
-        status: existingAward.status,
-        award: normalizeReferralLedgerRow(existingAward),
+        alreadyFinalized: syncedAward.status !== 'held_for_review',
+        alreadyHeld: syncedAward.status === 'held_for_review',
+        depositSynced: true,
+        depositTotal: depositProgress.realDepositTotal,
+        status: syncedAward.status,
+        award: normalizeReferralLedgerRow(syncedAward),
       });
     }
 
@@ -714,60 +1434,34 @@ export async function handlePostReferralEvaluate(
       });
     }
 
-    // Finalize & pay atomically (one-time per referee)
-    const { data: rewardedRow, error: payErr } = await deps.adminClient
-      .from('referral_awards')
-      .upsert({
-        id: awardId,
-        referrer_id: referrer.id,
-        referee_id: referee.id,
-        referral_code_used: referrer.referral_code || refCode,
-        source: existingAward?.source || 'signup_link',
-        reward_mode: config.rewardMode,
-        payout_target: config.payoutTarget,
-        referrer_reward_amount: payouts.referrerAmount,
-        referee_reward_amount: payouts.refereeAmount,
-        qualifying_deposit_id: depositProgress.qualifyingDepositId || null,
-        qualifying_deposit_amount: depositProgress.realDepositTotal,
-        status: 'rewarded',
-        fraud_flags: combinedFlags,
-        rewarded_at: nowIso,
-        updated_at: nowIso,
-      })
-      .select()
-      .maybeSingle();
+    // Finalize & pay atomically (one-time per referee; NEVER marks rewarded unless wallet + ledger succeed)
+    const atomicRes = await awardReferralAtomically({
+      adminClient: deps.adminClient,
+      awardId,
+      referrerId: referrer.id,
+      refereeId: referee.id,
+      referralCodeUsed: referrer.referral_code || refCode,
+      source: existingAward?.source || 'signup_link',
+      rewardMode: config.rewardMode,
+      payoutTarget: config.payoutTarget,
+      referrerRewardAmount: payouts.referrerAmount,
+      refereeRewardAmount: payouts.refereeAmount,
+      qualifyingDepositId: depositProgress.qualifyingDepositId || null,
+      qualifyingDepositAmount: depositProgress.realDepositTotal,
+      fraudFlags: combinedFlags,
+      referrerDescription: `Referral Reward: ${referee.display_name || referee.email} verified email & deposited $${depositProgress.realDepositTotal.toFixed(2)}`,
+      refereeDescription: `Welcome Referral Bonus: Qualified under code ${referrer.referral_code || refCode}`,
+      referrerNotifTitle: 'Referral Reward Credited',
+      referrerNotifMessage: `You received $${payouts.referrerAmount.toFixed(2)} because ${referee.display_name || 'your friend'} verified their email and met the real deposit requirement.`,
+      refereeNotifTitle: 'Welcome Referral Bonus Credited',
+      refereeNotifMessage: `You received a $${payouts.refereeAmount.toFixed(2)} welcome referral bonus after qualifying!`,
+    });
 
-    if (payErr) {
-      return res.status(500).json({ error: payErr.message });
-    }
-
-    if (payouts.referrerAmount > 0) {
-      await creditPlayerWallet({
-        adminClient: deps.adminClient,
-        customerId: referrer.id,
-        amount: payouts.referrerAmount,
-        target: config.payoutTarget,
-        txId: `tx_ref_r_${awardId}`,
-        idempotencyKey: `idemp_ref_r_${awardId}`,
-        description: `Referral Reward: ${referee.display_name || referee.email} verified email & deposited $${depositProgress.realDepositTotal.toFixed(2)}`,
-        referenceId: awardId,
-        notificationTitle: 'Referral Reward Credited',
-        notificationMessage: `You received $${payouts.referrerAmount.toFixed(2)} because ${referee.display_name || 'your friend'} verified their email and met the real deposit requirement.`,
-      });
-    }
-
-    if (payouts.refereeAmount > 0) {
-      await creditPlayerWallet({
-        adminClient: deps.adminClient,
-        customerId: referee.id,
-        amount: payouts.refereeAmount,
-        target: config.payoutTarget,
-        txId: `tx_ref_f_${awardId}`,
-        idempotencyKey: `idemp_ref_f_${awardId}`,
-        description: `Welcome Referral Bonus: Qualified under code ${referrer.referral_code || refCode}`,
-        referenceId: awardId,
-        notificationTitle: 'Welcome Referral Bonus Credited',
-        notificationMessage: `You received a $${payouts.refereeAmount.toFixed(2)} welcome referral bonus after qualifying!`,
+    if (!atomicRes.ok) {
+      return res.status(500).json({
+        success: false,
+        status: 'processing',
+        error: atomicRes.error || 'Failed to credit referral wallet atomically.',
       });
     }
 
@@ -785,7 +1479,7 @@ export async function handlePostReferralEvaluate(
       success: true,
       qualified: true,
       status: 'rewarded',
-      award: normalizeReferralLedgerRow(rewardedRow),
+      award: normalizeReferralLedgerRow(atomicRes.awardRow),
     });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Referral evaluation failed' });
@@ -1055,64 +1749,38 @@ export async function handlePostManualAssignReferral(
       });
     }
 
-    const { data: paidRow, error: payErr } = await deps.adminClient
-      .from('referral_awards')
-      .upsert({
-        id: awardId,
-        referrer_id: referrer.id,
-        referee_id: referee.id,
-        referral_code_used: resolvedRefCode,
-        source,
-        reward_mode: config.rewardMode,
-        payout_target: config.payoutTarget,
-        referrer_reward_amount: payouts.referrerAmount,
-        referee_reward_amount: payouts.refereeAmount,
-        qualifying_deposit_id: depositProgress.qualifyingDepositId || null,
-        qualifying_deposit_amount: depositProgress.realDepositTotal,
-        status: 'rewarded',
-        fraud_flags: fraud.fraudFlags,
-        staff_reason: reason || null,
-        assigned_by: caller.id,
-        assigned_by_name: caller.displayName,
-        reviewed_by: caller.role === 'admin' ? caller.id : null,
-        reviewed_by_name: caller.role === 'admin' ? caller.displayName : null,
-        rewarded_at: nowIso,
-        updated_at: nowIso,
-      })
-      .select()
-      .maybeSingle();
+    const atomicRes = await awardReferralAtomically({
+      adminClient: deps.adminClient,
+      awardId,
+      referrerId: referrer.id,
+      refereeId: referee.id,
+      referralCodeUsed: resolvedRefCode,
+      source,
+      rewardMode: config.rewardMode,
+      payoutTarget: config.payoutTarget,
+      referrerRewardAmount: payouts.referrerAmount,
+      refereeRewardAmount: payouts.refereeAmount,
+      qualifyingDepositId: depositProgress.qualifyingDepositId || null,
+      qualifyingDepositAmount: depositProgress.realDepositTotal,
+      fraudFlags: fraud.fraudFlags,
+      staffReason: reason || null,
+      assignedBy: caller.id,
+      assignedByName: caller.displayName,
+      reviewedBy: caller.role === 'admin' ? caller.id : null,
+      reviewedByName: caller.role === 'admin' ? caller.displayName : null,
+      referrerDescription: `Manual Referral Reward (${caller.displayName}): ${referee.display_name || referee.email}`,
+      refereeDescription: `Welcome Referral Bonus (${caller.displayName}): Linked to ${referrer.display_name}`,
+      referrerNotifTitle: 'Referral Reward Credited',
+      referrerNotifMessage: `Staff credited your $${payouts.referrerAmount.toFixed(2)} referral bonus for ${referee.display_name}.`,
+      refereeNotifTitle: 'Welcome Referral Bonus Credited',
+      refereeNotifMessage: `Staff credited your $${payouts.refereeAmount.toFixed(2)} welcome referral bonus!`,
+    });
 
-    if (payErr) {
-      return res.status(500).json({ error: payErr.message });
-    }
-
-    if (payouts.referrerAmount > 0) {
-      await creditPlayerWallet({
-        adminClient: deps.adminClient,
-        customerId: referrer.id,
-        amount: payouts.referrerAmount,
-        target: config.payoutTarget,
-        txId: `tx_ref_r_${awardId}`,
-        idempotencyKey: `idemp_ref_r_${awardId}`,
-        description: `Manual Referral Reward (${caller.displayName}): ${referee.display_name || referee.email}`,
-        referenceId: awardId,
-        notificationTitle: 'Referral Reward Credited',
-        notificationMessage: `Staff credited your $${payouts.referrerAmount.toFixed(2)} referral bonus for ${referee.display_name}.`,
-      });
-    }
-
-    if (payouts.refereeAmount > 0) {
-      await creditPlayerWallet({
-        adminClient: deps.adminClient,
-        customerId: referee.id,
-        amount: payouts.refereeAmount,
-        target: config.payoutTarget,
-        txId: `tx_ref_f_${awardId}`,
-        idempotencyKey: `idemp_ref_f_${awardId}`,
-        description: `Welcome Referral Bonus (${caller.displayName}): Linked to ${referrer.display_name}`,
-        referenceId: awardId,
-        notificationTitle: 'Welcome Referral Bonus Credited',
-        notificationMessage: `Staff credited your $${payouts.refereeAmount.toFixed(2)} welcome referral bonus!`,
+    if (!atomicRes.ok) {
+      return res.status(500).json({
+        success: false,
+        status: 'processing',
+        error: atomicRes.error || 'Failed to credit referral wallets atomically.',
       });
     }
 
@@ -1133,7 +1801,7 @@ export async function handlePostManualAssignReferral(
       mode: 'link_and_reward',
       status: 'rewarded',
       message: `Linked ${referee.display_name} to ${referrer.display_name} and credited $${payouts.referrerAmount.toFixed(2)} / $${payouts.refereeAmount.toFixed(2)}.`,
-      award: normalizeReferralLedgerRow(paidRow),
+      award: normalizeReferralLedgerRow(atomicRes.awardRow),
     });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Failed to manually assign referral' });
@@ -1264,6 +1932,12 @@ export async function handleGetAdminReferralLedger(
     const search = (parsedUrl.searchParams.get('search') || '').trim().toLowerCase();
     const rawLimit = Number.parseInt(parsedUrl.searchParams.get('limit') || '100', 10);
     const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 100) : 100;
+
+    // Automatically & safely reconcile any rewarded ledger rows missing wallet/transaction credits
+    await reconcileMissingReferralRewards(deps, {
+      limit: 50,
+      actor: { id: caller.id, name: caller.displayName, role: caller.role },
+    });
 
     let query = deps.adminClient
       .from('referral_awards')
@@ -1440,6 +2114,10 @@ export async function handlePostReviewReferral(
       return res.status(404).json({ error: 'Referral award record not found.' });
     }
     if (award.status === 'rewarded') {
+      await reconcileMissingReferralRewards(deps, {
+        awardIds: [award.id],
+        actor: { id: caller.id, name: caller.displayName, role: caller.role },
+      });
       return res.status(409).json({ error: 'This referral reward has already been approved and credited.' });
     }
 
@@ -1477,8 +2155,14 @@ export async function handlePostReviewReferral(
       });
     }
 
-    // Approve held award -> credit both wallets
+    // Approve held award -> credit both wallets atomically before marking rewarded
     const config = await loadReferralProgramConfig(deps.adminClient);
+    const depositProgress = await computeRefereeRealCashDeposits(deps.adminClient, award.referee_id);
+    const effectiveDepositTotal = Math.max(
+      Number(award.qualifying_deposit_amount || 0),
+      depositProgress.realDepositTotal
+    );
+
     const payouts =
       Number(award.referrer_reward_amount || 0) > 0 || Number(award.referee_reward_amount || 0) > 0
         ? {
@@ -1490,59 +2174,42 @@ export async function handlePostReviewReferral(
           }
         : calculateReferralPayouts(
             config,
-            Number(award.qualifying_deposit_amount || 0) || config.qualificationDepositMin
+            effectiveDepositTotal || config.qualificationDepositMin
           );
 
     const payoutTarget: ReferralPayoutTarget =
       award.payout_target === 'available_balance' ? 'available_balance' : config.payoutTarget;
 
-    const { data: approvedRow, error: updErr } = await deps.adminClient
-      .from('referral_awards')
-      .update({
-        status: 'rewarded',
-        referrer_reward_amount: payouts.referrerAmount,
-        referee_reward_amount: payouts.refereeAmount,
-        reviewed_by: caller.id,
-        reviewed_by_name: caller.displayName,
-        review_notes: reviewNotes || 'Approved after Admin review.',
-        rewarded_at: nowIso,
-        updated_at: nowIso,
-      })
-      .eq('id', award.id)
-      .select()
-      .maybeSingle();
+    const atomicRes = await awardReferralAtomically({
+      adminClient: deps.adminClient,
+      awardId: award.id,
+      referrerId: award.referrer_id,
+      refereeId: award.referee_id,
+      referralCodeUsed: award.referral_code_used || '',
+      source: award.source || 'signup_link',
+      rewardMode: award.reward_mode || config.rewardMode,
+      payoutTarget,
+      referrerRewardAmount: payouts.referrerAmount,
+      refereeRewardAmount: payouts.refereeAmount,
+      qualifyingDepositId: depositProgress.qualifyingDepositId || award.qualifying_deposit_id || null,
+      qualifyingDepositAmount: effectiveDepositTotal,
+      fraudFlags: Array.isArray(award.fraud_flags) ? award.fraud_flags : [],
+      reviewedBy: caller.id,
+      reviewedByName: caller.displayName,
+      reviewNotes: reviewNotes || 'Approved after Admin review.',
+      referrerDescription: `Referral Reward Approved (${caller.displayName}): Award #${award.id.slice(-6)}`,
+      refereeDescription: `Welcome Referral Bonus Approved (${caller.displayName})`,
+      referrerNotifTitle: 'Held Referral Reward Approved',
+      referrerNotifMessage: `Admin verified and credited $${payouts.referrerAmount.toFixed(2)} referral bonus to your wallet.`,
+      refereeNotifTitle: 'Welcome Referral Bonus Approved',
+      refereeNotifMessage: `Admin approved and credited your $${payouts.refereeAmount.toFixed(2)} welcome referral bonus!`,
+    });
 
-    if (updErr) {
-      return res.status(500).json({ error: updErr.message });
-    }
-
-    if (payouts.referrerAmount > 0) {
-      await creditPlayerWallet({
-        adminClient: deps.adminClient,
-        customerId: award.referrer_id,
-        amount: payouts.referrerAmount,
-        target: payoutTarget,
-        txId: `tx_ref_r_${award.id}`,
-        idempotencyKey: `idemp_ref_r_${award.id}`,
-        description: `Referral Reward Approved (${caller.displayName}): Award #${award.id.slice(-6)}`,
-        referenceId: award.id,
-        notificationTitle: 'Held Referral Reward Approved',
-        notificationMessage: `Admin verified and credited $${payouts.referrerAmount.toFixed(2)} referral bonus to your wallet.`,
-      });
-    }
-
-    if (payouts.refereeAmount > 0) {
-      await creditPlayerWallet({
-        adminClient: deps.adminClient,
-        customerId: award.referee_id,
-        amount: payouts.refereeAmount,
-        target: payoutTarget,
-        txId: `tx_ref_f_${award.id}`,
-        idempotencyKey: `idemp_ref_f_${award.id}`,
-        description: `Welcome Referral Bonus Approved (${caller.displayName})`,
-        referenceId: award.id,
-        notificationTitle: 'Welcome Referral Bonus Approved',
-        notificationMessage: `Admin approved and credited your $${payouts.refereeAmount.toFixed(2)} welcome referral bonus!`,
+    if (!atomicRes.ok) {
+      return res.status(500).json({
+        success: false,
+        status: 'processing',
+        error: atomicRes.error || 'Failed to credit held referral award atomically.',
       });
     }
 
@@ -1559,11 +2226,48 @@ export async function handlePostReviewReferral(
     return res.status(200).json({
       success: true,
       status: 'rewarded',
-      award: normalizeReferralLedgerRow(approvedRow),
+      award: normalizeReferralLedgerRow(atomicRes.awardRow),
       message: 'Held referral approved and credited.',
     });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Failed to review referral award' });
+  }
+}
+
+export async function handlePostReconcileReferrals(
+  deps: ReferralHandlerDeps,
+  body: any,
+  res: any,
+  req: any
+) {
+  setNoStoreHeaders(res);
+  try {
+    const caller = await deps.resolveCaller(deps.adminClient, {
+      headers: req?.headers,
+      viewerUserId: body?.actingUserId ? String(body.actingUserId).trim() : undefined,
+    });
+    if (caller.jwtRejected) {
+      return res.status(401).json({ error: 'Session token expired or invalid.', code: 'TOKEN_EXPIRED' });
+    }
+    if (caller.role !== 'admin' && caller.role !== 'agent') {
+      return res.status(403).json({
+        error: 'Access Denied: Staff authorization required to reconcile referral rewards.',
+      });
+    }
+
+    const result = await reconcileMissingReferralRewards(deps, {
+      userId: body?.userId ? String(body.userId).trim() : undefined,
+      awardIds: Array.isArray(body?.awardIds) ? body.awardIds : undefined,
+      limit: Number(body?.limit || 100),
+      actor: { id: caller.id, name: caller.displayName, role: caller.role },
+    });
+
+    return res.status(200).json({
+      success: true,
+      ...result,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to reconcile referral rewards' });
   }
 }
 
@@ -1590,22 +2294,42 @@ export async function handleGetReferralSummary(
     const isStaff = caller.role === 'admin' || caller.role === 'agent';
     const targetUserId = isStaff && requestedUserId ? requestedUserId : caller.id;
 
-    const { data: owner } = await deps.adminClient
-      .from('users')
-      .select('id, referral_code, display_name')
-      .eq('id', targetUserId)
-      .maybeSingle();
+    // Automatically & safely reconcile missing wallet/ledger credits for this user first
+    await reconcileMissingReferralRewards(deps, {
+      userId: targetUserId,
+      limit: 50,
+    });
 
-    const config = await loadReferralProgramConfig(deps.adminClient);
-    const referralCode =
-      owner?.referral_code || `REF_${targetUserId.slice(-5).toUpperCase()}`;
-
-    const { data: awards, error: awErr } = await deps.adminClient
-      .from('referral_awards')
-      .select('*')
-      .eq('referrer_id', targetUserId)
-      .order('created_at', { ascending: false })
-      .limit(100);
+    const [{ data: owner }, { data: ownerWallet }, { data: ownerReferralTxs }, { data: awards, error: awErr }, { data: refereeAward }] =
+      await Promise.all([
+        deps.adminClient
+          .from('users')
+          .select('id, referral_code, display_name, referred_by, email_verified')
+          .eq('id', targetUserId)
+          .maybeSingle(),
+        deps.adminClient
+          .from('wallets')
+          .select('customer_id, balance, referral_bonus_balance')
+          .eq('customer_id', targetUserId)
+          .maybeSingle(),
+        deps.adminClient
+          .from('transactions')
+          .select('id, customer_id, amount, type, status, reference_id, created_at')
+          .eq('customer_id', targetUserId)
+          .eq('type', 'referral_reward')
+          .limit(200),
+        deps.adminClient
+          .from('referral_awards')
+          .select('*')
+          .eq('referrer_id', targetUserId)
+          .order('created_at', { ascending: false })
+          .limit(100),
+        deps.adminClient
+          .from('referral_awards')
+          .select('*')
+          .eq('referee_id', targetUserId)
+          .maybeSingle(),
+      ]);
 
     if (awErr && isSchemaMissingError(awErr)) {
       return res.status(503).json({
@@ -1614,6 +2338,11 @@ export async function handleGetReferralSummary(
       });
     }
 
+    const config = await loadReferralProgramConfig(deps.adminClient);
+    const referralCode =
+      owner?.referral_code || `REF_${targetUserId.slice(-5).toUpperCase()}`;
+
+    const ownerTxList = Array.isArray(ownerReferralTxs) ? ownerReferralTxs : [];
     const awardRows = Array.isArray(awards) ? awards : [];
     const refereeIds = awardRows.map((a: any) => a.referee_id).filter(Boolean);
 
@@ -1651,14 +2380,28 @@ export async function handleGetReferralSummary(
         Number(row.qualifying_deposit_amount || 0),
         depositTotalsById[row.referee_id] || 0
       );
+      const ledgerCredits = getAwardCreditedStatus(
+        row.id,
+        ownerTxList,
+        targetUserId,
+        row.referee_id
+      );
+      const expectedRefAmt = Number(row.referrer_reward_amount || 0);
+      const actualCreditedRef = ledgerCredits.referrerAmount;
+      const effectiveStatus =
+        row.status === 'rewarded' && expectedRefAmt > 0 && !ledgerCredits.referrerCredited
+          ? 'processing'
+          : row.status;
+
       return {
         id: row.referee_id,
         displayName: refUser?.display_name || 'Invited Player',
         joinedAt: refUser?.created_at || row.created_at,
-        status: row.status,
+        status: effectiveStatus,
         depositTotal,
-        rewardEarned: row.status === 'rewarded' ? Number(row.referrer_reward_amount || 0) : 0,
-        refereeRewardEarned: row.status === 'rewarded' ? Number(row.referee_reward_amount || 0) : 0,
+        // All displayed reward amounts reflect actual completed wallet ledger transactions
+        rewardEarned: actualCreditedRef,
+        refereeRewardEarned: Number(row.referee_reward_amount || 0),
         emailVerified: Boolean(refUser?.email_verified),
         hasRealDepositMet: depositTotal >= config.qualificationDepositMin,
         fraudFlags: Array.isArray(row.fraud_flags) ? row.fraud_flags : [],
@@ -1667,15 +2410,75 @@ export async function handleGetReferralSummary(
       };
     });
 
+    // Authoritative ledger-backed referrer earnings
     const totalRewardsEarned = Number(
       referredUsers.reduce((s, r) => s + (r.rewardEarned || 0), 0).toFixed(2)
     );
     const pendingRewards = Number(
       awardRows
-        .filter((r: any) => r.status === 'held_for_review')
+        .filter((r: any) => r.status === 'held_for_review' || r.status === 'processing')
         .reduce((s: number, r: any) => s + Number(r.referrer_reward_amount || 0), 0)
         .toFixed(2)
     );
+
+    // Build Referee Welcome Bonus state strictly backed by wallet/ledger transactions
+    const refereeDeposits = await computeRefereeRealCashDeposits(deps.adminClient, targetUserId);
+    const hasReferrer = Boolean(refereeAward || owner?.referred_by);
+    let referrerDisplayName: string | undefined;
+    if (refereeAward?.referrer_id) {
+      const { data: rUser } = await deps.adminClient
+        .from('users')
+        .select('id, display_name')
+        .eq('id', refereeAward.referrer_id)
+        .maybeSingle();
+      referrerDisplayName = rUser?.display_name || undefined;
+    } else if (owner?.referred_by) {
+      const { data: rByCode } = await deps.adminClient
+        .from('users')
+        .select('id, display_name')
+        .ilike('referral_code', normalizeReferralCodeInput(owner.referred_by))
+        .limit(1)
+        .maybeSingle();
+      referrerDisplayName = rByCode?.display_name || undefined;
+    }
+
+    const welcomeTxCredits = refereeAward?.id
+      ? getAwardCreditedStatus(refereeAward.id, ownerTxList, refereeAward.referrer_id, targetUserId)
+      : { refereeCredited: false, refereeAmount: 0, refereeTxId: undefined };
+
+    const fallbackExpectedWelcome = hasReferrer
+      ? calculateReferralPayouts(
+          config,
+          refereeDeposits.realDepositTotal > 0
+            ? refereeDeposits.realDepositTotal
+            : config.qualificationDepositMin
+        ).refereeAmount
+      : 0;
+    const storedWelcomeAmt = Number(refereeAward?.referee_reward_amount || 0);
+    const expectedWelcomeAmt = storedWelcomeAmt > 0 ? storedWelcomeAmt : fallbackExpectedWelcome;
+
+    let welcomeStatus: 'none' | 'pending' | 'processing' | 'rewarded' | 'held' | 'rejected' = 'none';
+    if (hasReferrer) {
+      if (refereeAward?.status === 'rejected' || refereeAward?.status === 'capped') {
+        welcomeStatus = 'rejected';
+      } else if (refereeAward?.status === 'held_for_review') {
+        welcomeStatus = 'held';
+      } else if (
+        refereeAward?.status === 'rewarded' &&
+        (welcomeTxCredits.refereeCredited || expectedWelcomeAmt === 0)
+      ) {
+        welcomeStatus = 'rewarded';
+      } else if (
+        refereeAward?.status === 'processing' ||
+        (refereeAward?.status === 'rewarded' && !welcomeTxCredits.refereeCredited && expectedWelcomeAmt > 0) ||
+        (refereeDeposits.realDepositTotal >= config.qualificationDepositMin &&
+          (!config.requireEmailVerified || Boolean(owner?.email_verified ?? true)))
+      ) {
+        welcomeStatus = 'processing';
+      } else {
+        welcomeStatus = 'pending';
+      }
+    }
 
     const host = req?.headers?.['x-forwarded-host'] || req?.headers?.host || '';
     const proto = req?.headers?.['x-forwarded-proto'] || 'https';
@@ -1701,6 +2504,31 @@ export async function handleGetReferralSummary(
         maxReferralsPerUser: config.maxReferralsPerUser,
         programEnabled: config.enabled,
         referredUsers,
+        walletBalances: {
+          availableBalance: Number(ownerWallet?.balance ?? ownerWallet?.available_balance ?? 0),
+          referralBonusBalance: Number(ownerWallet?.referral_bonus_balance ?? 0),
+        },
+        welcomeBonus: {
+          hasReferrer,
+          awardId: refereeAward?.id,
+          referrerId: refereeAward?.referrer_id,
+          referrerName: referrerDisplayName,
+          referralCodeUsed: refereeAward?.referral_code_used || owner?.referred_by || undefined,
+          status: welcomeStatus,
+          expectedAmount: expectedWelcomeAmt,
+          creditedAmount: welcomeTxCredits.refereeAmount,
+          depositTotal: Math.max(
+            Number(refereeAward?.qualifying_deposit_amount || 0),
+            refereeDeposits.realDepositTotal
+          ),
+          qualifyingDepositMin: config.qualificationDepositMin,
+          payoutTarget:
+            refereeAward?.payout_target === 'available_balance'
+              ? 'available_balance'
+              : config.payoutTarget,
+          txId: welcomeTxCredits.refereeTxId,
+          rewardedAt: refereeAward?.rewarded_at || undefined,
+        },
       },
     });
   } catch (err: any) {

@@ -11,6 +11,7 @@ import {
   shouldAcceptIncomingChatMessage,
 } from '../../services/notificationScoping';
 import { claimNotificationAlertId } from '../../utils/browserNotificationUtils';
+import { webPushClient } from '../../services/webPushClient';
 import { Headphones, MessageSquare, X, ArrowRight, Bell } from 'lucide-react';
 
 interface GlobalChatNotificationManagerProps {
@@ -74,15 +75,31 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
     // 1. Play real-time synthesized Web Audio API notification chime
     notificationSoundService.playIncomingMessageSound();
 
-    // 2. Trigger native mobile PWA / desktop browser notification
+    // 2. Trigger native desktop/SW fallback notification ONLY when tab is hidden AND Web Push isn't subscribed
     const notificationTitle = activeIsCustomer
       ? `Swift Sweeps Support (${msg.senderName || 'Support'})`
       : `New Player Message (${msg.senderName || 'Player'})`;
+    const notificationBody =
+      msg.text || (msg.attachmentUrl ? 'Sent a photo attachment.' : 'You have received a new message.');
 
-    notificationSoundService.showDesktopNotification(notificationTitle, {
-      body: msg.text || (msg.attachmentUrl ? 'Sent a photo attachment.' : 'You have received a new message.'),
-      tag: `msg_${msg.id}`,
-    });
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      void webPushClient
+        .hasActiveSubscription()
+        .then((hasPush) => {
+          if (!hasPush) {
+            notificationSoundService.showDesktopNotification(notificationTitle, {
+              body: notificationBody,
+              tag: `msg_${msg.id}`,
+            });
+          }
+        })
+        .catch(() => {
+          notificationSoundService.showDesktopNotification(notificationTitle, {
+            body: notificationBody,
+            tag: `msg_${msg.id}`,
+          });
+        });
+    }
 
     // 3. Show in-app floating toast if user is not currently in the chat view or tab is hidden
     const currentTab = activeTabRef.current;

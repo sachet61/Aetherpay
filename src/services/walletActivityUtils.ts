@@ -166,11 +166,17 @@ export function mapDbWalletRowToWallet(
   options?: { authoritativeTopupsLoaded?: boolean }
 ): UserWallet {
   const customerId = String(dbRow.customer_id);
+  const rawReferralBonus = dbRow.referral_bonus_balance ?? dbRow.referralBonusBalance;
+  const referralBonusBalance =
+    rawReferralBonus !== undefined && rawReferralBonus !== null
+      ? toFiniteNumber(rawReferralBonus, 0)
+      : toFiniteNumber(existingWallet?.referralBonusBalance, 0);
+
   const baseWallet: UserWallet = {
     customerId,
     currency: dbRow.currency || existingWallet?.currency || 'USD',
     availableBalance: toFiniteNumber(dbRow.balance, 0),
-    referralBonusBalance: toFiniteNumber(existingWallet?.referralBonusBalance, 0),
+    referralBonusBalance,
     reservedBalance: toFiniteNumber(dbRow.pending_withdrawal, 0),
     pendingDepositBalance: toFiniteNumber(dbRow.pending_deposit, 0),
     totalDeposited: toFiniteNumber(dbRow.total_deposited, existingWallet?.totalDeposited ?? 0),
@@ -458,7 +464,7 @@ export function buildUnifiedWalletActivity(params: {
 
     let title = 'Account Activity';
     if (txType === 'referral_reward' || txType === 'referral') {
-      title = 'Referral Reward';
+      title = descLower.includes('welcome') ? 'Welcome Referral Bonus' : 'Referral Reward';
     } else if (isReferralBonusUsage) {
       title = 'Referral Bonus Game Load';
     } else if (txType === 'deposit') {

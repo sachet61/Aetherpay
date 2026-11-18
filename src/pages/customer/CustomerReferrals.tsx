@@ -17,6 +17,8 @@ import {
   Loader2,
   ShieldAlert,
   XCircle,
+  Wallet,
+  ArrowDownToLine,
 } from 'lucide-react';
 
 interface CustomerReferralsProps {
@@ -168,6 +170,82 @@ export const CustomerReferrals: React.FC<CustomerReferralsProps> = ({
         </div>
       )}
 
+      {/* Referee Welcome Bonus Card */}
+      {summary.welcomeBonus?.hasReferrer && (
+        <div
+          data-testid="referrals-welcome-bonus-card"
+          className="p-4 rounded-2xl bg-emerald-950/25 border border-emerald-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-lg"
+        >
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-bold text-white text-sm">Your Welcome Referral Bonus</span>
+              <span
+                className={`px-2 py-0.5 rounded border text-[10px] font-mono font-semibold uppercase ${
+                  summary.welcomeBonus.status === 'rewarded'
+                    ? 'bg-emerald-950/80 border-emerald-600/50 text-emerald-300'
+                    : summary.welcomeBonus.status === 'processing'
+                    ? 'bg-cyan-950/80 border-cyan-600/50 text-cyan-300'
+                    : summary.welcomeBonus.status === 'held'
+                    ? 'bg-amber-950/80 border-amber-600/50 text-amber-300'
+                    : summary.welcomeBonus.status === 'rejected'
+                    ? 'bg-rose-950/80 border-rose-600/50 text-rose-300'
+                    : 'bg-slate-900 border-slate-700 text-amber-300'
+                }`}
+              >
+                {summary.welcomeBonus.status === 'rewarded'
+                  ? 'Rewarded'
+                  : summary.welcomeBonus.status === 'processing'
+                  ? 'Processing'
+                  : summary.welcomeBonus.status === 'held'
+                  ? 'Held for Review'
+                  : summary.welcomeBonus.status === 'rejected'
+                  ? 'Rejected'
+                  : 'Pending'}
+              </span>
+            </div>
+            <div className="text-xs text-slate-300">
+              <span className="font-mono font-bold text-emerald-400 mr-1.5">
+                $
+                {(summary.welcomeBonus.status === 'rewarded'
+                  ? summary.welcomeBonus.creditedAmount
+                  : summary.welcomeBonus.expectedAmount
+                ).toFixed(2)}
+              </span>
+              {summary.welcomeBonus.status === 'rewarded'
+                ? `credited to your ${
+                    summary.welcomeBonus.payoutTarget === 'available_balance'
+                      ? 'withdrawable wallet'
+                      : 'game bonus balance'
+                  }${summary.welcomeBonus.referrerName ? ` via ${summary.welcomeBonus.referrerName}` : ''}.`
+                : summary.welcomeBonus.status === 'processing'
+                ? 'deposit qualified — completing wallet credit & activity entry.'
+                : `approved deposits: $${summary.welcomeBonus.depositTotal.toFixed(2)} / $${summary.welcomeBonus.qualifyingDepositMin}.`}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {summary.welcomeBonus.status === 'pending' && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('topup')}
+                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 whitespace-nowrap"
+              >
+                <ArrowDownToLine className="w-3.5 h-3.5" />
+                <span>Make Deposit</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onNavigateTab('wallet')}
+              className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <Wallet className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Wallet Activity</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Rules & Wallet Credit Callout */}
       <div className="p-4 rounded-2xl bg-amber-950/40 border border-amber-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-lg">
         <div className="flex items-start gap-3">
@@ -315,6 +393,7 @@ export const CustomerReferrals: React.FC<CustomerReferralsProps> = ({
             <div className="divide-y divide-slate-800/70">
               {summary.referredUsers.map((ru) => {
                 const isRewarded = ru.status === 'rewarded';
+                const isProcessing = ru.status === 'processing';
                 const isHeld = ru.status === 'held_for_review';
                 const isRejected = ru.status === 'rejected';
                 const isCapped = ru.status === 'capped';
@@ -349,6 +428,8 @@ export const CustomerReferrals: React.FC<CustomerReferralsProps> = ({
                           className={`px-2.5 py-1 rounded border text-[11px] font-mono font-semibold ${
                             isRewarded
                               ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/70'
+                              : isProcessing
+                              ? 'bg-cyan-950/70 text-cyan-300 border-cyan-700/70'
                               : isHeld
                               ? 'bg-amber-950/70 text-amber-300 border-amber-700/70'
                               : isRejected
@@ -360,6 +441,8 @@ export const CustomerReferrals: React.FC<CustomerReferralsProps> = ({
                         >
                           {isRewarded
                             ? 'Rewarded'
+                            : isProcessing
+                            ? 'Processing'
                             : isHeld
                             ? 'Held for Admin Review'
                             : isRejected
@@ -403,6 +486,8 @@ export const CustomerReferrals: React.FC<CustomerReferralsProps> = ({
                       <div className="flex items-center gap-1.5">
                         {isRewarded ? (
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        ) : isProcessing ? (
+                          <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin shrink-0" />
                         ) : isHeld ? (
                           <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                         ) : isRejected ? (
@@ -414,6 +499,8 @@ export const CustomerReferrals: React.FC<CustomerReferralsProps> = ({
                           className={`text-[11px] font-medium ${
                             isRewarded
                               ? 'text-emerald-300'
+                              : isProcessing
+                              ? 'text-cyan-300'
                               : isHeld
                               ? 'text-amber-300'
                               : isRejected
@@ -423,6 +510,8 @@ export const CustomerReferrals: React.FC<CustomerReferralsProps> = ({
                         >
                           {isRewarded
                             ? '4. Bonus Credited'
+                            : isProcessing
+                            ? '4. Crediting Wallet'
                             : isHeld
                             ? '4. Under Admin Review'
                             : isRejected

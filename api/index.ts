@@ -5,6 +5,7 @@ import {
   handlePatchVanityReferralCode,
   handlePostAdminReferralConfig,
   handlePostManualAssignReferral,
+  handlePostReconcileReferrals,
   handlePostReferralAttribute,
   handlePostReferralEvaluate,
   handlePostReviewReferral,
@@ -555,8 +556,12 @@ export async function handlePushNotify(
         title: title || 'New Message',
         body: msgBody || 'You have received a new message.',
         url: targetUrl || (authoritativeTargetRole === 'staff' ? '/#ops_chat' : '/#chat'),
-        tag: tag || `chat_${conversationId || Date.now()}`,
-        data: { conversationId },
+        tag: tag || (body?.messageId ? `msg_${body.messageId}` : `chat_${conversationId || Date.now()}`),
+        data: {
+          conversationId,
+          messageId: body?.messageId,
+          actionType: body?.actionType || (isSelfTest ? 'test' : 'chat'),
+        },
         targetEmail: !authoritativeTargetId ? userEmail : undefined,
         senderId: isSelfTest ? undefined : caller.id,
       },
@@ -2740,6 +2745,9 @@ export default async function handler(req: any, res: any) {
   }
   if (url.includes('/api/referrals/review') && req.method === 'POST') {
     return handlePostReviewReferral(referralDeps, getBody(req), res, req);
+  }
+  if (url.includes('/api/referrals/reconcile') && req.method === 'POST') {
+    return handlePostReconcileReferrals(referralDeps, getBody(req), res, req);
   }
   if (url.includes('/api/referrals/summary') && req.method === 'GET') {
     return handleGetReferralSummary(referralDeps, parsedUrl, res, req);

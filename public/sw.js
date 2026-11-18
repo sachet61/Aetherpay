@@ -103,6 +103,10 @@ self.addEventListener('push', (event) => {
   const resolvedIcon = !data.icon || LEGACY_ICONS.includes(data.icon) ? DEFAULT_ICON : data.icon;
   const resolvedBadge = !data.badge || LEGACY_BADGES.includes(data.badge) ? DEFAULT_BADGE : data.badge;
 
+  const messageId = data.data?.messageId || data.messageId || '';
+  const actionType = data.data?.actionType || '';
+  const resolvedTag = data.tag || (messageId ? `msg_${messageId}` : `swiftsweeps_alert_${Date.now()}`);
+
   // High-priority Heads-Up Notification configuration (Messenger / FB Lite style)
   const options = {
     body: data.body || 'You have a new message from customer care.',
@@ -114,6 +118,8 @@ self.addEventListener('push', (event) => {
     data: {
       url: targetUrl,
       conversationId: data.data?.conversationId || data.conversationId,
+      messageId,
+      actionType,
       targetUserId: data.data?.targetUserId,
       targetRole: data.data?.targetRole,
       dateOfArrival: Date.now(),
@@ -121,15 +127,29 @@ self.addEventListener('push', (event) => {
     },
     // Priority heads-up display on Android lockscreen & active screen
     requireInteraction: true,
-    renotify: true,
-    tag: data.tag || `swiftsweeps_alert_${Date.now()}`,
+    renotify: !messageId,
+    tag: resolvedTag,
     actions: [
       { action: 'open_action', title: '💬 Open / Reply' },
       { action: 'dismiss', title: 'Dismiss' },
     ],
   };
 
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then((clientList) => {
+        if (actionType === 'chat') {
+          const hasFocusedVisibleClient = clientList.some(
+            (client) => client && client.focused && client.visibilityState === 'visible'
+          );
+          if (hasFocusedVisibleClient) {
+            return;
+          }
+        }
+        return self.registration.showNotification(title, options);
+      })
+  );
 });
 
 // Handle Notification Click / Tap — Focus Existing Tab or Open Target Route

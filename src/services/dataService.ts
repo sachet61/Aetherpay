@@ -2038,6 +2038,7 @@ class DataService {
           await supabase.from('wallets').upsert({
             customer_id: target.customerId,
             balance: target.availableBalance || 0,
+            referral_bonus_balance: target.referralBonusBalance || 0,
             pending_withdrawal: target.reservedBalance || 0,
             pending_deposit: target.pendingDepositBalance || 0,
             total_deposited: cumulativeDeposited || 0,
@@ -3872,7 +3873,34 @@ class DataService {
         });
       }
 
-      this.checkAndAwardReferral(params.customerId, params.amount);
+      if (supabase && isSupabaseConfigured()) {
+        void (async () => {
+          try {
+            await supabase.from('topups').upsert({
+              id: newReq.id,
+              customer_id: newReq.customerId,
+              customer_name: newReq.customerName,
+              amount: newReq.amount,
+              bonus_amount: newReq.bonusAmount || 0,
+              payment_method_id: newReq.method || 'payment_link',
+              payment_method_name: newReq.methodName || 'Payment Link',
+              status: newReq.status,
+              proof_url: newReq.receiptUrl || null,
+              target_game_name: newReq.targetGameName || null,
+              target_game_account_id: newReq.targetGameCatalogId || null,
+              customer_notes: null,
+              reviewer_id: newReq.reviewerId || null,
+              reviewer_name: newReq.reviewerName || null,
+              review_notes: newReq.reviewNotes || null,
+              created_at: newReq.createdAt,
+              updated_at: newReq.updatedAt,
+            });
+          } catch {}
+          await this.triggerServerReferralEvaluation(params.customerId);
+        })();
+      } else {
+        this.checkAndAwardReferral(params.customerId, params.amount);
+      }
     } else {
       wallet.pendingDepositBalance += params.amount;
       wallet.lastUpdatedAt = new Date().toISOString();
@@ -3933,13 +3961,16 @@ class DataService {
     return newReq;
   }
 
-  public approveTopUp(params: {
-    requestId: string;
-    reviewerId: string;
-    reviewerName: string;
-    notes?: string;
-    verifiedAmount?: number;
-  }): { success: boolean; message: string } {
+  public approveTopUp(
+    params: {
+      requestId: string;
+      reviewerId: string;
+      reviewerName: string;
+      notes?: string;
+      verifiedAmount?: number;
+    },
+    options?: { skipReferralEval?: boolean }
+  ): { success: boolean; message: string } {
     const allReqs = this.load<TopUpRequest[]>(STORAGE_KEYS.TOPUPS, INITIAL_TOPUPS);
     const req = findRequestById(allReqs, params.requestId);
     if (!req) return { success: false, message: 'Request not found' };
@@ -4037,8 +4068,6 @@ class DataService {
       });
     }
 
-    this.checkAndAwardReferral(req.customerId, req.amount);
-
     this.createNotification({
       userId: req.customerId,
       title: 'Game Top-Up Approved & Loaded',
@@ -4124,12 +4153,21 @@ class DataService {
         reviewer_name: params.reviewerName,
         review_notes: req.reviewNotes,
         updated_at: req.updatedAt,
-      }).eq('id', req.id).then(() => {}, (err) => console.warn('Supabase topup approve sync error:', err));
+      }).eq('id', req.id).then(
+        () => {
+          if (!options?.skipReferralEval) {
+            void this.triggerServerReferralEvaluation(req.customerId);
+          }
+        },
+        (err) => console.warn('Supabase topup approve sync error:', err)
+      );
 
       supabase.from('wallets').update({
         total_deposited: cumulativeDeposited,
         updated_at: new Date().toISOString(),
       }).eq('customer_id', req.customerId).then(() => {}, (err) => console.warn('Supabase wallet topup sync error:', err));
+    } else if (!options?.skipReferralEval) {
+      this.checkAndAwardReferral(req.customerId, req.amount);
     }
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'topup_approved', requestId: req.id } }));
 
@@ -4215,7 +4253,7 @@ class DataService {
       };
     }
 
-    const res = this.approveTopUp(params);
+    const res = this.approveTopUp(params, { skipReferralEval: true });
     if (!res.success) return res;
 
     if (supabase && isSupabaseConfigured()) {
@@ -4244,8 +4282,10 @@ class DataService {
           };
         }
         await this.persistChatTransactionStatusInSupabase(updatedReq.id, updatedReq.customerId);
-        void this.triggerServerReferralEvaluation(updatedReq.customerId);
+        await this.triggerServerReferralEvaluation(updatedReq.customerId);
       }
+    } else {
+      await this.triggerServerReferralEvaluation(lookup.request.customerId);
     }
 
     return res;
@@ -4430,6 +4470,7 @@ class DataService {
       const { error: walletErr } = await supabase.from('wallets').upsert({
         customer_id: params.customerId,
         balance: reconciledWallet.availableBalance || 0,
+        referral_bonus_balance: reconciledWallet.referralBonusBalance || 0,
         pending_withdrawal: reconciledWallet.reservedBalance || 0,
         pending_deposit: reconciledWallet.pendingDepositBalance || 0,
         total_deposited: reconciledWallet.totalDeposited || 0,
@@ -4524,7 +4565,7 @@ class DataService {
         }
       }
 
-      this.checkAndAwardReferral(params.customerId, newReq.amount);
+      await this.triggerServerReferralEvaluation(params.customerId);
     }
 
     this.logAudit({
@@ -4706,6 +4747,7 @@ class DataService {
       const { error: walletErr } = await supabase.from('wallets').upsert({
         customer_id: params.customerId,
         balance: wallet.availableBalance || 0,
+        referral_bonus_balance: wallet.referralBonusBalance || 0,
         pending_withdrawal: wallet.reservedBalance || 0,
         pending_deposit: wallet.pendingDepositBalance || 0,
         total_deposited: wallet.totalDeposited || 0,
@@ -6670,6 +6712,7 @@ class DataService {
                 senderName: updated.senderName || 'Support',
                 messageText: updated.text || '',
                 conversationId: targetConvId,
+                messageId: updated.id,
               })
               .catch(() => {});
           }
@@ -7152,10 +7195,24 @@ class DataService {
 
   public createNotification(params: Omit<AppNotification, 'id' | 'createdAt' | 'isRead'>): AppNotification {
     const list = this.load<AppNotification[]>(STORAGE_KEYS.NOTIFICATIONS, INITIAL_NOTIFICATIONS);
+    const nowMs = Date.now();
+    const existing = list.find(
+      (n) =>
+        n.userId === params.userId &&
+        n.type === params.type &&
+        n.title === params.title &&
+        ((params.linkRequestId && n.linkRequestId === params.linkRequestId) ||
+          (!params.linkRequestId &&
+            n.message === params.message &&
+            Math.abs(nowMs - Date.parse(n.createdAt || '')) < 15000))
+    );
+    if (existing) {
+      return existing;
+    }
     const newNotif: AppNotification = {
       ...params,
-      id: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      createdAt: new Date().toISOString(),
+      id: `notif_${nowMs}_${Math.random().toString(36).substring(2, 6)}`,
+      createdAt: new Date(nowMs).toISOString(),
       isRead: false,
     };
     list.unshift(newNotif);
@@ -7281,12 +7338,9 @@ class DataService {
   }
 
   public checkAndAwardReferral(customerId: string, _newDepositAmount: number = 0): void {
-    const customer = this.getUserById(customerId);
-    if (!customer || !customer.referredBy) return;
-    const config = this.getAppConfig();
-    if (!config.referralProgram?.enabled) return;
-
-    // Trigger authoritative server evaluation & PostgreSQL referral_awards ledger
+    if (!customerId) return;
+    // Always invoke authoritative server evaluation so staff-approved or payment-link deposits
+    // reconcile cumulative deposits and awards without relying on local user cache.
     void this.triggerServerReferralEvaluation(customerId);
   }
 
@@ -7337,12 +7391,60 @@ class DataService {
       });
       if (res.ok) {
         const json = await res.json().catch(() => ({}));
-        if (json?.status === 'rewarded') {
-          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'referrals_updated' } }));
+        if (json?.status === 'rewarded' || json?.depositSynced || json?.reconciled) {
+          void this.syncDelta();
+          window.dispatchEvent(
+            new CustomEvent('aetherpay_state_changed', {
+              detail: { key: 'referrals_updated', status: json?.status },
+            })
+          );
         }
       }
     } catch {
       // Non-blocking server evaluation
+    }
+  }
+
+  public async reconcileReferralRewards(userId?: string): Promise<{
+    success: boolean;
+    checkedAwards?: number;
+    reconciledAwards?: number;
+    creditedLegs?: number;
+    totalCreditedAmount?: number;
+    error?: string;
+  }> {
+    try {
+      const activeUser = this.getCurrentUser();
+      const targetUserId = userId || activeUser?.id;
+      let res = await fetch('/api/referrals/reconcile', {
+        method: 'POST',
+        headers: await this.buildAuditAuthHeaders(false),
+        body: JSON.stringify({ userId: targetUserId }),
+      });
+      if (res.status === 401) {
+        res = await fetch('/api/referrals/reconcile', {
+          method: 'POST',
+          headers: await this.buildAuditAuthHeaders(true),
+          body: JSON.stringify({ userId: targetUserId }),
+        });
+      }
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, error: json?.error || `Reconciliation failed (${res.status})` };
+      }
+      if ((json.reconciledAwards || 0) > 0 || (json.creditedLegs || 0) > 0) {
+        void this.syncDelta();
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'referrals_updated' } }));
+      }
+      return {
+        success: true,
+        checkedAwards: Number(json.checkedAwards || 0),
+        reconciledAwards: Number(json.reconciledAwards || 0),
+        creditedLegs: Number(json.creditedLegs || 0),
+        totalCreditedAmount: Number(json.totalCreditedAmount || 0),
+      };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Unable to reconcile referral rewards' };
     }
   }
 

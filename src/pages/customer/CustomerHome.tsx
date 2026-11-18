@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef } from 'react';
-import { UserProfile, UserWallet } from '../../types';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ReferralSummary, UserProfile, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
 import {
   DEFAULT_GAME_ICON,
@@ -79,11 +79,55 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
     (r) => r.status === 'submitted' || r.status === 'processing' || r.status === 'pending_verification'
   );
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
-  const referralSummary = dataService.getReferralSummary(currentUser.id);
+  const [serverReferralSummary, setServerReferralSummary] = useState<ReferralSummary | null>(null);
+  const localReferralSummary = dataService.getReferralSummary(currentUser.id);
+  const referralSummary = serverReferralSummary || localReferralSummary;
   const conversation = dataService.getConversations().find((c) => c.customerId === currentUser.id);
   const topUpDisplay = resolveDashboardTopUpDisplay(wallet, topups, currentUser.id);
   const displayTopUpAmount = topUpDisplay.amount;
   const displayTopUpGame = topUpDisplay.gameName;
+
+  useEffect(() => {
+    let cancelled = false;
+    const syncReferralSummary = async () => {
+      const res = await dataService.fetchReferralSummaryFromServer(currentUser.id);
+      if (!cancelled && res.success && res.summary) {
+        setServerReferralSummary(res.summary);
+      }
+    };
+    void syncReferralSummary();
+
+    const onStateChanged = (e: any) => {
+      const key = e?.detail?.key;
+      const tables: string[] = Array.isArray(e?.detail?.tables) ? e.detail.tables : [];
+      if (
+        key === 'referrals_updated' ||
+        key === 'initial_compact_load' ||
+        key === 'topup_approved' ||
+        tables.includes('referral_awards') ||
+        tables.includes('wallets') ||
+        tables.includes('transactions') ||
+        tables.includes('topups') ||
+        tables.includes('app_config')
+      ) {
+        void syncReferralSummary();
+      }
+    };
+    window.addEventListener('aetherpay_state_changed', onStateChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('aetherpay_state_changed', onStateChanged);
+    };
+  }, [currentUser.id]);
+
+  const welcomeBonus = referralSummary.welcomeBonus;
+  const referrerRewardVal = referralSummary.referrerRewardValue ?? referralSummary.rewardPerReferral ?? 25;
+  const refereeRewardVal = referralSummary.refereeRewardValue ?? 0;
+  const referralMode = referralSummary.rewardMode || 'flat';
+  const referralPayoutTargetLabel =
+    referralSummary.payoutTarget === 'available_balance' ? 'withdrawable wallet' : 'game bonus balance';
+  const referrerRewardText =
+    referralMode === 'percent' ? `${referrerRewardVal}% bonus` : `$${referrerRewardVal.toFixed(2)} bonus`;
 
   const handleCopyReferral = () => {
     navigator.clipboard.writeText(referralSummary.referralLink);
@@ -238,6 +282,93 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
           <span>24/7 Support Chat</span>
         </button>
       </div>
+
+      {/* Referee Welcome Bonus Card (Visible when player signed up via referral or was linked by support) */}
+      {welcomeBonus?.hasReferrer && (
+        <div
+          data-testid="welcome-bonus-card"
+          className="p-5 rounded-2xl border border-emerald-500/30 bg-gradient-to-r from-[#0E1726] via-[#111E33] to-[#0E1726] flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl"
+        >
+          <div className="flex items-start gap-3.5">
+            <div className="w-11 h-11 rounded-xl bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 flex items-center justify-center shrink-0">
+              <Gift className="w-5 h-5" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-sm sm:text-base font-bold text-white">Welcome Bonus</h2>
+                <span
+                  className={`px-2 py-0.5 rounded border text-[10px] font-mono font-semibold uppercase ${
+                    welcomeBonus.status === 'rewarded'
+                      ? 'bg-emerald-950/80 border-emerald-600/50 text-emerald-300'
+                      : welcomeBonus.status === 'processing'
+                      ? 'bg-cyan-950/80 border-cyan-600/50 text-cyan-300'
+                      : welcomeBonus.status === 'held'
+                      ? 'bg-amber-950/80 border-amber-600/50 text-amber-300'
+                      : welcomeBonus.status === 'rejected'
+                      ? 'bg-rose-950/80 border-rose-600/50 text-rose-300'
+                      : 'bg-slate-900 border-slate-700 text-amber-300'
+                  }`}
+                >
+                  {welcomeBonus.status === 'rewarded'
+                    ? 'Rewarded'
+                    : welcomeBonus.status === 'processing'
+                    ? 'Processing'
+                    : welcomeBonus.status === 'held'
+                    ? 'In Review'
+                    : welcomeBonus.status === 'rejected'
+                    ? 'Declined'
+                    : 'Pending'}
+                </span>
+                {welcomeBonus.referrerName && (
+                  <span className="text-[11px] font-mono text-slate-400">
+                    Invited by {welcomeBonus.referrerName}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-extrabold font-mono text-emerald-400 tabular-nums">
+                  ${(welcomeBonus.status === 'rewarded' ? welcomeBonus.creditedAmount : welcomeBonus.expectedAmount).toFixed(2)}
+                </span>
+                <span className="text-xs text-slate-300">
+                  {welcomeBonus.status === 'rewarded'
+                    ? `credited to your ${
+                        welcomeBonus.payoutTarget === 'available_balance' ? 'withdrawable wallet' : 'game bonus balance'
+                      }`
+                    : welcomeBonus.status === 'processing'
+                    ? 'qualification met — completing wallet & ledger credit'
+                    : welcomeBonus.status === 'held'
+                    ? 'awaiting admin verification'
+                    : welcomeBonus.status === 'rejected'
+                    ? 'not eligible for payout'
+                    : `unlock after $${welcomeBonus.qualifyingDepositMin}+ in approved real deposits ($${welcomeBonus.depositTotal.toFixed(2)} / $${welcomeBonus.qualifyingDepositMin})`}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {welcomeBonus.status === 'pending' && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('topup')}
+                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm whitespace-nowrap"
+              >
+                <ArrowDownToLine className="w-3.5 h-3.5" />
+                <span>Deposit Now</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onNavigateTab('wallet')}
+              className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold text-xs flex items-center gap-1.5 transition-colors whitespace-nowrap"
+            >
+              <Wallet className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Wallet Activity</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Featured Game Platforms Showcase (Keyhub Solutions Style) */}
       <div className="space-y-4">
@@ -573,7 +704,10 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-white flex items-center gap-2">
               <Gift className="w-4 h-4 text-amber-400" />
-              <span>Refer &amp; Earn $25</span>
+              <span>
+                Refer &amp; Earn{' '}
+                {referralMode === 'percent' ? `${referrerRewardVal}%` : `$${referrerRewardVal.toFixed(0)}`}
+              </span>
             </h2>
             <button
               onClick={() => onNavigateTab('referrals')}
@@ -585,7 +719,13 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
 
           <div className="p-5 rounded-xl border border-amber-500/20 bg-[#0E1726] space-y-4">
             <p className="text-xs text-slate-300 leading-relaxed">
-              Invite friends to Swift Sweeps. When they deposit at least $100, you automatically receive a $25 cash reward in your wallet.
+              Invite friends to Swift Sweeps. When an email-verified friend deposits at least ${referralSummary.qualifyingDepositMin}, you earn {referrerRewardText}
+              {refereeRewardVal > 0
+                ? referralMode === 'percent'
+                  ? ` and they get a ${refereeRewardVal}% welcome bonus`
+                  : ` and they receive a $${refereeRewardVal.toFixed(2)} welcome bonus`
+                : ''}{' '}
+              in your {referralPayoutTargetLabel}.
             </p>
 
             <div className="p-3 rounded-lg bg-[#0A0F1D] border border-slate-800 space-y-2">
@@ -610,7 +750,7 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
                 <div className="font-bold text-white font-mono text-base">{referralSummary.totalReferred}</div>
               </div>
               <div className="p-2 rounded bg-slate-950/60">
-                <div className="text-slate-400 text-[10px]">Earned</div>
+                <div className="text-slate-400 text-[10px]">Credited Earned</div>
                 <div className="font-bold text-emerald-400 font-mono text-base">
                   ${referralSummary.totalRewardsEarned.toFixed(2)}
                 </div>
