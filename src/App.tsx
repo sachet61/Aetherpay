@@ -4,6 +4,7 @@ import { useVerificationResolution } from './hooks/useVerificationResolution';
 import { writeVerifiedCache } from './services/verificationStateUtils';
 import { dataService } from './services/dataService';
 import { authSessionService } from './services/authSessionService';
+import { resolveGameImageUrl } from './utils/imageUtils';
 import { TopNavbar } from './components/layout/TopNavbar';
 import { CustomerMobileNav } from './components/layout/CustomerMobileNav';
 import { StaffMobileNav } from './components/layout/StaffMobileNav';
@@ -167,6 +168,15 @@ export default function App() {
     }
   }, [currentUser?.id, currentUser?.role, activeTab]);
 
+  const catalogIconUrls = React.useMemo(
+    () =>
+      dataService
+        .getGameCatalog()
+        .filter((g) => g.enabled !== false)
+        .map((g) => resolveGameImageUrl(g.iconUrl || g.imageUrl)),
+    [hydrationState.hydratedUserId]
+  );
+
   if (currentHash === '#privacy') {
     return <LegalContent initialTab="privacy" onBack={() => { window.location.hash = ''; setCurrentHash(''); }} />;
   }
@@ -182,7 +192,7 @@ export default function App() {
   if (!currentUser) {
     return (
       <>
-        <StartupSplash />
+        <StartupSplash target="auth" catalogIconUrls={catalogIconUrls} />
         <AuthPage
           key="auth"
           onLoginSuccess={(user) => {
@@ -213,11 +223,15 @@ export default function App() {
   if (showHydrationGate) {
     return (
       <>
-        <StartupSplash />
+        <StartupSplash
+          target={isCustomer ? 'customer_dashboard' : 'staff_ops'}
+          catalogIconUrls={catalogIconUrls}
+        />
         <SessionHydrationScreen
           role={currentUser.role}
           displayName={currentUser.displayName}
           errorMessage={hydrationState.error}
+          catalogIconUrls={catalogIconUrls}
           onRetry={() => {
             setBypassedHydrationUserId(null);
             void dataService.hydrateForSession(currentUser, { force: true });
@@ -316,8 +330,11 @@ export default function App() {
 
   return (
     <>
-      {/* Branded Startup Loading Screen with Logo Glow & Animated Progress Bar */}
-      <StartupSplash />
+      {/* Branded Startup Loading Screen tracking required assets for active workspace */}
+      <StartupSplash
+        target={isCustomer ? 'customer_dashboard' : 'staff_ops'}
+        catalogIconUrls={catalogIconUrls}
+      />
 
       <div
         className={`min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950 ${

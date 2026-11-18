@@ -1,11 +1,83 @@
-// Swift Sweeps Service Worker — Realtime Background Web Push & Notification Dispatcher
+// Swift Sweeps Service Worker — Realtime Background Web Push & Scoped Static Media Cache
+
+const MEDIA_CACHE_PREFIX = 'swiftsweeps-media-';
+const MEDIA_CACHE_NAME = 'swiftsweeps-media-v2';
+
+const CACHEABLE_BRAND_PNG_PATHS = new Set([
+  '/pwa-192x192-v2.png',
+  '/pwa-512x512-v2.png',
+  '/pwa-maskable-512x512-v2.png',
+  '/apple-touch-icon-v2.png',
+  '/favicon-v2.png',
+  '/notification-badge-v2.png',
+]);
+
+function isCacheableStaticMediaPath(pathname) {
+  if (!pathname || typeof pathname !== 'string') return false;
+  if (pathname.startsWith('/images/qr/') || pathname.startsWith('/api/')) {
+    return false;
+  }
+  if (pathname.startsWith('/images/games/') || pathname.startsWith('/images/banners/')) {
+    return pathname.endsWith('.webp') || pathname.endsWith('.png') || pathname.endsWith('.jpg') || pathname.endsWith('.jpeg');
+  }
+  return CACHEABLE_BRAND_PNG_PATHS.has(pathname);
+}
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    caches
+      .keys()
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((key) => key.startsWith(MEDIA_CACHE_PREFIX) && key !== MEDIA_CACHE_NAME)
+            .map((staleKey) => caches.delete(staleKey))
+        )
+      )
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  const { request } = event;
+  if (!request || request.method !== 'GET' || request.mode === 'navigate') {
+    return;
+  }
+
+  let requestUrl;
+  try {
+    requestUrl = new URL(request.url);
+  } catch {
+    return;
+  }
+
+  if (requestUrl.origin !== self.location.origin) {
+    return;
+  }
+
+  if (!isCacheableStaticMediaPath(requestUrl.pathname)) {
+    return;
+  }
+
+  event.respondWith(
+    caches.open(MEDIA_CACHE_NAME).then((cache) =>
+      cache.match(request).then((cachedResponse) => {
+        if (cachedResponse) {
+          return cachedResponse;
+        }
+        return fetch(request).then((networkResponse) => {
+          if (networkResponse && networkResponse.ok && networkResponse.type === 'basic') {
+            cache.put(request, networkResponse.clone()).catch(() => {});
+          }
+          return networkResponse;
+        });
+      })
+    )
+  );
 });
 
 // Handle Background Push Notification Even When Browser or PWA is Minimized / Closed

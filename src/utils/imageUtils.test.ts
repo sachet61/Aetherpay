@@ -17,7 +17,9 @@ import {
   CRITICAL_ASSET_URLS,
   DEFERRED_ASSET_URLS,
   normalizeAssetUrlList,
+  resolveTargetAssetPlan,
 } from './assetPreloader';
+import { FAVICON_PNG_URL } from './pwaAssets';
 
 function readWebpDimensions(filePath: string): { width: number; height: number } {
   const buf = fs.readFileSync(filePath);
@@ -138,4 +140,45 @@ test('assetPreloader splits top 8 priority game icons from deferred pool and ver
 
   assert.equal(headersBySource.has('/images/qr/(.*)'), false, 'Mutable admin QR folder must not be immutable cached');
   assert.equal(headersBySource.has('/images/(.*)'), false, 'Wildcard /images/(.*) must not override mutable QR caching');
+});
+
+test('resolveTargetAssetPlan tailors required and background assets per destination and index.html preloads top 4 WebPs', () => {
+  const authPlan = resolveTargetAssetPlan('auth');
+  assert.ok(authPlan.requiredUrls.includes(FAVICON_PNG_URL));
+  assert.equal(authPlan.requiredUrls.includes(HERO_BANNER_IMAGE), false, 'Auth splash must not block on dashboard hero banner');
+  assert.ok(authPlan.backgroundUrls.includes(HERO_BANNER_IMAGE), 'Hero banner should warm quietly in background after auth paint');
+  assert.equal(authPlan.requiredUrls.length, 1 + TOP_PRIORITY_GAME_COUNT);
+
+  const dashboardPlan = resolveTargetAssetPlan('customer_dashboard');
+  assert.ok(dashboardPlan.requiredUrls.includes(HERO_BANNER_IMAGE), 'Customer dashboard requires hero banner');
+  assert.equal(dashboardPlan.requiredUrls.includes('/images/games/firekirin-v2.webp'), true);
+  assert.equal(dashboardPlan.backgroundUrls.includes(HERO_BANNER_IMAGE), false);
+  assert.equal(dashboardPlan.backgroundUrls.length, 12);
+
+  const staffPlan = resolveTargetAssetPlan('staff_ops');
+  assert.deepEqual(staffPlan.requiredUrls, [FAVICON_PNG_URL]);
+  assert.deepEqual(staffPlan.backgroundUrls, []);
+
+  // Custom catalog order overrides default order cleanly without duplicates
+  const customPlan = resolveTargetAssetPlan('auth', [
+    '/images/games/yolo-v2.webp',
+    '/images/games/yolo-v2.webp',
+    '/images/games/vegasx-v2.webp',
+  ]);
+  assert.deepEqual(customPlan.requiredUrls, [
+    FAVICON_PNG_URL,
+    '/images/games/yolo-v2.webp',
+    '/images/games/vegasx-v2.webp',
+  ]);
+
+  const html = fs.readFileSync(path.resolve('index.html'), 'utf8');
+  for (const top4 of PRIORITY_GAME_IMAGE_PATHS.slice(0, 4)) {
+    assert.ok(
+      html.includes(`<link rel="preload" as="image" type="image/webp" fetchpriority="high" href="${top4}" />`),
+      `index.html must preload ${top4}`
+    );
+  }
+
+  const splashSource = fs.readFileSync(path.resolve('src/components/common/StartupSplash.tsx'), 'utf8');
+  assert.equal(splashSource.includes('Client Memory Cache'), false, 'StartupSplash must not display internal cache telemetry');
 });

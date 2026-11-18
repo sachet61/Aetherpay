@@ -3,8 +3,16 @@ import {
   DEFERRED_GAME_IMAGE_PATHS,
   HERO_BANNER_IMAGE,
   PRIORITY_GAME_IMAGE_PATHS,
+  TOP_PRIORITY_GAME_COUNT,
 } from './imageUtils';
 import { FAVICON_PNG_URL, NOTIFICATION_BADGE_URL, PWA_ICON_192_URL } from './pwaAssets';
+
+export type PreloadTarget = 'auth' | 'customer_dashboard' | 'staff_ops';
+
+export interface TargetAssetPlan {
+  requiredUrls: string[];
+  backgroundUrls: string[];
+}
 
 // Global memory cache pool holding preloaded HTMLImageElement references
 // This guarantees the browser keeps decoded image bitmaps hot in memory
@@ -37,7 +45,54 @@ export function normalizeAssetUrlList(urls: string[]): string[] {
 }
 
 /**
- * Preloads a single image and stores it in the in-memory cache pool
+ * Resolves only the display assets required for the active entry screen
+ * alongside silent background assets to warm afterward.
+ */
+export function resolveTargetAssetPlan(
+  target: PreloadTarget,
+  catalogIconUrls?: string[]
+): TargetAssetPlan {
+  const defaultCatalog = [...PRIORITY_GAME_IMAGE_PATHS, ...DEFERRED_GAME_IMAGE_PATHS];
+  const orderedCatalog = normalizeAssetUrlList(
+    catalogIconUrls && catalogIconUrls.length > 0 ? catalogIconUrls : defaultCatalog
+  );
+  const topCatalogUrls = orderedCatalog.slice(0, TOP_PRIORITY_GAME_COUNT);
+  const deferredCatalogUrls = orderedCatalog.slice(TOP_PRIORITY_GAME_COUNT);
+
+  if (target === 'staff_ops') {
+    return {
+      requiredUrls: normalizeAssetUrlList([FAVICON_PNG_URL]),
+      backgroundUrls: [],
+    };
+  }
+
+  if (target === 'customer_dashboard') {
+    const requiredUrls = normalizeAssetUrlList([
+      FAVICON_PNG_URL,
+      HERO_BANNER_IMAGE,
+      ...topCatalogUrls,
+    ]);
+    const requiredSet = new Set(requiredUrls);
+    return {
+      requiredUrls,
+      backgroundUrls: normalizeAssetUrlList(deferredCatalogUrls).filter((u) => !requiredSet.has(u)),
+    };
+  }
+
+  // 'auth': only brand icon + visible above-the-fold Auth Showcase icons block entry;
+  // hero banner and remaining catalog cards warm quietly in the background.
+  const requiredUrls = normalizeAssetUrlList([FAVICON_PNG_URL, ...topCatalogUrls]);
+  const requiredSet = new Set(requiredUrls);
+  const backgroundUrls = normalizeAssetUrlList([
+    HERO_BANNER_IMAGE,
+    ...deferredCatalogUrls,
+  ]).filter((u) => !requiredSet.has(u));
+
+  return { requiredUrls, backgroundUrls };
+}
+
+/**
+ * Preloads a single image, decodes it asynchronously when supported, and stores it in the memory cache pool.
  */
 export function preloadSingleImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve) => {
@@ -56,8 +111,15 @@ export function preloadSingleImage(url: string): Promise<HTMLImageElement> {
     img.decoding = 'async';
 
     img.onload = () => {
-      memoryImageCache.set(url, img);
-      resolve(img);
+      const finalize = () => {
+        memoryImageCache.set(url, img);
+        resolve(img);
+      };
+      if (typeof img.decode === 'function') {
+        img.decode().then(finalize, finalize);
+      } else {
+        finalize();
+      }
     };
 
     img.onerror = () => {

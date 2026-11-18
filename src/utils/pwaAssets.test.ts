@@ -103,3 +103,37 @@ test('manifest, index.html, sw.js, api/index.ts, and vercel.json wire -v2 icons,
   assert.ok(headerSources.includes('/manifest.webmanifest'));
   assert.ok(headerSources.includes('/sw.js'));
 });
+
+test('public/sw.js applies Cache-First strictly to versioned static media and bypasses QR/API/app shell', async () => {
+  const vm = await import('node:vm');
+  const swSource = fs.readFileSync(path.resolve('public/sw.js'), 'utf8');
+  const listeners = new Map<string, Function>();
+  const context: Record<string, any> = {
+    self: {
+      addEventListener: (name: string, fn: Function) => listeners.set(name, fn),
+      skipWaiting: () => {},
+      clients: { claim: () => Promise.resolve() },
+    },
+    caches: {},
+    URL,
+    Set,
+    Promise,
+  };
+  vm.runInNewContext(swSource, context);
+
+  assert.equal(typeof context.isCacheableStaticMediaPath, 'function');
+  assert.equal(context.isCacheableStaticMediaPath('/images/games/firekirin-v2.webp'), true);
+  assert.equal(context.isCacheableStaticMediaPath('/images/banners/gaming-wallet-hero-v2.webp'), true);
+  assert.equal(context.isCacheableStaticMediaPath('/pwa-192x192-v2.png'), true);
+  assert.equal(context.isCacheableStaticMediaPath('/favicon-v2.png'), true);
+
+  assert.equal(context.isCacheableStaticMediaPath('/images/qr/chime_qr_123.jpg'), false);
+  assert.equal(context.isCacheableStaticMediaPath('/api/health'), false);
+  assert.equal(context.isCacheableStaticMediaPath('/manifest.webmanifest'), false);
+  assert.equal(context.isCacheableStaticMediaPath('/sw.js'), false);
+  assert.equal(context.isCacheableStaticMediaPath('/index.html'), false);
+  assert.ok(listeners.has('fetch'), 'sw.js must register a fetch handler');
+
+  const mainTsx = fs.readFileSync(path.resolve('src/main.tsx'), 'utf8');
+  assert.match(mainTsx, /navigator\.serviceWorker\.register\('\/sw\.js'/);
+});

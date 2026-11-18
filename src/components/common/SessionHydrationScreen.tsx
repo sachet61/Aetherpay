@@ -3,11 +3,17 @@ import { AlertTriangle, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
 import { UserRole } from '../../types';
 import { SwiftSweepsLogo } from './SwiftSweepsLogo';
 import { resolveHydrationPhaseLabel } from '../../services/sessionHydrationUtils';
+import {
+  preloadAssetPool,
+  resolveTargetAssetPlan,
+  scheduleDeferredAssetPreload,
+} from '../../utils/assetPreloader';
 
 interface SessionHydrationScreenProps {
   role?: UserRole;
   displayName?: string;
   errorMessage?: string | null;
+  catalogIconUrls?: string[];
   onRetry: () => void;
   onContinueAnyway: () => void;
 }
@@ -20,10 +26,32 @@ export const SessionHydrationScreen: React.FC<SessionHydrationScreenProps> = ({
   role,
   displayName,
   errorMessage,
+  catalogIconUrls,
   onRetry,
   onContinueAnyway,
 }) => {
   const [elapsedMs, setElapsedMs] = useState(0);
+
+  // Warm customer dashboard visuals (hero banner + top game icons) concurrently while balances hydrate
+  useEffect(() => {
+    if (role !== 'customer') return;
+    let active = true;
+    let cancelDeferred: (() => void) | null = null;
+
+    const plan = resolveTargetAssetPlan('customer_dashboard', catalogIconUrls);
+    void preloadAssetPool(plan.requiredUrls, undefined, 4).then(() => {
+      if (active && plan.backgroundUrls.length > 0) {
+        cancelDeferred = scheduleDeferredAssetPreload(plan.backgroundUrls, 2);
+      }
+    });
+
+    return () => {
+      active = false;
+      if (cancelDeferred) {
+        cancelDeferred();
+      }
+    };
+  }, [role, catalogIconUrls]);
 
   useEffect(() => {
     setElapsedMs(0);
