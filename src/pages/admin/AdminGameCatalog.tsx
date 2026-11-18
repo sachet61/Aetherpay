@@ -1,7 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, GameCatalogItem, GameLink } from '../../types';
 import { dataService } from '../../services/dataService';
-import { LOCAL_GAME_IMAGES, resolveGameImageUrl } from '../../utils/imageUtils';
+import {
+  DEFAULT_GAME_ICON,
+  LOCAL_GAME_IMAGES,
+  isLocalGameAssetSelected,
+  resolveGameImageUrl,
+} from '../../utils/imageUtils';
 import {
   Gamepad2,
   Plus,
@@ -109,7 +114,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
     setGameId(`gc_${Date.now()}`);
     setTitle('');
     setPlatform('Sweepstakes Web');
-    setIconUrl('/images/Firekirin.png');
+    setIconUrl(DEFAULT_GAME_ICON);
     setDescription('');
     setLinks([
       { label: 'Web Play', url: 'http://start.firekirin.xyz:8580/index.html' },
@@ -124,7 +129,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
     setGameId(game.id);
     setTitle(game.title);
     setPlatform(game.platform);
-    setIconUrl(game.iconUrl || game.imageUrl || '/images/Firekirin.png');
+    setIconUrl(resolveGameImageUrl(game.iconUrl || game.imageUrl));
     setDescription(game.description);
     setLinks(
       game.links && game.links.length > 0
@@ -285,8 +290,14 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
                         <img
                           src={iconSrc}
                           alt={game.title}
+                          width={40}
+                          height={40}
+                          decoding="async"
                           onError={(e) => {
-                            (e.target as HTMLImageElement).src = '/images/Firekirin.png';
+                            const img = e.currentTarget;
+                            if (img.dataset.fallbackApplied) return;
+                            img.dataset.fallbackApplied = '1';
+                            img.src = DEFAULT_GAME_ICON;
                           }}
                           className="w-10 h-10 rounded-xl object-cover border border-slate-700 bg-slate-800 shrink-0 shadow-sm"
                         />
@@ -392,8 +403,14 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
               <img
                 src={resolveGameImageUrl(gameToDelete.iconUrl || gameToDelete.imageUrl)}
                 alt={gameToDelete.title}
+                width={48}
+                height={48}
+                decoding="async"
                 onError={(e) => {
-                  (e.target as HTMLImageElement).src = '/images/Firekirin.png';
+                  const img = e.currentTarget;
+                  if (img.dataset.fallbackApplied) return;
+                  img.dataset.fallbackApplied = '1';
+                  img.src = DEFAULT_GAME_ICON;
                 }}
                 className="w-12 h-12 rounded-xl object-cover border border-slate-700 shrink-0"
               />
@@ -506,8 +523,14 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
                     <img
                       src={resolveGameImageUrl(iconUrl)}
                       alt="Preview"
+                      width={48}
+                      height={48}
+                      decoding="async"
                       onError={(e) => {
-                        (e.target as HTMLImageElement).src = '/images/Firekirin.png';
+                        const img = e.currentTarget;
+                        if (img.dataset.fallbackApplied) return;
+                        img.dataset.fallbackApplied = '1';
+                        img.src = DEFAULT_GAME_ICON;
                       }}
                       className="w-12 h-12 rounded-xl object-cover border border-slate-700 bg-slate-900 shadow-md"
                     />
@@ -518,7 +541,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
                       type="text"
                       value={iconUrl}
                       onChange={(e) => setIconUrl(e.target.value)}
-                      placeholder="/src/images/Firekirin.png, /images/Firekirin.png, or https://..."
+                      placeholder="/images/games/firekirin-v2.webp, /images/Firekirin.png, or https://..."
                       className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono text-[11px] focus:outline-none focus:border-indigo-500"
                     />
 
@@ -552,10 +575,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-1.5 max-h-36 overflow-y-auto p-1.5 bg-slate-900/60 rounded-xl border border-slate-800/80">
                     {LOCAL_GAME_IMAGES.map((asset) => {
-                      const isSelected =
-                        iconUrl === asset.path ||
-                        iconUrl === `/src/images/${asset.filename}` ||
-                        iconUrl === asset.filename;
+                      const isSelected = isLocalGameAssetSelected(iconUrl, asset);
                       return (
                         <button
                           key={asset.id}
@@ -570,8 +590,15 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
                           <img
                             src={asset.path}
                             alt={asset.name}
+                            width={24}
+                            height={24}
+                            loading="lazy"
+                            decoding="async"
                             onError={(e) => {
-                              (e.target as HTMLImageElement).src = '/images/Firekirin.png';
+                              const img = e.currentTarget;
+                              if (img.dataset.fallbackApplied) return;
+                              img.dataset.fallbackApplied = '1';
+                              img.src = DEFAULT_GAME_ICON;
                             }}
                             className="w-6 h-6 rounded-md object-cover shrink-0 border border-slate-700"
                           />

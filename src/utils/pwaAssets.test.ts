@@ -47,7 +47,7 @@ test('all versioned -v2 PWA and badge PNG assets exist with exact dimensions and
     [NOTIFICATION_BADGE_URL, 96, 96],
   ];
 
-  const casinoRoyaleBytes = fs.readFileSync(path.resolve('public/images/CasinoRoyale.png'));
+  const casinoRoyaleBytes = fs.readFileSync(path.resolve('public/images/games/casinoroyale-v2.webp'));
 
   for (const [urlPath, width, height] of expected) {
     const filePath = path.resolve('public', urlPath.replace(/^\//, ''));

@@ -1,7 +1,12 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { UserProfile, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
-import { resolveGameImageUrl } from '../../utils/imageUtils';
+import {
+  DEFAULT_GAME_ICON,
+  HERO_BANNER_IMAGE,
+  TOP_PRIORITY_GAME_COUNT,
+  resolveGameImageUrl,
+} from '../../utils/imageUtils';
 import { LiveCashoutFeedList } from '../../components/common/LiveCashoutFeedList';
 import {
   buildUnifiedWalletActivity,
@@ -92,8 +97,12 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
       <div className="relative rounded-2xl overflow-hidden border border-amber-500/20 bg-gradient-to-r from-[#0A0F1D] via-[#111A2E] to-[#0A0F1D] shadow-2xl">
         <div className="absolute inset-0 z-0">
           <img
-            src="/src/assets/images/gaming_wallet_hero_1791685883611.jpg"
+            src={HERO_BANNER_IMAGE}
             alt="Swift Sweeps Gaming Vault"
+            width={1376}
+            height={768}
+            decoding="async"
+            fetchPriority="high"
             className="w-full h-full object-cover opacity-20"
             referrerPolicy="no-referrer"
           />
@@ -261,7 +270,7 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
 
         {/* Game Platforms Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {gameCatalog.map((game) => {
+          {gameCatalog.map((game, index) => {
             const userAccount = gameAccounts.find(
               (ga) =>
                 ga.gameCatalogId === game.id ||
@@ -283,8 +292,15 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
                     <img
                       src={resolveGameImageUrl(game.iconUrl || game.imageUrl)}
                       alt={game.title}
+                      width={56}
+                      height={56}
+                      loading={index < TOP_PRIORITY_GAME_COUNT ? 'eager' : 'lazy'}
+                      decoding="async"
                       onError={(e) => {
-                        (e.target as HTMLImageElement).src = '/images/Firekirin.png';
+                        const img = e.currentTarget;
+                        if (img.dataset.fallbackApplied) return;
+                        img.dataset.fallbackApplied = '1';
+                        img.src = DEFAULT_GAME_ICON;
                       }}
                       className="w-14 h-14 rounded-xl object-cover border border-slate-700 group-hover:border-amber-500 transition-colors shrink-0 shadow-md"
                     />

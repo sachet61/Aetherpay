@@ -1,7 +1,11 @@
 import React, { useState } from 'react';
 import { UserProfile, GameCatalogItem, GameAccount, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
-import { resolveGameImageUrl } from '../../utils/imageUtils';
+import {
+  DEFAULT_GAME_ICON,
+  TOP_PRIORITY_GAME_COUNT,
+  resolveGameImageUrl,
+} from '../../utils/imageUtils';
 import {
   Gamepad2,
   ExternalLink,
@@ -218,7 +222,7 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
 
         return (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            {sortedCatalog.map((game) => {
+            {sortedCatalog.map((game, index) => {
               // Find matching account for current player
               const account = playerAccounts.find(
                 (a) => a.gameCatalogId === game.id || a.gameName.toLowerCase() === game.title.toLowerCase()
@@ -248,9 +252,16 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
                       <img
                         src={resolveGameImageUrl(game.imageUrl || game.iconUrl)}
                         alt={game.title}
+                        width={48}
+                        height={48}
+                        loading={index < TOP_PRIORITY_GAME_COUNT ? 'eager' : 'lazy'}
+                        decoding="async"
                         className="w-full h-full object-cover"
                         onError={(e) => {
-                          (e.target as HTMLImageElement).src = '/images/Firekirin.png';
+                          const img = e.currentTarget;
+                          if (img.dataset.fallbackApplied) return;
+                          img.dataset.fallbackApplied = '1';
+                          img.src = DEFAULT_GAME_ICON;
                         }}
                       />
                     </div>

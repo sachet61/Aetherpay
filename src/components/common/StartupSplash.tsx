@@ -1,7 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { SwiftSweepsLogo } from './SwiftSweepsLogo';
 import { ShieldCheck, Database, Layers } from 'lucide-react';
-import { preloadAssetPool, CORE_ASSET_URLS, getCachedImagesCount } from '../../utils/assetPreloader';
+import {
+  preloadAssetPool,
+  CRITICAL_ASSET_URLS,
+  DEFERRED_ASSET_URLS,
+  scheduleDeferredAssetPreload,
+} from '../../utils/assetPreloader';
 
 interface StartupSplashProps {
   onComplete?: () => void;
@@ -29,12 +34,21 @@ export const StartupSplash: React.FC<StartupSplashProps> = ({
   const [cachedAssets, setCachedAssets] = useState(0);
   const preloadProgressRef = useRef(0);
 
-  // Background preload initiates immediately on mount to fill the client cache pool
+  // Background preload initiates immediately on mount for priority above-the-fold assets only
   useEffect(() => {
-    preloadAssetPool(CORE_ASSET_URLS, (loaded, total, percent) => {
+    let cancelDeferred: (() => void) | null = null;
+    void preloadAssetPool(CRITICAL_ASSET_URLS, (loaded, _total, percent) => {
       preloadProgressRef.current = percent;
       setCachedAssets(loaded);
+    }).then(() => {
+      cancelDeferred = scheduleDeferredAssetPreload(DEFERRED_ASSET_URLS);
     });
+
+    return () => {
+      if (cancelDeferred) {
+        cancelDeferred();
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -139,7 +153,7 @@ export const StartupSplash: React.FC<StartupSplashProps> = ({
           {cachedAssets > 0 && (
             <div className="text-[9px] font-mono text-slate-400 flex items-center gap-1 mt-0.5">
               <Layers className="w-3 h-3 text-amber-400" />
-              <span>Client Memory Cache: {cachedAssets} / {CORE_ASSET_URLS.length} assets ready</span>
+              <span>Client Memory Cache: {cachedAssets} / {CRITICAL_ASSET_URLS.length} priority assets ready</span>
             </div>
           )}
         </div>

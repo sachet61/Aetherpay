@@ -3,6 +3,11 @@ import { UserProfile, UserRole, GameCatalogItem } from '../../types';
 import { dataService } from '../../services/dataService';
 import { supabaseAuthService } from '../../services/supabaseAuthService';
 import {
+  DEFAULT_GAME_ICON,
+  TOP_PRIORITY_GAME_COUNT,
+  resolveGameImageUrl,
+} from '../../utils/imageUtils';
+import {
   Play,
   Zap,
   Lock,
@@ -263,7 +268,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
 
             {/* Visual Game Catalog Grid */}
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3.5 sm:gap-4">
-              {games.map((game) => (
+              {games.map((game, index) => (
                 <div
                   key={game.id}
                   onClick={() => handleSelectGameToPlay(game)}
@@ -272,13 +277,19 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
                   {/* Game Cover Art */}
                   <div className="relative w-full aspect-square bg-slate-950 overflow-hidden flex items-center justify-center p-3">
                     <img
-                      src={game.iconUrl || game.imageUrl}
+                      src={resolveGameImageUrl(game.iconUrl || game.imageUrl)}
                       alt={game.title}
+                      width={512}
+                      height={512}
                       className="w-full h-full object-contain rounded-xl transition-transform duration-300 group-hover:scale-105"
-                      loading="lazy"
+                      loading={index < TOP_PRIORITY_GAME_COUNT ? 'eager' : 'lazy'}
+                      fetchPriority={index < 4 ? 'high' : 'auto'}
+                      decoding="async"
                       onError={(e) => {
-                        (e.target as HTMLImageElement).src =
-                          'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=300&auto=format&fit=crop&q=80';
+                        const img = e.currentTarget;
+                        if (img.dataset.fallbackApplied) return;
+                        img.dataset.fallbackApplied = '1';
+                        img.src = DEFAULT_GAME_ICON;
                       }}
                     />
 
