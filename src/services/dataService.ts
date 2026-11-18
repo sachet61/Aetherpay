@@ -43,6 +43,8 @@ import { authSessionService, PREDEFINED_ADMINS } from './authSessionService';
 import { shouldRunSilentBackgroundRefresh } from './sessionHydrationUtils';
 import { supabase, isSupabaseConfigured, testSupabaseConnection } from './supabaseClient';
 import { supabaseAuthService } from './supabaseAuthService';
+import { supabaseTokenManager } from './supabaseTokenManager';
+import { SESSION_EXPIRED_USER_MESSAGE } from './authTokenUtils';
 import { webPushClient } from './webPushClient';
 import { realtimeChatHub } from './chatRealtime';
 import {
@@ -1059,20 +1061,19 @@ class DataService {
         return this.getMessages(targetConvId);
       };
 
-      const buildChatAuthHeaders = async (): Promise<Record<string, string>> => {
+      const buildChatAuthHeaders = async (
+        forceRefresh = false,
+        rejectedToken?: string | null
+      ): Promise<{ headers: Record<string, string>; token: string | null; requiresReauth: boolean }> => {
         const headers: Record<string, string> = { 'Cache-Control': 'no-cache' };
         if (activeUser?.id) headers['x-user-id'] = activeUser.id;
         if (activeUser?.role) headers['x-user-role'] = activeUser.role;
-        if (supabase && isSupabaseConfigured()) {
-          try {
-            const { data } = await supabase.auth.getSession();
-            const token = data?.session?.access_token;
-            if (token) headers['Authorization'] = `Bearer ${token}`;
-          } catch {
-            // Optional session header
-          }
+        const tokenRes = await supabaseTokenManager.getAccessToken({ forceRefresh, rejectedToken });
+        if (tokenRes.token) {
+          headers['Authorization'] = `Bearer ${tokenRes.token}`;
+          headers['x-supabase-token'] = tokenRes.token;
         }
-        return headers;
+        return { headers, token: tokenRes.token, requiresReauth: tokenRes.requiresReauth };
       };
 
       // 1. Authoritative cross-browser fetch via server endpoint (Service Role + Cache-Control: no-store)
@@ -1087,10 +1088,20 @@ class DataService {
         if (options?.beforeCreatedAt) params.set('beforeCreatedAt', options.beforeCreatedAt);
         if (options?.afterCreatedAt) params.set('afterCreatedAt', options.afterCreatedAt);
 
-        const srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
+        const initialAuth = await buildChatAuthHeaders(false);
+        let srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
           cache: 'no-store',
-          headers: await buildChatAuthHeaders(),
+          headers: initialAuth.headers,
         });
+        if (srvRes.status === 401) {
+          const retryAuth = await buildChatAuthHeaders(true, initialAuth.token);
+          if (retryAuth.token) {
+            srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
+              cache: 'no-store',
+              headers: retryAuth.headers,
+            });
+          }
+        }
         if (srvRes.ok) {
           const srvData = await srvRes.json();
           if (srvData.success && Array.isArray(srvData.messages)) {
@@ -1223,13 +1234,10 @@ class DataService {
       const headers: Record<string, string> = { 'Cache-Control': 'no-cache' };
       if (activeUser?.id) headers['x-user-id'] = activeUser.id;
       if (activeUser?.role) headers['x-user-role'] = activeUser.role;
-      if (supabase && isSupabaseConfigured()) {
-        try {
-          const { data: sessionData } = await supabase.auth.getSession();
-          if (sessionData?.session?.access_token) {
-            headers['Authorization'] = `Bearer ${sessionData.session.access_token}`;
-          }
-        } catch {}
+      const tokenRes = await supabaseTokenManager.getAccessToken();
+      if (tokenRes.token) {
+        headers['Authorization'] = `Bearer ${tokenRes.token}`;
+        headers['x-supabase-token'] = tokenRes.token;
       }
 
       const params = new URLSearchParams({
@@ -1238,10 +1246,26 @@ class DataService {
         limit: String(limit),
       });
       if (activeUser?.id) params.set('userId', activeUser.id);
-      const srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
+      let srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
         cache: 'no-store',
         headers,
       });
+      if (srvRes.status === 401) {
+        const retryToken = await supabaseTokenManager.getAccessToken({
+          forceRefresh: true,
+          rejectedToken: tokenRes.token,
+        });
+        if (retryToken.token) {
+          srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
+            cache: 'no-store',
+            headers: {
+              ...headers,
+              Authorization: `Bearer ${retryToken.token}`,
+              'x-supabase-token': retryToken.token,
+            },
+          });
+        }
+      }
       if (srvRes.ok) {
         const srvJson = await srvRes.json();
         if (srvJson.success && Array.isArray(srvJson.messages)) {
@@ -6537,38 +6561,54 @@ class DataService {
       const currentActor = this.getCurrentUser();
       if (currentActor?.id) sendHeaders['x-user-id'] = currentActor.id;
       if (currentActor?.role) sendHeaders['x-user-role'] = currentActor.role;
-      if (supabase && isSupabaseConfigured()) {
-        try {
-          const { data: sessionData } = await supabase.auth.getSession();
-          if (sessionData?.session?.access_token) {
-            sendHeaders['Authorization'] = `Bearer ${sessionData.session.access_token}`;
-            sendHeaders['x-supabase-token'] = sessionData.session.access_token;
-          }
-        } catch {}
+      const tokenRes = await supabaseTokenManager.getAccessToken();
+      if (tokenRes.token) {
+        sendHeaders['Authorization'] = `Bearer ${tokenRes.token}`;
+        sendHeaders['x-supabase-token'] = tokenRes.token;
       }
 
-      const srvRes = await fetch('/api/chat/send', {
+      const bodyPayload = JSON.stringify({
+        id: newMsg.id,
+        conversationId: targetConvId,
+        senderId: newMsg.senderId,
+        senderName: newMsg.senderName,
+        senderRole: newMsg.senderRole,
+        recipientId: customerId,
+        recipientName: conv?.customerName || customerUser?.displayName,
+        senderEmail: newMsg.senderRole === 'customer' ? customerUser?.email : undefined,
+        recipientEmail: customerUser?.email || conv?.customerEmail,
+        text: newMsg.text,
+        attachmentUrl: normalizedAttachmentUrl,
+        attachmentName: newMsg.attachmentName,
+        transactionData: txPayload,
+        isInternalNote: newMsg.isInternalNote,
+        createdAt: newMsg.createdAt,
+      });
+
+      let srvRes = await fetch('/api/chat/send', {
         method: 'POST',
         cache: 'no-store',
         headers: sendHeaders,
-        body: JSON.stringify({
-          id: newMsg.id,
-          conversationId: targetConvId,
-          senderId: newMsg.senderId,
-          senderName: newMsg.senderName,
-          senderRole: newMsg.senderRole,
-          recipientId: customerId,
-          recipientName: conv?.customerName || customerUser?.displayName,
-          senderEmail: newMsg.senderRole === 'customer' ? customerUser?.email : undefined,
-          recipientEmail: customerUser?.email || conv?.customerEmail,
-          text: newMsg.text,
-          attachmentUrl: normalizedAttachmentUrl,
-          attachmentName: newMsg.attachmentName,
-          transactionData: txPayload,
-          isInternalNote: newMsg.isInternalNote,
-          createdAt: newMsg.createdAt,
-        }),
+        body: bodyPayload,
       });
+      if (srvRes.status === 401) {
+        const retryToken = await supabaseTokenManager.getAccessToken({
+          forceRefresh: true,
+          rejectedToken: tokenRes.token,
+        });
+        if (retryToken.token) {
+          srvRes = await fetch('/api/chat/send', {
+            method: 'POST',
+            cache: 'no-store',
+            headers: {
+              ...sendHeaders,
+              Authorization: `Bearer ${retryToken.token}`,
+              'x-supabase-token': retryToken.token,
+            },
+            body: bodyPayload,
+          });
+        }
+      }
 
       const srvJson = await srvRes.json().catch(() => ({}));
       if (srvRes.ok && srvJson?.success && srvJson?.message) {
@@ -7123,13 +7163,10 @@ class DataService {
         'x-user-id': actingUser.id,
         'x-user-role': actingUser.role,
       };
-      if (supabase && isSupabaseConfigured()) {
-        try {
-          const { data: sessionData } = await supabase.auth.getSession();
-          if (sessionData?.session?.access_token) {
-            headers['Authorization'] = `Bearer ${sessionData.session.access_token}`;
-          }
-        } catch {}
+      const tokenRes = await supabaseTokenManager.getAccessToken();
+      if (tokenRes.token) {
+        headers['Authorization'] = `Bearer ${tokenRes.token}`;
+        headers['x-supabase-token'] = tokenRes.token;
       }
       const res = await fetch('/api/chat/conversation-status', {
         method: 'PATCH',
@@ -7412,25 +7449,25 @@ class DataService {
     creditedLegs?: number;
     totalCreditedAmount?: number;
     error?: string;
+    code?: string;
+    requiresReauth?: boolean;
   }> {
     try {
       const activeUser = this.getCurrentUser();
       const targetUserId = userId || activeUser?.id;
-      let res = await fetch('/api/referrals/reconcile', {
+      const attempt = await this.fetchWithAuthTokenRetry('/api/referrals/reconcile', (headers) => ({
         method: 'POST',
-        headers: await this.buildAuditAuthHeaders(false),
+        headers,
         body: JSON.stringify({ userId: targetUserId }),
-      });
-      if (res.status === 401) {
-        res = await fetch('/api/referrals/reconcile', {
-          method: 'POST',
-          headers: await this.buildAuditAuthHeaders(true),
-          body: JSON.stringify({ userId: targetUserId }),
-        });
-      }
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        return { success: false, error: json?.error || `Reconciliation failed (${res.status})` };
+      }));
+      const json = attempt.json || {};
+      if (!attempt.response?.ok) {
+        return {
+          success: false,
+          error: json?.error || `Reconciliation failed (${attempt.response?.status || 401})`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
       }
       if ((json.reconciledAwards || 0) > 0 || (json.creditedLegs || 0) > 0) {
         void this.syncDelta();
@@ -7450,24 +7487,23 @@ class DataService {
 
   public async fetchReferralSummaryFromServer(
     userId?: string
-  ): Promise<{ success: boolean; summary?: ReferralSummary; error?: string }> {
+  ): Promise<{ success: boolean; summary?: ReferralSummary; error?: string; code?: string; requiresReauth?: boolean }> {
     try {
       const targetId = userId || this.getCurrentUser()?.id || '';
       const params = new URLSearchParams();
       if (targetId) params.set('userId', targetId);
-      let res = await fetch(`/api/referrals/summary?${params.toString()}`, {
+      const attempt = await this.fetchWithAuthTokenRetry(`/api/referrals/summary?${params.toString()}`, (headers) => ({
         cache: 'no-store',
-        headers: await this.buildAuditAuthHeaders(false),
-      });
-      if (res.status === 401) {
-        res = await fetch(`/api/referrals/summary?${params.toString()}`, {
-          cache: 'no-store',
-          headers: await this.buildAuditAuthHeaders(true),
-        });
-      }
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || !json?.summary) {
-        return { success: false, error: json?.error || `Failed to load referral summary (${res.status})` };
+        headers,
+      }));
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.summary) {
+        return {
+          success: false,
+          error: json?.error || `Failed to load referral summary (${attempt.response?.status || 401})`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
       }
       return { success: true, summary: json.summary };
     } catch (err: any) {
@@ -7486,6 +7522,7 @@ class DataService {
     stats?: any;
     error?: string;
     code?: string;
+    requiresReauth?: boolean;
   }> {
     try {
       const q = new URLSearchParams();
@@ -7495,24 +7532,19 @@ class DataService {
       const activeId = this.getCurrentUser()?.id;
       if (activeId) q.set('userId', activeId);
 
-      let res = await fetch(`/api/referrals/admin-ledger?${q.toString()}`, {
+      const attempt = await this.fetchWithAuthTokenRetry(`/api/referrals/admin-ledger?${q.toString()}`, (headers) => ({
         cache: 'no-store',
-        headers: await this.buildAuditAuthHeaders(false),
-      });
-      if (res.status === 401) {
-        res = await fetch(`/api/referrals/admin-ledger?${q.toString()}`, {
-          cache: 'no-store',
-          headers: await this.buildAuditAuthHeaders(true),
-        });
-      }
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
+        headers,
+      }));
+      const json = attempt.json || {};
+      if (!attempt.response?.ok) {
         return {
           success: false,
           awards: [],
           topReferrers: [],
-          error: json?.error || `Failed to load referral ledger (${res.status})`,
+          error: json?.error || `Failed to load referral ledger (${attempt.response?.status || 401})`,
           code: json?.code,
+          requiresReauth: attempt.requiresReauth,
         };
       }
       return {
@@ -7536,30 +7568,33 @@ class DataService {
     referrerQuery: string;
     mode: 'link_only' | 'link_and_reward';
     reason?: string;
-  }): Promise<{ success: boolean; message?: string; status?: string; award?: ReferralLedgerEntry; error?: string }> {
+  }): Promise<{
+    success: boolean;
+    message?: string;
+    status?: string;
+    award?: ReferralLedgerEntry;
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
     try {
       const activeUser = this.getCurrentUser();
-      let res = await fetch('/api/referrals/manual-assign', {
+      const attempt = await this.fetchWithAuthTokenRetry('/api/referrals/manual-assign', (headers) => ({
         method: 'POST',
-        headers: await this.buildAuditAuthHeaders(false),
+        headers,
         body: JSON.stringify({
           ...params,
           actingUserId: activeUser?.id,
         }),
-      });
-      if (res.status === 401) {
-        res = await fetch('/api/referrals/manual-assign', {
-          method: 'POST',
-          headers: await this.buildAuditAuthHeaders(true),
-          body: JSON.stringify({
-            ...params,
-            actingUserId: activeUser?.id,
-          }),
-        });
-      }
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        return { success: false, error: json?.error || `Manual assignment failed (${res.status})` };
+      }));
+      const json = attempt.json || {};
+      if (!attempt.response?.ok) {
+        return {
+          success: false,
+          error: json?.error || `Manual assignment failed (${attempt.response?.status || 401})`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
       }
       window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'referrals_updated' } }));
       return {
@@ -7576,32 +7611,33 @@ class DataService {
   public async setVanityReferralCode(params: {
     userId: string;
     vanityCode: string;
-  }): Promise<{ success: boolean; referralCode?: string; message?: string; error?: string }> {
+  }): Promise<{
+    success: boolean;
+    referralCode?: string;
+    message?: string;
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
     try {
       const activeUser = this.getCurrentUser();
-      let res = await fetch('/api/referrals/vanity-code', {
+      const attempt = await this.fetchWithAuthTokenRetry('/api/referrals/vanity-code', (headers) => ({
         method: 'PATCH',
-        headers: await this.buildAuditAuthHeaders(false),
+        headers,
         body: JSON.stringify({
           userId: params.userId,
           vanityCode: normalizeReferralCodeInput(params.vanityCode),
           actingUserId: activeUser?.id,
         }),
-      });
-      if (res.status === 401) {
-        res = await fetch('/api/referrals/vanity-code', {
-          method: 'PATCH',
-          headers: await this.buildAuditAuthHeaders(true),
-          body: JSON.stringify({
-            userId: params.userId,
-            vanityCode: normalizeReferralCodeInput(params.vanityCode),
-            actingUserId: activeUser?.id,
-          }),
-        });
-      }
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        return { success: false, error: json?.error || `Failed to save vanity code (${res.status})` };
+      }));
+      const json = attempt.json || {};
+      if (!attempt.response?.ok) {
+        return {
+          success: false,
+          error: json?.error || `Failed to save vanity code (${attempt.response?.status || 401})`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
       }
       window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'referrals_updated' } }));
       return {
@@ -7618,30 +7654,32 @@ class DataService {
     awardId: string;
     decision: 'approve' | 'reject';
     reviewNotes?: string;
-  }): Promise<{ success: boolean; status?: string; message?: string; error?: string }> {
+  }): Promise<{
+    success: boolean;
+    status?: string;
+    message?: string;
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
     try {
       const activeUser = this.getCurrentUser();
-      let res = await fetch('/api/referrals/review', {
+      const attempt = await this.fetchWithAuthTokenRetry('/api/referrals/review', (headers) => ({
         method: 'POST',
-        headers: await this.buildAuditAuthHeaders(false),
+        headers,
         body: JSON.stringify({
           ...params,
           actingUserId: activeUser?.id,
         }),
-      });
-      if (res.status === 401) {
-        res = await fetch('/api/referrals/review', {
-          method: 'POST',
-          headers: await this.buildAuditAuthHeaders(true),
-          body: JSON.stringify({
-            ...params,
-            actingUserId: activeUser?.id,
-          }),
-        });
-      }
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        return { success: false, error: json?.error || `Review failed (${res.status})` };
+      }));
+      const json = attempt.json || {};
+      if (!attempt.response?.ok) {
+        return {
+          success: false,
+          error: json?.error || `Review failed (${attempt.response?.status || 401})`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
       }
       window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'referrals_updated' } }));
       return {
@@ -7656,31 +7694,32 @@ class DataService {
 
   public async saveReferralProgramSettings(
     referralProgram: ReferralProgramConfig
-  ): Promise<{ success: boolean; referralProgram?: ReferralProgramConfig; error?: string }> {
+  ): Promise<{
+    success: boolean;
+    referralProgram?: ReferralProgramConfig;
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
     try {
       const activeUser = this.getCurrentUser();
       const normalized = normalizeReferralConfig(referralProgram);
-      let res = await fetch('/api/admin/referral-config', {
+      const attempt = await this.fetchWithAuthTokenRetry('/api/admin/referral-config', (headers) => ({
         method: 'POST',
-        headers: await this.buildAuditAuthHeaders(false),
+        headers,
         body: JSON.stringify({
           referralProgram: normalized,
           actingUserId: activeUser?.id,
         }),
-      });
-      if (res.status === 401) {
-        res = await fetch('/api/admin/referral-config', {
-          method: 'POST',
-          headers: await this.buildAuditAuthHeaders(true),
-          body: JSON.stringify({
-            referralProgram: normalized,
-            actingUserId: activeUser?.id,
-          }),
-        });
-      }
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        return { success: false, error: json?.error || `Failed to save referral settings (${res.status})` };
+      }));
+      const json = attempt.json || {};
+      if (!attempt.response?.ok) {
+        return {
+          success: false,
+          error: json?.error || `Failed to save referral settings (${attempt.response?.status || 401})`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
       }
       const current = this.getAppConfig();
       const nextCfg: AppConfig = {
@@ -7762,7 +7801,16 @@ class DataService {
   }
 
   // Audit Logs (Admin-Only Read, Server-Side Vercel API Writes, Zero LocalStorage)
-  private async buildAuditAuthHeaders(forceRefresh: boolean = false): Promise<Record<string, string>> {
+  private async buildAuditAuthHeadersWithMeta(
+    forceRefresh: boolean = false,
+    rejectedToken?: string | null
+  ): Promise<{
+    headers: Record<string, string>;
+    token: string | null;
+    requiresReauth: boolean;
+    isTransientError: boolean;
+    error?: string;
+  }> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-cache',
@@ -7771,23 +7819,89 @@ class DataService {
     if (activeUser?.id) {
       headers['x-user-id'] = activeUser.id;
     }
-    if (supabase && isSupabaseConfigured()) {
-      try {
-        let token: string | undefined;
-        if (forceRefresh) {
-          const { data: refreshed } = await supabase.auth.refreshSession();
-          token = refreshed?.session?.access_token;
-        }
-        if (!token) {
-          const { data } = await supabase.auth.getSession();
-          token = data?.session?.access_token;
-        }
-        if (token) {
-          headers['x-supabase-token'] = token;
-        }
-      } catch {}
+    const res = await supabaseTokenManager.getAccessToken({ forceRefresh, rejectedToken });
+    if (res.token) {
+      headers['x-supabase-token'] = res.token;
     }
-    return headers;
+    return {
+      headers,
+      token: res.token,
+      requiresReauth: res.requiresReauth,
+      isTransientError: Boolean(res.isTransientError),
+      error: res.error,
+    };
+  }
+
+  private async buildAuditAuthHeaders(
+    forceRefresh: boolean = false,
+    rejectedToken?: string | null
+  ): Promise<Record<string, string>> {
+    const meta = await this.buildAuditAuthHeadersWithMeta(forceRefresh, rejectedToken);
+    return meta.headers;
+  }
+
+  private async fetchWithAuthTokenRetry(
+    url: string,
+    buildInit: (headers: Record<string, string>) => RequestInit
+  ): Promise<{
+    response: Response | null;
+    json: any;
+    requiresReauth: boolean;
+    isTransientError: boolean;
+  }> {
+    const initial = await this.buildAuditAuthHeadersWithMeta(false);
+    if (initial.requiresReauth) {
+      return {
+        response: null,
+        json: {
+          error: initial.error || SESSION_EXPIRED_USER_MESSAGE,
+          code: 'TOKEN_EXPIRED',
+          requiresReauth: true,
+        },
+        requiresReauth: true,
+        isTransientError: false,
+      };
+    }
+
+    let res = await fetch(url, buildInit(initial.headers));
+    if (res.status === 401) {
+      const refreshed = await this.buildAuditAuthHeadersWithMeta(true, initial.token);
+      if (refreshed.requiresReauth) {
+        return {
+          response: res,
+          json: {
+            error: refreshed.error || SESSION_EXPIRED_USER_MESSAGE,
+            code: 'TOKEN_EXPIRED',
+            requiresReauth: true,
+          },
+          requiresReauth: true,
+          isTransientError: false,
+        };
+      }
+      if (refreshed.isTransientError) {
+        return {
+          response: res,
+          json: {
+            error: refreshed.error || 'Temporary network error refreshing authentication. Please retry.',
+            code: 'TOKEN_REFRESH_FAILED',
+          },
+          requiresReauth: false,
+          isTransientError: true,
+        };
+      }
+      if (refreshed.token) {
+        res = await fetch(url, buildInit(refreshed.headers));
+      }
+    }
+
+    const json = await res.json().catch(() => null);
+    const requiresReauth = res.status === 401 && json?.code === 'TOKEN_EXPIRED';
+    return {
+      response: res,
+      json,
+      requiresReauth,
+      isTransientError: false,
+    };
   }
 
   public getAuditLogs(): AuditLog[] {
@@ -7942,7 +8056,14 @@ class DataService {
     append?: boolean;
     format?: 'json' | 'csv';
     skipCacheUpdate?: boolean;
-  }): Promise<{ logs: AuditLog[]; hasMore: boolean; nextCursor: string | null; error: string | null }> {
+  }): Promise<{
+    logs: AuditLog[];
+    hasMore: boolean;
+    nextCursor: string | null;
+    error: string | null;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
     const currentUser = this.getCurrentUser();
     if (!currentUser || currentUser.role !== 'admin') {
       this.cache[STORAGE_KEYS.AUDIT_LOGS] = [];
@@ -7960,25 +8081,26 @@ class DataService {
     if (options?.format === 'csv') params.set('format', 'csv');
 
     try {
-      let res = await fetch(`/api/audit-logs?${params.toString()}`, {
+      const attempt = await this.fetchWithAuthTokenRetry(`/api/audit-logs?${params.toString()}`, (headers) => ({
         method: 'GET',
         cache: 'no-store',
-        headers: await this.buildAuditAuthHeaders(false),
-      });
+        headers,
+      }));
+      const res = attempt.response;
+      const data = attempt.json;
 
-      if (res.status === 401) {
-        res = await fetch(`/api/audit-logs?${params.toString()}`, {
-          method: 'GET',
-          cache: 'no-store',
-          headers: await this.buildAuditAuthHeaders(true),
-        });
+      if (attempt.requiresReauth) {
+        return {
+          logs: [],
+          hasMore: false,
+          nextCursor: null,
+          error: data?.error || SESSION_EXPIRED_USER_MESSAGE,
+          code: 'TOKEN_EXPIRED',
+          requiresReauth: true,
+        };
       }
 
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      const isJson = contentType.includes('application/json');
-      const data = await res.json().catch(() => null);
-
-      if (res.ok && data?.success) {
+      if (res && res.ok && data?.success) {
         const normalized = (Array.isArray(data.logs) ? data.logs : [])
           .map((row: any) => normalizeAuditLogRow(row))
           .filter((item: AuditLog | null): item is AuditLog => Boolean(item));
@@ -8007,13 +8129,18 @@ class DataService {
         };
       }
 
+      const contentType = res ? (res.headers.get('content-type') || '').toLowerCase() : '';
+      const isJson = contentType.includes('application/json');
+
       // Explicit backend JSON 403/401 must never be bypassed by client fallback
-      if ((res.status === 403 || res.status === 401) && isJson && data?.error) {
+      if (res && (res.status === 403 || res.status === 401) && isJson && data?.error) {
         return {
           logs: [],
           hasMore: false,
           nextCursor: null,
           error: data.error,
+          code: data?.code,
+          requiresReauth: res.status === 401 && data?.code === 'TOKEN_EXPIRED',
         };
       }
 
@@ -8027,7 +8154,7 @@ class DataService {
         logs: [],
         hasMore: false,
         nextCursor: null,
-        error: data?.error || rlsResult.error || `Failed to load audit logs (${res.status})`,
+        error: data?.error || rlsResult.error || `Failed to load audit logs (${res?.status || 'network'})`,
       };
     } catch (err: any) {
       const rlsResult = await this.fetchAuditLogsDirectViaRls(options);
@@ -8067,26 +8194,18 @@ class DataService {
     optimisticId?: string
   ): Promise<void> {
     try {
-      let res = await fetch('/api/audit-logs', {
+      const attempt = await this.fetchWithAuthTokenRetry('/api/audit-logs', (headers) => ({
         method: 'POST',
         keepalive: true,
-        headers: await this.buildAuditAuthHeaders(false),
+        headers,
         body: JSON.stringify(entry),
-      });
-      if (res.status === 401) {
-        res = await fetch('/api/audit-logs', {
-          method: 'POST',
-          keepalive: true,
-          headers: await this.buildAuditAuthHeaders(true),
-          body: JSON.stringify(entry),
-        });
-      }
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        console.warn('[DataService] Server audit log write failed:', errBody?.error || res.status);
+      }));
+      const res = attempt.response;
+      const data = attempt.json;
+      if (!res?.ok) {
+        console.warn('[DataService] Server audit log write failed:', data?.error || res?.status);
         return;
       }
-      const data = await res.json().catch(() => null);
       const saved = data?.log ? normalizeAuditLogRow(data.log) : null;
       if (saved && this.getCurrentUser()?.role === 'admin') {
         const existing = Array.isArray(this.cache[STORAGE_KEYS.AUDIT_LOGS])

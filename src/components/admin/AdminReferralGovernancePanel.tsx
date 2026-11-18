@@ -12,6 +12,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { dataService } from '../../services/dataService';
+import { requestReauthSignIn } from '../../services/supabaseTokenManager';
 import type { ReferralAwardStatus, ReferralLedgerEntry, TopReferrerEntry, UserProfile } from '../../types';
 
 interface AdminReferralGovernancePanelProps {
@@ -62,6 +63,7 @@ export const AdminReferralGovernancePanel: React.FC<AdminReferralGovernancePanel
   }>({ totalCount: 0, heldCount: 0, rewardedCount: 0, dailyPaidToday: 0 });
   const [isLoading, setIsLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorRequiresReauth, setErrorRequiresReauth] = useState(false);
   const [reviewNotesMap, setReviewNotesMap] = useState<Record<string, string>>({});
   const [busyAwardId, setBusyAwardId] = useState<string | null>(null);
   const [isReconciling, setIsReconciling] = useState(false);
@@ -70,6 +72,7 @@ export const AdminReferralGovernancePanel: React.FC<AdminReferralGovernancePanel
   const loadLedger = async (showSpinner = false) => {
     if (showSpinner) setIsLoading(true);
     setErrorMsg(null);
+    setErrorRequiresReauth(false);
     const res = await dataService.fetchAdminReferralLedger({
       status: statusFilter,
       search: searchTerm.trim() || undefined,
@@ -81,6 +84,7 @@ export const AdminReferralGovernancePanel: React.FC<AdminReferralGovernancePanel
       if (res.stats) setStats(res.stats);
     } else {
       setErrorMsg(res.error || 'Unable to load referral ledger.');
+      setErrorRequiresReauth(Boolean(res.requiresReauth || res.code === 'TOKEN_EXPIRED'));
     }
     setIsLoading(false);
   };
@@ -200,9 +204,20 @@ export const AdminReferralGovernancePanel: React.FC<AdminReferralGovernancePanel
       )}
 
       {errorMsg && (
-        <div className="p-3.5 rounded-xl border border-rose-800/70 bg-rose-950/40 text-xs text-rose-200 flex items-center gap-2">
-          <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
-          <span>{errorMsg}</span>
+        <div className="p-3.5 rounded-xl border border-rose-800/70 bg-rose-950/40 text-xs text-rose-200 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{errorMsg}</span>
+          </div>
+          {errorRequiresReauth && (
+            <button
+              type="button"
+              onClick={() => requestReauthSignIn(errorMsg || undefined)}
+              className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] whitespace-nowrap shrink-0"
+            >
+              Sign In Again
+            </button>
+          )}
         </div>
       )}
 

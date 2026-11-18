@@ -7,6 +7,8 @@ import {
   readVerifiedCache,
   writeVerifiedCache,
 } from './verificationStateUtils';
+import { emitSessionExpiredNotice, supabaseTokenManager } from './supabaseTokenManager';
+import { SESSION_EXPIRED_USER_MESSAGE } from './authTokenUtils';
 
 export interface SupabaseAuthResult {
   success: boolean;
@@ -27,6 +29,7 @@ export interface PasswordResetResponse {
 
 class SupabaseAuthService {
   private isRecoveryMode = false;
+  private isManualLogout = false;
   private lastOAuthAuditKey: string | null = null;
 
   constructor() {
@@ -63,10 +66,25 @@ class SupabaseAuthService {
           );
         }
 
+        if (event === 'TOKEN_REFRESHED' && session?.access_token) {
+          supabaseTokenManager.markTokenValid(session.access_token);
+        }
+
+        if (event === 'SIGNED_OUT') {
+          supabaseTokenManager.reset();
+          if (!this.isManualLogout && authSessionService.getActiveSession()) {
+            authSessionService.destroySession();
+            emitSessionExpiredNotice(SESSION_EXPIRED_USER_MESSAGE);
+          }
+        }
+
         if (
           (event === 'SIGNED_IN' || event === 'USER_UPDATED' || event === 'INITIAL_SESSION') &&
           session?.user
         ) {
+          if (session.access_token) {
+            supabaseTokenManager.markTokenValid(session.access_token);
+          }
           const user = session.user;
           const cleanEmail = (user.email || '').trim().toLowerCase();
           if (!cleanEmail) return;
@@ -204,6 +222,9 @@ class SupabaseAuthService {
       supabase.auth
         .getSession()
         .then(async ({ data: { session } }) => {
+          if (session?.access_token) {
+            supabaseTokenManager.markTokenValid(session.access_token);
+          }
           if (session?.user) {
             const cleanEmail = (session.user.email || '').trim().toLowerCase();
             const isConfirmed = Boolean(session.user.email_confirmed_at);
@@ -405,6 +426,10 @@ class SupabaseAuthService {
           }
         });
 
+      if (data.session?.access_token) {
+        supabaseTokenManager.markTokenValid(data.session.access_token);
+      }
+
       // Issue active session
       authSessionService.createSessionForUser(
         newProfile.id,
@@ -543,6 +568,10 @@ class SupabaseAuthService {
         }
       }
 
+      if (data.session?.access_token) {
+        supabaseTokenManager.markTokenValid(data.session.access_token);
+      }
+
       authSessionService.createSessionForUser(
         userProfile.id,
         userProfile.email,
@@ -583,10 +612,14 @@ class SupabaseAuthService {
   }
 
   public async logout(): Promise<void> {
+    this.isManualLogout = true;
     try {
-      await supabase.auth.signOut();
+      await supabase.auth.signOut({ scope: 'local' });
     } catch (err) {
       console.warn('Supabase signOut error:', err);
+    } finally {
+      supabaseTokenManager.reset();
+      this.isManualLogout = false;
     }
     authSessionService.destroySession();
   }

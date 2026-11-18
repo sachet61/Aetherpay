@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, UserRole, GameAccount } from '../../types';
 import { dataService } from '../../services/dataService';
+import { requestReauthSignIn } from '../../services/supabaseTokenManager';
 import {
   Users,
   Search,
@@ -83,7 +84,11 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
   const [roleFilter, setRoleFilter] = useState<'all' | 'customer' | 'agent' | 'admin'>('all');
   const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [modalFeedback, setModalFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [modalFeedback, setModalFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+    requiresReauth?: boolean;
+  } | null>(null);
   const [isUpdating, setIsUpdating] = useState<string | null>(null);
   const [userToDelete, setUserToDelete] = useState<UserProfile | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -269,7 +274,11 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
       setReassignReason('');
       void loadUsersLive(false);
     } else {
-      setModalFeedback({ type: 'error', text: res.error || 'Failed to assign referral.' });
+      setModalFeedback({
+        type: 'error',
+        text: res.error || 'Failed to assign referral.',
+        requiresReauth: Boolean(res.requiresReauth || res.code === 'TOKEN_EXPIRED'),
+      });
     }
   };
 
@@ -295,7 +304,11 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
       setFeedback({ type: 'success', text: res.message || `Custom code ${nextCode} saved.` });
       void loadUsersLive(false);
     } else {
-      setModalFeedback({ type: 'error', text: res.error || 'Failed to save vanity code.' });
+      setModalFeedback({
+        type: 'error',
+        text: res.error || 'Failed to save vanity code.',
+        requiresReauth: Boolean(res.requiresReauth || res.code === 'TOKEN_EXPIRED'),
+      });
     }
   };
 
@@ -825,18 +838,29 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
               {/* Modal-specific Feedback Notice */}
               {modalFeedback && (
                 <div
-                  className={`p-3 rounded-xl text-xs flex items-center gap-2.5 shadow-md ${
+                  className={`p-3 rounded-xl text-xs flex items-center justify-between gap-2.5 shadow-md ${
                     modalFeedback.type === 'success'
                       ? 'bg-emerald-950/90 border border-emerald-600 text-emerald-200'
                       : 'bg-rose-950/90 border border-rose-600 text-rose-200'
                   }`}
                 >
-                  {modalFeedback.type === 'success' ? (
-                    <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
-                  ) : (
-                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    {modalFeedback.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                    )}
+                    <span>{modalFeedback.text}</span>
+                  </div>
+                  {modalFeedback.requiresReauth && (
+                    <button
+                      type="button"
+                      onClick={() => requestReauthSignIn(modalFeedback.text)}
+                      className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] whitespace-nowrap shrink-0"
+                    >
+                      Sign In Again
+                    </button>
                   )}
-                  <span>{modalFeedback.text}</span>
                 </div>
               )}
 

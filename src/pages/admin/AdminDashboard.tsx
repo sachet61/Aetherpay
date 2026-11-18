@@ -21,7 +21,10 @@ import {
   Headphones,
   Settings,
   FileSpreadsheet,
+  RefreshCw,
+  LogIn,
 } from 'lucide-react';
+import { requestReauthSignIn } from '../../services/supabaseTokenManager';
 
 interface AdminDashboardProps {
   currentUser: UserProfile;
@@ -36,14 +39,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const isAdmin = currentUser.role === 'admin';
   const [auditError, setAuditError] = useState<string | null>(null);
 
+  const [auditRequiresReauth, setAuditRequiresReauth] = useState(false);
+  const [isRetryingAudit, setIsRetryingAudit] = useState(false);
+
+  const loadDashboardAuditLogs = async () => {
+    if (!isAdmin) return;
+    setIsRetryingAudit(true);
+    const res = await dataService.fetchAuditLogsFromServer({ limit: 25 });
+    setIsRetryingAudit(false);
+    if (res.error) {
+      setAuditError(res.error);
+      setAuditRequiresReauth(Boolean(res.requiresReauth || res.code === 'TOKEN_EXPIRED'));
+    } else {
+      setAuditError(null);
+      setAuditRequiresReauth(false);
+    }
+  };
+
   useEffect(() => {
     if (!isAdmin) return;
     if (dataService.getAuditLogs().length === 0) {
-      void dataService.fetchAuditLogsFromServer({ limit: 25 }).then((res) => {
-        if (res.error) setAuditError(res.error);
-        else setAuditError(null);
-      });
+      void loadDashboardAuditLogs();
+    } else {
+      setAuditError(null);
+      setAuditRequiresReauth(false);
     }
+
+    const onStateChanged = (e: Event) => {
+      const key = (e as CustomEvent)?.detail?.key;
+      if (
+        (key === 'aetherpay_audit_logs' || key === 'hydration_finished') &&
+        dataService.getAuditLogs().length > 0
+      ) {
+        setAuditError(null);
+        setAuditRequiresReauth(false);
+      }
+    };
+    window.addEventListener('aetherpay_state_changed', onStateChanged);
+    return () => window.removeEventListener('aetherpay_state_changed', onStateChanged);
   }, [isAdmin, currentUser.id]);
 
   const topups = dataService.getTopUpRequests();
@@ -427,7 +460,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
               <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900 space-y-3">
                 {auditError ? (
-                  <div className="text-xs text-rose-400 py-4 text-center">{auditError}</div>
+                  <div className="py-4 px-2 text-center space-y-3">
+                    <div className="text-xs text-rose-400">{auditError}</div>
+                    <div className="flex items-center justify-center gap-2">
+                      <button
+                        type="button"
+                        disabled={isRetryingAudit}
+                        onClick={() => void loadDashboardAuditLogs()}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-medium text-slate-200 inline-flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isRetryingAudit ? 'animate-spin' : ''}`} />
+                        <span>Retry</span>
+                      </button>
+                      {auditRequiresReauth && (
+                        <button
+                          type="button"
+                          onClick={() => requestReauthSignIn(auditError)}
+                          className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold inline-flex items-center gap-1.5"
+                        >
+                          <LogIn className="w-3 h-3" />
+                          <span>Sign In Again</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 ) : auditLogs.length === 0 ? (
                   <div className="text-xs text-slate-500 py-6 text-center">
                     No audit events recorded yet.

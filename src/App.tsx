@@ -140,12 +140,48 @@ export default function App() {
   const [showMobileMoreDrawer, setShowMobileMoreDrawer] = useState(false);
   const [isMobileChatActive, setIsMobileChatActive] = useState(false);
   const [timeoutNotice, setTimeoutNotice] = useState<string | null>(null);
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleSessionExpired = (event: Event) => {
+      const detail = (event as CustomEvent)?.detail;
+      const reason =
+        typeof detail?.reason === 'string' && detail.reason.trim()
+          ? detail.reason.trim()
+          : 'Your login session has expired or was signed out. Please sign in again to continue.';
+      setSessionExpiredNotice(reason);
+    };
+    const handleRequestReauth = (event: Event) => {
+      const detail = (event as CustomEvent)?.detail;
+      const reason =
+        typeof detail?.reason === 'string' && detail.reason.trim()
+          ? detail.reason.trim()
+          : 'Your login session has expired or was signed out on another device. Please sign in again to continue.';
+      setBypassedHydrationUserId(null);
+      setSessionExpiredNotice(null);
+      logout();
+      setTimeoutNotice(reason);
+    };
+    window.addEventListener('aetherpay_auth_session_expired', handleSessionExpired);
+    window.addEventListener('aetherpay_request_reauth', handleRequestReauth);
+    return () => {
+      window.removeEventListener('aetherpay_auth_session_expired', handleSessionExpired);
+      window.removeEventListener('aetherpay_request_reauth', handleRequestReauth);
+    };
+  }, [logout]);
 
   const handleLogout = (reason?: string) => {
     setBypassedHydrationUserId(null);
+    const expiredBannerMsg = sessionExpiredNotice;
+    setSessionExpiredNotice(null);
     logout();
     if (reason === 'inactivity') {
       setTimeoutNotice('Your session has timed out due to 15 minutes of inactivity. Please enter your credentials to resume.');
+    } else if (reason === 'session_expired') {
+      setTimeoutNotice(
+        expiredBannerMsg ||
+          'Your login session has expired or was signed out on another device. Please sign in again to continue.'
+      );
     } else {
       setTimeoutNotice(null);
     }
@@ -222,6 +258,7 @@ export default function App() {
             setBypassedHydrationUserId(null);
             void dataService.hydrateForSession(user);
             setTimeoutNotice(null);
+            setSessionExpiredNotice(null);
             const defaultTab = getDefaultTab(user.role);
             setActiveTab(defaultTab);
             prefetchPagesForSession(user.role, defaultTab);
@@ -415,6 +452,32 @@ export default function App() {
               : 'flex-1 px-4 sm:px-6 lg:px-8 py-6 w-full max-w-7xl mx-auto'
           }
         >
+          {sessionExpiredNotice && !isCustomerChatOpen && (
+            <div className="mb-4 p-3.5 rounded-xl border border-amber-500/40 bg-amber-950/60 text-amber-100 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>{sessionExpiredNotice}</span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => handleLogout('session_expired')}
+                  className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs whitespace-nowrap"
+                >
+                  Sign In Again
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSessionExpiredNotice(null)}
+                  className="p-1 rounded-lg text-amber-300 hover:text-white"
+                  aria-label="Dismiss session warning"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Lazy-Loaded Email Verification Banner for Confirmed Unverified Customers Only */}
           {isCustomer && !isCustomerChatOpen && verificationUi.shouldLoadBannerChunk && (
             <Suspense fallback={null}>

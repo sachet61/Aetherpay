@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import {
   handleGetAdminReferralLedger,
@@ -19,11 +20,40 @@ import {
   selectPushTargets,
 } from './pushUtils.js';
 
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://fsykihwprqdptrqapxxg.supabase.co';
-const SUPABASE_SERVICE_ROLE_KEY =
+const DEFAULT_SUPABASE_URL = 'https://fsykihwprqdptrqapxxg.supabase.co';
+const DEFAULT_SUPABASE_SERVICE_ROLE_KEY = ['sb_secret', 'RlSK7HlbIF7slBFyLi6Yfg_o1rhaSLU'].join('_');
+const DEFAULT_SUPABASE_JWKS_URL = `${DEFAULT_SUPABASE_URL}/auth/v1/.well-known/jwks.json`;
+
+function isEnvPlaceholder(val: string | undefined | null): boolean {
+  if (!val) return true;
+  const v = val.trim().toLowerCase();
+  return (
+    !v ||
+    v.includes('your-project') ||
+    v.includes('your-supabase') ||
+    v.includes('example.com') ||
+    v === 'placeholder' ||
+    v === 'undefined' ||
+    v === 'null'
+  );
+}
+
+const rawSupabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+const SUPABASE_URL = isEnvPlaceholder(rawSupabaseUrl) ? DEFAULT_SUPABASE_URL : rawSupabaseUrl.replace(/\/+$/, '');
+
+const rawServiceKey = (
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SECRET_KEY ||
-  ['sb_secret', 'RlSK7HlbIF7slBFyLi6Yfg_o1rhaSLU'].join('_');
+  ''
+).trim();
+const SUPABASE_SERVICE_ROLE_KEY = isEnvPlaceholder(rawServiceKey)
+  ? DEFAULT_SUPABASE_SERVICE_ROLE_KEY
+  : rawServiceKey;
+
+const rawJwksUrl = (process.env.SUPABASE_JWKS_URL || process.env.VITE_SUPABASE_JWKS_URL || '').trim();
+const SUPABASE_JWKS_URL = isEnvPlaceholder(rawJwksUrl)
+  ? `${SUPABASE_URL}/auth/v1/.well-known/jwks.json` || DEFAULT_SUPABASE_JWKS_URL
+  : rawJwksUrl;
 
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false },
@@ -658,9 +688,213 @@ export interface VerifiedCallerProfile {
   jwtRejected?: boolean;
 }
 
+const JWKS_CACHE_TTL_MS = 10 * 60 * 1000;
+let cachedJwksKeys: { keys: any[]; fetchedAt: number } | null = null;
+
+function decodeJwtPartJson(segment: string): Record<string, any> | null {
+  try {
+    const raw = Buffer.from(segment, 'base64url').toString('utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function verifyJwtWithJwkSet(
+  jwtToken: string,
+  keys: any[],
+  expectedIssuerPrefix: string = `${SUPABASE_URL}/auth/v1`,
+  nowMs: number = Date.now()
+): { sub: string; email?: string; app_metadata?: any; user_metadata?: any } | null {
+  if (!jwtToken || !Array.isArray(keys) || keys.length === 0) return null;
+  const parts = jwtToken.trim().split('.');
+  if (parts.length !== 3) return null;
+
+  const [headerSeg, payloadSeg, sigSeg] = parts;
+  const header = decodeJwtPartJson(headerSeg);
+  const payload = decodeJwtPartJson(payloadSeg);
+  if (!header || !payload) return null;
+
+  const alg = String(header.alg || '').toUpperCase();
+  if (alg !== 'ES256' && alg !== 'RS256') return null;
+
+  const sub = typeof payload.sub === 'string' ? payload.sub.trim() : '';
+  if (!sub) return null;
+
+  if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) || payload.exp * 1000 <= nowMs) {
+    return null;
+  }
+  if (typeof payload.nbf === 'number' && Number.isFinite(payload.nbf) && payload.nbf * 1000 > nowMs + 60_000) {
+    return null;
+  }
+  if (expectedIssuerPrefix) {
+    const iss = String(payload.iss || '').trim();
+    if (!iss || !iss.startsWith(expectedIssuerPrefix)) return null;
+  }
+
+  const kid = typeof header.kid === 'string' ? header.kid : '';
+  const candidates = kid ? keys.filter((k) => k?.kid === kid) : keys;
+  const signingInput = Buffer.from(`${headerSeg}.${payloadSeg}`, 'utf8');
+  let sigBuf: Buffer;
+  try {
+    sigBuf = Buffer.from(sigSeg, 'base64url');
+  } catch {
+    return null;
+  }
+
+  for (const jwk of candidates) {
+    try {
+      const publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+      const ok =
+        alg === 'ES256'
+          ? crypto.verify('sha256', signingInput, { key: publicKey, dsaEncoding: 'ieee-p1363' }, sigBuf)
+          : crypto.verify('sha256', signingInput, publicKey, sigBuf);
+      if (ok) {
+        return {
+          sub,
+          email: typeof payload.email === 'string' ? payload.email : undefined,
+          app_metadata: payload.app_metadata,
+          user_metadata: payload.user_metadata,
+        };
+      }
+    } catch {
+      // Try next matching JWK
+    }
+  }
+  return null;
+}
+
+async function fetchSupabaseJwksKeys(): Promise<any[]> {
+  const now = Date.now();
+  if (cachedJwksKeys && now - cachedJwksKeys.fetchedAt < JWKS_CACHE_TTL_MS) {
+    return cachedJwksKeys.keys;
+  }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const resp = await fetch(SUPABASE_JWKS_URL, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    }).finally(() => clearTimeout(timer));
+    if (!resp.ok) return cachedJwksKeys?.keys || [];
+    const data: any = await resp.json().catch(() => null);
+    const keys = Array.isArray(data?.keys) ? data.keys : [];
+    if (keys.length > 0) {
+      cachedJwksKeys = { keys, fetchedAt: now };
+    }
+    return keys;
+  } catch {
+    return cachedJwksKeys?.keys || [];
+  }
+}
+
+function isTransientAuthUpstreamFailure(err: any): boolean {
+  if (!err) return false;
+  const status = Number(err?.status || err?.statusCode || 0);
+  const code = String(err?.code || '').trim().toLowerCase();
+  const msg = String(err?.message || err || '').trim().toLowerCase();
+
+  // Explicit auth rejections must never use fallback verification
+  if (status >= 400 && status < 500) return false;
+  if (
+    code === 'session_not_found' ||
+    code === 'bad_jwt' ||
+    code === 'user_not_found' ||
+    msg.includes('invalid') ||
+    msg.includes('expired') ||
+    msg.includes('session_not_found') ||
+    msg.includes('session from session_id') ||
+    msg.includes('user from sub') ||
+    msg.includes('bad_jwt') ||
+    msg.includes('malformed') ||
+    msg.includes('signature') ||
+    msg.includes('unauthorized') ||
+    msg.includes('forbidden') ||
+    msg.includes('revoked')
+  ) {
+    return false;
+  }
+
+  if (status >= 500) return true;
+  return (
+    msg.includes('fetch failed') ||
+    msg.includes('failed to fetch') ||
+    msg.includes('network') ||
+    msg.includes('timeout') ||
+    msg.includes('timed out') ||
+    msg.includes('etimedout') ||
+    msg.includes('econnreset') ||
+    msg.includes('econnrefused') ||
+    msg.includes('abort') ||
+    msg.includes('502') ||
+    msg.includes('503') ||
+    msg.includes('504')
+  );
+}
+
+async function resolveDbCallerProfile(
+  adminClient: any,
+  authUser: { id: string; email?: string; app_metadata?: any; user_metadata?: any }
+): Promise<VerifiedCallerProfile> {
+  let dbUser: any = null;
+  try {
+    const { data: byId } = await adminClient
+      .from('users')
+      .select('id, role, email, display_name')
+      .eq('id', authUser.id)
+      .maybeSingle();
+    dbUser = byId || null;
+  } catch {}
+
+  const authEmail = String(authUser.email || '').trim().toLowerCase();
+  if (!dbUser && authEmail) {
+    try {
+      const usersTable = adminClient.from('users').select('id, role, email, display_name');
+      if (typeof usersTable?.ilike === 'function') {
+        const { data: byEmail } = await usersTable
+          .ilike('email', authEmail)
+          .limit(1)
+          .maybeSingle();
+        dbUser = byEmail || null;
+      }
+    } catch {}
+  }
+
+  const email = String(dbUser?.email || authEmail || '').toLowerCase();
+  const rawRole = dbUser?.role || authUser.app_metadata?.role || authUser.user_metadata?.role;
+  const role: VerifiedCallerProfile['role'] =
+    rawRole === 'admin' || email === 'sachet61@gmail.com'
+      ? 'admin'
+      : rawRole === 'agent'
+        ? 'agent'
+        : 'customer';
+  const displayName =
+    String(
+      dbUser?.display_name ||
+        authUser.user_metadata?.display_name ||
+        authUser.user_metadata?.full_name ||
+        (email ? email.split('@')[0] : 'User')
+    ).trim() || 'User';
+
+  return {
+    id: dbUser?.id || authUser.id,
+    email: email || undefined,
+    displayName,
+    role,
+    verifiedByJwt: true,
+  };
+}
+
 export async function resolveVerifiedCallerProfile(
   adminClient: any,
-  context?: { headers?: Record<string, any>; viewerUserId?: string }
+  context?: {
+    headers?: Record<string, any>;
+    viewerUserId?: string;
+    jwksKeysOverride?: any[];
+    expectedIssuerOverride?: string;
+  }
 ): Promise<VerifiedCallerProfile> {
   const headers = context?.headers || {};
   const proxySafeToken = String(
@@ -671,75 +905,49 @@ export async function resolveVerifiedCallerProfile(
   const jwtToken = proxySafeToken || bearerToken;
 
   if (jwtToken && typeof adminClient?.auth?.getUser === 'function') {
+    let upstreamFailure: any = null;
     try {
       const { data: authData, error: authErr } = await adminClient.auth.getUser(jwtToken);
       const authUser = !authErr ? authData?.user : null;
       if (authUser?.id) {
-        let dbUser: any = null;
-        try {
-          const { data: byId } = await adminClient
-            .from('users')
-            .select('id, role, email, display_name')
-            .eq('id', authUser.id)
-            .maybeSingle();
-          dbUser = byId || null;
-        } catch {}
-
-        const authEmail = String(authUser.email || '').trim().toLowerCase();
-        if (!dbUser && authEmail) {
-          try {
-            const usersTable = adminClient.from('users').select('id, role, email, display_name');
-            if (typeof usersTable?.ilike === 'function') {
-              const { data: byEmail } = await usersTable
-                .ilike('email', authEmail)
-                .limit(1)
-                .maybeSingle();
-              dbUser = byEmail || null;
-            }
-          } catch {}
-        }
-
-        const email = String(dbUser?.email || authEmail || '').toLowerCase();
-        const rawRole =
-          dbUser?.role || authUser.app_metadata?.role || authUser.user_metadata?.role;
-        const role: VerifiedCallerProfile['role'] =
-          rawRole === 'admin' || email === 'sachet61@gmail.com'
-            ? 'admin'
-            : rawRole === 'agent'
-              ? 'agent'
-              : 'customer';
-        const displayName =
-          String(
-            dbUser?.display_name ||
-              authUser.user_metadata?.display_name ||
-              authUser.user_metadata?.full_name ||
-              (email ? email.split('@')[0] : 'User')
-          ).trim() || 'User';
-        return {
-          id: dbUser?.id || authUser.id,
-          email: email || undefined,
-          displayName,
-          role,
-          verifiedByJwt: true,
-        };
+        return resolveDbCallerProfile(adminClient, authUser);
       }
-      // Explicit JWT failed verification: do NOT fall back to unverified x-user-id
-      return {
-        id: '',
-        displayName: 'Anonymous',
-        role: 'anonymous',
-        verifiedByJwt: false,
-        jwtRejected: true,
-      };
-    } catch {
-      return {
-        id: '',
-        displayName: 'Anonymous',
-        role: 'anonymous',
-        verifiedByJwt: false,
-        jwtRejected: true,
-      };
+      upstreamFailure = authErr || { message: 'Invalid token' };
+    } catch (err) {
+      upstreamFailure = err;
     }
+
+    // Only if GoTrue auth.getUser experienced a transient 5xx/network outage,
+    // verify cryptographic JWKS signature + expiry + issuer locally instead of failing healthy callers.
+    if (isTransientAuthUpstreamFailure(upstreamFailure)) {
+      try {
+        const jwksKeys = context?.jwksKeysOverride || (await fetchSupabaseJwksKeys());
+        const verifiedClaims = verifyJwtWithJwkSet(
+          jwtToken,
+          jwksKeys,
+          context?.expectedIssuerOverride ?? `${SUPABASE_URL}/auth/v1`
+        );
+        if (verifiedClaims?.sub) {
+          return resolveDbCallerProfile(adminClient, {
+            id: verifiedClaims.sub,
+            email: verifiedClaims.email,
+            app_metadata: verifiedClaims.app_metadata,
+            user_metadata: verifiedClaims.user_metadata,
+          });
+        }
+      } catch {
+        // Fall through to fail closed
+      }
+    }
+
+    // Explicit JWT failed verification: do NOT fall back to unverified x-user-id
+    return {
+      id: '',
+      displayName: 'Anonymous',
+      role: 'anonymous',
+      verifiedByJwt: false,
+      jwtRejected: true,
+    };
   }
 
   const candidateUserId = String(headers['x-user-id'] || context?.viewerUserId || '').trim();
@@ -1490,7 +1698,7 @@ export async function handleGetAuditLogs(adminClient: any, parsedUrl: URL, res: 
 
     if (caller.jwtRejected) {
       return res.status(401).json({
-        error: 'Session token expired or invalid. Refreshing authentication...',
+        error: 'Session token expired or invalid. Please retry or sign in again.',
         code: 'TOKEN_EXPIRED',
       });
     }
@@ -1589,7 +1797,7 @@ export async function handlePostAuditLog(adminClient: any, body: any, res: any, 
 
     if (caller.jwtRejected) {
       return res.status(401).json({
-        error: 'Session token expired or invalid. Refreshing authentication...',
+        error: 'Session token expired or invalid. Please retry or sign in again.',
         code: 'TOKEN_EXPIRED',
       });
     }

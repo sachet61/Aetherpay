@@ -1,7 +1,7 @@
 // Client Web Push & Service Worker Registration Manager
 import { UserProfile } from '../types';
-import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { authSessionService } from './authSessionService';
+import { supabaseTokenManager } from './supabaseTokenManager';
 import { executeSendTestAlertFlow } from '../utils/webPushTestUtils';
 
 const LAST_ENDPOINT_STORAGE_KEY = 'swiftsweeps_push_endpoint';
@@ -65,16 +65,13 @@ class WebPushClient {
     if (uid) headers['x-user-id'] = uid;
     if (role) headers['x-user-role'] = role;
 
-    if (supabase && isSupabaseConfigured()) {
-      try {
-        const { data } = await supabase.auth.getSession();
-        const token = data?.session?.access_token;
-        if (token) {
-          headers['Authorization'] = `Bearer ${token}`;
-          headers['x-supabase-token'] = token;
-        }
-      } catch {}
-    }
+    try {
+      const { token } = await supabaseTokenManager.getAccessToken();
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+        headers['x-supabase-token'] = token;
+      }
+    } catch {}
     return headers;
   }
 

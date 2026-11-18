@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { UserProfile, AuditLog } from '../../types';
 import { dataService } from '../../services/dataService';
+import { requestReauthSignIn } from '../../services/supabaseTokenManager';
 import {
   buildAuditCsv,
   filterAuditLogs,
@@ -36,6 +37,7 @@ export const AdminAudit: React.FC<AdminAuditProps> = ({ currentUser }) => {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorRequiresReauth, setErrorRequiresReauth] = useState(false);
 
   const activeFiltersRef = useRef({
     entityFilter,
@@ -62,6 +64,7 @@ export const AdminAudit: React.FC<AdminAuditProps> = ({ currentUser }) => {
         setIsLoading(true);
       }
       setErrorMsg(null);
+      setErrorRequiresReauth(false);
 
       const res = await dataService.fetchAuditLogsFromServer({
         limit: 100,
@@ -77,6 +80,7 @@ export const AdminAudit: React.FC<AdminAuditProps> = ({ currentUser }) => {
 
       if (res.error) {
         setErrorMsg(res.error);
+        setErrorRequiresReauth(Boolean(res.requiresReauth || res.code === 'TOKEN_EXPIRED'));
       } else {
         setLogs((prev) => (append ? mergeAuditLogs(prev, res.logs, { maxItems: 500 }) : res.logs));
         setHasMore(res.hasMore);
@@ -261,9 +265,20 @@ export const AdminAudit: React.FC<AdminAuditProps> = ({ currentUser }) => {
       </div>
 
       {errorMsg && (
-        <div className="p-3.5 rounded-xl border border-rose-500/40 bg-rose-950/30 text-rose-300 text-xs flex items-center gap-2">
-          <AlertCircle className="w-4 h-4 shrink-0" />
-          <span>{errorMsg}</span>
+        <div className="p-3.5 rounded-xl border border-rose-500/40 bg-rose-950/30 text-rose-300 text-xs flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{errorMsg}</span>
+          </div>
+          {errorRequiresReauth && (
+            <button
+              type="button"
+              onClick={() => requestReauthSignIn(errorMsg || undefined)}
+              className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] whitespace-nowrap shrink-0"
+            >
+              Sign In Again
+            </button>
+          )}
         </div>
       )}
 

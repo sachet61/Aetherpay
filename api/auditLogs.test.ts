@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {
   handleGetAuditLogs,
   handlePostAuditLog,
   writeServerAuditLog,
   resolveVerifiedCallerProfile,
+  verifyJwtWithJwkSet,
 } from './index.js';
 
 function createMockRes() {
@@ -363,4 +365,97 @@ test('handleGetAuditLogs authenticates via x-supabase-token without Authorizatio
   assert.equal(expiredMock.getStatus(), 401);
   assert.equal(expiredMock.getBody().code, 'TOKEN_EXPIRED');
 });
+
+function signTestEs256Jwt(
+  privateKey: crypto.KeyObject,
+  kid: string,
+  payload: Record<string, unknown>
+): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'ES256', typ: 'JWT', kid })).toString('base64url');
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signingInput = Buffer.from(`${header}.${body}`, 'utf8');
+  const sig = crypto.sign('sha256', signingInput, { key: privateKey, dsaEncoding: 'ieee-p1363' });
+  return `${header}.${body}.${sig.toString('base64url')}`;
+}
+
+test('resolveVerifiedCallerProfile falls back to JWKS ONLY on transient network/5xx errors, never on explicit revocation', async () => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const publicJwk = { ...(publicKey.export({ format: 'jwk' }) as Record<string, any>), kid: 'test-es256-1', alg: 'ES256' };
+  const issuer = 'https://fsykihwprqdptrqapxxg.supabase.co/auth/v1';
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  const validJwt = signTestEs256Jwt(privateKey, 'test-es256-1', {
+    sub: 'usr_admin',
+    email: 'sachet61@gmail.com',
+    iss: issuer,
+    exp: nowSec + 600,
+  });
+  const expiredJwt = signTestEs256Jwt(privateKey, 'test-es256-1', {
+    sub: 'usr_admin',
+    email: 'sachet61@gmail.com',
+    iss: issuer,
+    exp: nowSec - 60,
+  });
+
+  // Verify direct JWKS helper accepts valid and rejects expired
+  assert.equal(verifyJwtWithJwkSet(validJwt, [publicJwk], issuer)?.sub, 'usr_admin');
+  assert.equal(verifyJwtWithJwkSet(expiredJwt, [publicJwk], issuer), null);
+
+  const dbUsers = {
+    usr_admin: { id: 'usr_admin', role: 'admin', email: 'sachet61@gmail.com', display_name: 'Admin' },
+  };
+  const baseClient = createMockAdminClient({ dbUsers });
+
+  // 1. Transient GoTrue network outage + valid unexpired ES256 JWT -> verified via JWKS
+  const transientOutageClient = {
+    ...baseClient,
+    auth: {
+      async getUser() {
+        return { data: { user: null }, error: { status: 503, message: 'Service Unavailable' } };
+      },
+    },
+  };
+  const recovered = await resolveVerifiedCallerProfile(transientOutageClient, {
+    headers: { 'x-supabase-token': validJwt },
+    jwksKeysOverride: [publicJwk],
+    expectedIssuerOverride: issuer,
+  });
+  assert.equal(recovered.verifiedByJwt, true);
+  assert.equal(recovered.role, 'admin');
+  assert.equal(recovered.id, 'usr_admin');
+
+  // 2. Transient outage + expired JWT -> still rejected (no x-user-id fallback)
+  const expiredRejected = await resolveVerifiedCallerProfile(transientOutageClient, {
+    headers: { 'x-supabase-token': expiredJwt, 'x-user-id': 'usr_admin' },
+    jwksKeysOverride: [publicJwk],
+    expectedIssuerOverride: issuer,
+  });
+  assert.equal(expiredRejected.jwtRejected, true);
+  assert.equal(expiredRejected.role, 'anonymous');
+
+  // 3. Explicit GoTrue revocation (session_not_found / 403) + valid unexpired JWT -> MUST reject!
+  const revokedClient = {
+    ...baseClient,
+    auth: {
+      async getUser() {
+        return {
+          data: { user: null },
+          error: {
+            status: 403,
+            code: 'session_not_found',
+            message: 'Session from session_id claim in JWT does not exist',
+          },
+        };
+      },
+    },
+  };
+  const revokedCaller = await resolveVerifiedCallerProfile(revokedClient, {
+    headers: { 'x-supabase-token': validJwt, 'x-user-id': 'usr_admin' },
+    jwksKeysOverride: [publicJwk],
+    expectedIssuerOverride: issuer,
+  });
+  assert.equal(revokedCaller.jwtRejected, true);
+  assert.equal(revokedCaller.role, 'anonymous');
+});
+
 
