@@ -22,11 +22,19 @@ self.addEventListener('push', (event) => {
   const title = data.title || 'Swift Sweeps Support';
   const targetUrl = data.data?.url || data.url || '/#chat';
 
+  const DEFAULT_ICON = '/pwa-192x192-v2.png';
+  const DEFAULT_BADGE = '/notification-badge-v2.png';
+  const LEGACY_ICONS = ['/pwa-192x192.png', '/pwa-512x512.png', '/favicon.png'];
+  const LEGACY_BADGES = ['/favicon.png', '/pwa-192x192.png'];
+
+  const resolvedIcon = !data.icon || LEGACY_ICONS.includes(data.icon) ? DEFAULT_ICON : data.icon;
+  const resolvedBadge = !data.badge || LEGACY_BADGES.includes(data.badge) ? DEFAULT_BADGE : data.badge;
+
   // High-priority Heads-Up Notification configuration (Messenger / FB Lite style)
   const options = {
     body: data.body || 'You have a new message from customer care.',
-    icon: data.icon || '/pwa-192x192.png',
-    badge: data.badge || '/favicon.png',
+    icon: resolvedIcon,
+    badge: resolvedBadge,
     image: data.image || undefined,
     // Distinct mobile vibration rhythm [buzz, pause, buzz, pause, long buzz]
     vibrate: [200, 100, 200, 100, 250],

@@ -1,6 +1,7 @@
 // Client Web Push & Service Worker Registration Manager
 import { UserProfile } from '../types';
 import { notificationSoundService } from './notificationSoundService';
+import { DEFAULT_NOTIFICATION_ICON_URL, NOTIFICATION_BADGE_URL } from '../utils/pwaAssets';
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -430,8 +431,8 @@ class WebPushClient {
         try {
           await reg.showNotification('Swift Sweeps Support', {
             body: 'Test alert: Heads-up notification active with sound & vibration!',
-            icon: '/pwa-192x192.png',
-            badge: '/favicon.png',
+            icon: DEFAULT_NOTIFICATION_ICON_URL,
+            badge: NOTIFICATION_BADGE_URL,
             vibrate: [200, 100, 200, 100, 250],
             tag: `test_local_${Date.now()}`,
             data: { url: '/#chat' },

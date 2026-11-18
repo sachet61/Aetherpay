@@ -1,4 +1,5 @@
 import { LOCAL_GAME_IMAGES, DEFAULT_GAME_ICON } from './imageUtils';
+import { FAVICON_PNG_URL, NOTIFICATION_BADGE_URL, PWA_ICON_192_URL } from './pwaAssets';
 
 // Global memory cache pool holding preloaded HTMLImageElement references
 // This guarantees the browser keeps decoded image bitmaps hot in memory
@@ -7,7 +8,9 @@ const memoryImageCache = new Map<string, HTMLImageElement>();
 export const CORE_ASSET_URLS: string[] = [
   ...LOCAL_GAME_IMAGES.map((item) => item.path),
   DEFAULT_GAME_ICON,
-  '/favicon.png',
+  FAVICON_PNG_URL,
+  PWA_ICON_192_URL,
+  NOTIFICATION_BADGE_URL,
 ];
 
 /**

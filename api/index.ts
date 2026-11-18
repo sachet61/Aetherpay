@@ -244,8 +244,8 @@ async function sendVercelPushNotification(
     const pushPayload = JSON.stringify({
       title: payload.title || 'Swift Sweeps Support',
       body: payload.body || 'You have a new message.',
-      icon: payload.icon || '/pwa-192x192.png',
-      badge: payload.badge || '/favicon.png',
+      icon: payload.icon || '/pwa-192x192-v2.png',
+      badge: payload.badge || '/notification-badge-v2.png',
       tag: payload.tag || `chat_${Date.now()}`,
       data: payload.data || {},
     });

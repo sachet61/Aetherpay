@@ -1,4 +1,6 @@
 // Audio and Desktop Notification Helper with Web Audio API synthesis
+import { DEFAULT_NOTIFICATION_ICON_URL, NOTIFICATION_BADGE_URL } from '../utils/pwaAssets';
+
 class NotificationSoundService {
   private soundEnabled: boolean = true;
   private desktopEnabled: boolean = true;
@@ -151,8 +153,8 @@ class NotificationSoundService {
     if (Notification.permission === 'granted') {
       try {
         const notif = new Notification(title, {
-          icon: '/favicon.png',
-          badge: '/favicon.png',
+          icon: DEFAULT_NOTIFICATION_ICON_URL,
+          badge: NOTIFICATION_BADGE_URL,
           silent: true, // We handle our own precise audio chime via Web Audio API
           ...options,
         });
