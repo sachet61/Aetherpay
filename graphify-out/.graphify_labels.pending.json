@@ -9,8 +9,8 @@
   "7": "api/index.ts",
   "8": "steps",
   "9": "react",
-  "10": "supabaseClient.ts",
-  "11": "lucide-react",
+  "10": "AdminConfig.tsx",
+  "11": "react",
   "12": "compilerOptions",
   "13": "dataService",
   "14": "sessionHydrationUtils.ts",
@@ -19,9 +19,10 @@
   "17": "WebPushClient",
   "18": "AdminAudit.tsx",
   "19": "AdminGameCredentials.tsx",
-  "20": "AdminUsers.tsx",
+  "20": "UserRole",
   "21": "vercel.json",
   "22": "sw.js",
-  "23": "CustomerRules.tsx",
+  "23": "walletActivityUtils.ts",
+  "24": "SessionHydrationScreen.tsx",
   "26": "UserProfile"
 }
