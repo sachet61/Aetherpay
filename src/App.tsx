@@ -328,6 +328,8 @@ export default function App() {
     }
   };
 
+  const isCustomerChatOpen = Boolean(isCustomer && activeTab === 'chat');
+
   return (
     <>
       {/* Branded Startup Loading Screen tracking required assets for active workspace */}
@@ -337,12 +339,14 @@ export default function App() {
       />
 
       <div
-        className={`min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950 ${
-          isCustomer
-            ? 'pb-32 sm:pb-28'
+        className={`text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950 ${
+          isCustomerChatOpen
+            ? 'h-[100dvh] bg-[#080E1D] overflow-hidden pb-0'
+            : isCustomer
+            ? 'min-h-screen bg-[#0A0F1D] pb-32 sm:pb-28'
             : isMobileChatActive
-            ? 'pb-0'
-            : 'pb-24 md:pb-12'
+            ? 'min-h-screen bg-[#0A0F1D] pb-0'
+            : 'min-h-screen bg-[#0A0F1D] pb-24 md:pb-12'
         }`}
       >
         {/* Session Inactivity Timeout Guard & Live Countdown Warning */}
@@ -355,27 +359,35 @@ export default function App() {
           onNavigateTab={handleNavigateTab}
         />
 
-        {/* Top Navbar with strict role-based views (No staff/customer mode toggle) */}
-        <div className="sticky top-0 z-40">
-          <TopNavbar
-            currentUser={currentUser}
-            wallet={activeWallet}
-            onSwitchUser={handleSwitchUser}
-            onLogout={() => handleLogout('manual')}
-            activeTab={activeTab}
-            onNavigateTab={handleNavigateTab}
-          />
-          {/* Continuous News-Style Horizontal Live Cashouts Marquee Ticker */}
-          <LiveCashoutTicker />
-        </div>
+        {/* Top Navbar with strict role-based views (Hidden during full-screen customer support chat) */}
+        {!isCustomerChatOpen && (
+          <div className="sticky top-0 z-40">
+            <TopNavbar
+              currentUser={currentUser}
+              wallet={activeWallet}
+              onSwitchUser={handleSwitchUser}
+              onLogout={() => handleLogout('manual')}
+              activeTab={activeTab}
+              onNavigateTab={handleNavigateTab}
+            />
+            {/* Continuous News-Style Horizontal Live Cashouts Marquee Ticker */}
+            <LiveCashoutTicker />
+          </div>
+        )}
 
-        {/* Messenger-Style High-Priority Background Push Alert Prompt (Android & iOS PWA) */}
-        <BackgroundNotificationPrompt currentUser={currentUser} />
+        {/* Messenger-Style High-Priority Background Push Alert Prompt (Hidden during full-screen chat) */}
+        {!isCustomerChatOpen && <BackgroundNotificationPrompt currentUser={currentUser} />}
 
         {/* Main Content Viewport */}
-        <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 w-full max-w-7xl mx-auto">
+        <main
+          className={
+            isCustomerChatOpen
+              ? 'flex-1 min-h-0 w-full h-full flex flex-col overflow-hidden p-0 m-0'
+              : 'flex-1 px-4 sm:px-6 lg:px-8 py-6 w-full max-w-7xl mx-auto'
+          }
+        >
           {/* Lazy-Loaded Email Verification Banner for Confirmed Unverified Customers Only */}
-          {isCustomer && verificationUi.shouldLoadBannerChunk && (
+          {isCustomer && !isCustomerChatOpen && verificationUi.shouldLoadBannerChunk && (
             <Suspense fallback={null}>
               <LazyEmailVerificationBanner
                 currentUser={currentUser}
@@ -556,8 +568,8 @@ export default function App() {
         </Suspense>
       </main>
 
-      {/* Persistent Android-Style Bottom Navigation for Customer */}
-      {isCustomer && (
+      {/* Persistent Android-Style Bottom Navigation for Customer (Hidden during full-screen support chat) */}
+      {isCustomer && !isCustomerChatOpen && (
         <CustomerMobileNav
           activeTab={activeTab}
           onNavigateTab={handleNavigateTab}

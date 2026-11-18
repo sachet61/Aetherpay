@@ -43,6 +43,11 @@ import { notificationSoundService } from '../../services/notificationSoundServic
 import { storageService } from '../../services/storageService';
 import { toProxyStorageUrl, toDirectSupabaseStorageUrl } from '../../services/storageUrlUtils';
 import { supabaseUrl } from '../../services/supabaseClient';
+import {
+  computeVisualViewportState,
+  shouldSubmitOnTextareaKeyDown,
+  type ComputedChatViewportState,
+} from '../../utils/chatViewportUtils';
 
 interface CustomerChatProps {
   currentUser: UserProfile;
@@ -86,6 +91,12 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [failedImageKeys, setFailedImageKeys] = useState<Record<string, number>>({});
   const [lightboxImage, setLightboxImage] = useState<{ url: string; name: string } | null>(null);
+  const [avatarLoadFailed, setAvatarLoadFailed] = useState(false);
+  const [viewportState, setViewportState] = useState<ComputedChatViewportState>({
+    isKeyboardOpen: false,
+    containerHeightPx: null,
+    offsetTopPx: 0,
+  });
 
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
 
@@ -154,6 +165,45 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     document.addEventListener('mousedown', handleOutsideClick);
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, [showEmojiPicker, showMobileMenu]);
+
+  // Track visualViewport for soft-keyboard safe resizing on mobile browsers
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const updateViewport = () => {
+      const vv = window.visualViewport;
+      const next = computeVisualViewportState({
+        innerHeight: window.innerHeight,
+        visualHeight: vv?.height ?? null,
+        visualOffsetTop: vv?.offsetTop ?? 0,
+      });
+      setViewportState((prev) => {
+        if (
+          prev.isKeyboardOpen === next.isKeyboardOpen &&
+          prev.containerHeightPx === next.containerHeightPx &&
+          prev.offsetTopPx === next.offsetTopPx
+        ) {
+          return prev;
+        }
+        return next;
+      });
+      if (next.isKeyboardOpen) {
+        requestAnimationFrame(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+        });
+      }
+    };
+
+    updateViewport();
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', updateViewport);
+    vv?.addEventListener('scroll', updateViewport);
+    window.addEventListener('resize', updateViewport);
+    return () => {
+      vv?.removeEventListener('resize', updateViewport);
+      vv?.removeEventListener('scroll', updateViewport);
+      window.removeEventListener('resize', updateViewport);
+    };
+  }, []);
 
   // Track genuine browser + sync health
   useEffect(() => {
@@ -334,7 +384,13 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
   };
 
   const handleTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (
+      shouldSubmitOnTextareaKeyDown({
+        key: e.key,
+        shiftKey: e.shiftKey,
+        isComposing: e.nativeEvent.isComposing,
+      })
+    ) {
       e.preventDefault();
       void handleSendMessage();
     }
@@ -409,60 +465,85 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     }
   };
 
+  const shellInlineStyle =
+    viewportState.isKeyboardOpen && viewportState.containerHeightPx
+      ? {
+          height: `${viewportState.containerHeightPx}px`,
+          top: `${viewportState.offsetTopPx}px`,
+        }
+      : undefined;
+
   return (
-    <div className="max-w-4xl mx-auto flex flex-col h-[calc(100dvh-13.5rem)] sm:h-[calc(100dvh-11.5rem)] md:h-[calc(100dvh-10rem)] min-h-[430px]">
-      <div className="flex-1 min-h-0 flex flex-col rounded-2xl border border-slate-800/80 bg-[#070D20] overflow-hidden shadow-2xl">
-        {/* CHAT HEADER */}
-        <header className="px-3 sm:px-5 py-3 bg-[#10182D] border-b border-slate-800/80 flex items-center justify-between gap-2 shrink-0">
-          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+    <div
+      data-testid="customer-fullscreen-chat"
+      style={shellInlineStyle}
+      className={
+        viewportState.isKeyboardOpen && viewportState.containerHeightPx
+          ? 'fixed inset-x-0 z-50 w-full flex flex-col overflow-hidden bg-[#080E1D]'
+          : 'flex-1 min-h-0 h-[100dvh] w-full flex flex-col overflow-hidden bg-[#080E1D]'
+      }
+    >
+      {/* COMPACT FULL-WIDTH CHAT HEADER */}
+      <header className="w-full bg-[#101A30] border-b border-[#1E2942] pt-safe shrink-0 z-20">
+        <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between gap-2 sm:gap-3">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
             <button
               type="button"
               onClick={handleExit}
-              className="p-2 rounded-xl bg-[#0B1224] border border-slate-800/80 hover:border-slate-700 text-slate-300 hover:text-white transition-colors shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5036F5]"
+              className="w-10 h-10 sm:w-9 sm:h-9 rounded-xl bg-[#080E1D] border border-[#1E2942] hover:border-slate-600 text-slate-200 hover:text-white transition-colors shrink-0 flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5035F5]"
               title="Back"
               aria-label="Back to previous page"
             >
-              <ChevronLeft className="w-4 h-4" />
+              <ChevronLeft className="w-5 h-5 sm:w-4 sm:h-4" />
             </button>
 
             <div className="relative shrink-0">
-              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[#5036F5] text-white flex items-center justify-center shadow-sm">
-                <Headphones className="w-4 h-4 sm:w-5 sm:h-5" />
+              <div className="w-10 h-10 rounded-full bg-[#5035F5] text-white flex items-center justify-center shadow-sm">
+                <Headphones className="w-5 h-5" />
               </div>
               <span
-                className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-[#10182D] ${connectionStatus.dotColorClass}`}
+                aria-hidden="true"
+                className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-[#101A30] ${connectionStatus.dotColorClass}`}
               />
             </div>
 
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm sm:text-base font-bold text-[#F8FAFC] truncate">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 min-w-0">
+                <h1 className="text-sm sm:text-base font-bold text-white truncate">
                   Support Team
-                </h2>
-                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-300 shrink-0">
+                </h1>
+                <span
+                  className={`inline-flex items-center gap-1.5 text-[11px] font-medium shrink-0 ${
+                    connectionStatus.isOnline ? 'text-emerald-400' : 'text-[#8B99B8]'
+                  }`}
+                >
                   <span className={`w-2 h-2 rounded-full ${connectionStatus.dotColorClass}`} />
                   <span>{connectionStatus.label}</span>
                 </span>
               </div>
-              <p className="text-[11px] text-[#77839F] truncate">
+              <p className="text-[11px] sm:text-xs text-[#8B99B8] truncate">
                 {conversation?.assignedAgentName &&
                 conversation.assignedAgentName !== 'Live Support Desk'
-                  ? `Specialist: ${conversation.assignedAgentName}`
+                  ? `Swift Sweeps Customer Care · ${conversation.assignedAgentName}`
                   : 'Swift Sweeps Customer Care'}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
-            {/* Desktop & Tablet alert toggles */}
+            {/* Desktop & Tablet alert toggles + ticket badge */}
             <div className="hidden sm:flex items-center gap-1.5">
+              <span className="hidden lg:inline-flex items-center px-2.5 py-1.5 rounded-xl bg-[#080E1D] border border-[#1E2942] text-[11px] font-mono tabular-nums text-[#8B99B8] whitespace-nowrap shrink-0">
+                {formatTicketTag(conversation)}
+              </span>
+
               <button
                 type="button"
                 onClick={handleToggleSound}
-                className={`px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-colors flex items-center gap-1.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5036F5] ${
+                className={`min-h-[36px] px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5035F5] ${
                   soundEnabled
                     ? 'bg-emerald-500/10 border-emerald-500/35 text-emerald-300 hover:bg-emerald-500/15'
-                    : 'bg-[#0B1224] border-slate-800 text-[#77839F] hover:text-slate-200'
+                    : 'bg-[#080E1D] border-[#1E2942] text-[#8B99B8] hover:text-white'
                 }`}
                 title={soundEnabled ? 'Sound alerts on' : 'Sound alerts muted'}
               >
@@ -477,10 +558,10 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               <button
                 type="button"
                 onClick={handleToggleDesktopNotifs}
-                className={`px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-colors flex items-center gap-1.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5036F5] ${
+                className={`min-h-[36px] px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5035F5] ${
                   desktopEnabled
-                    ? 'bg-[#5036F5]/15 border-[#5036F5]/40 text-indigo-200 hover:bg-[#5036F5]/25'
-                    : 'bg-[#0B1224] border-slate-800 text-[#77839F] hover:text-slate-200'
+                    ? 'bg-[#5035F5]/15 border-[#5035F5]/45 text-indigo-200 hover:bg-[#5035F5]/25'
+                    : 'bg-[#080E1D] border-[#1E2942] text-[#8B99B8] hover:text-white'
                 }`}
                 title={desktopEnabled ? 'Desktop notifications active' : 'Enable desktop notifications'}
               >
@@ -492,14 +573,10 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                 <span className="hidden md:inline">{desktopEnabled ? 'Alerts' : 'Alerts Off'}</span>
               </button>
 
-              <span className="hidden lg:inline-flex items-center px-2.5 py-1 rounded-lg bg-[#0B1224] border border-slate-800/80 text-[11px] font-mono text-[#77839F]">
-                {formatTicketTag(conversation)}
-              </span>
-
               <button
                 type="button"
                 onClick={() => onNavigateTab('dashboard')}
-                className="p-2 rounded-xl bg-[#0B1224] border border-slate-800 hover:border-slate-700 text-[#77839F] hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5036F5]"
+                className="w-9 h-9 rounded-xl bg-[#080E1D] border border-[#1E2942] hover:border-slate-600 text-[#8B99B8] hover:text-white transition-colors flex items-center justify-center shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5035F5]"
                 title="Close support chat"
                 aria-label="Close support chat"
               >
@@ -507,12 +584,12 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               </button>
             </div>
 
-            {/* Mobile overflow menu */}
+            {/* Mobile three-dot menu */}
             <div ref={menuContainerRef} className="relative sm:hidden">
               <button
                 type="button"
                 onClick={() => setShowMobileMenu((prev) => !prev)}
-                className="p-2 rounded-xl bg-[#0B1224] border border-slate-800/80 text-slate-300 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5036F5]"
+                className="w-10 h-10 rounded-xl bg-[#080E1D] border border-[#1E2942] text-slate-200 hover:text-white transition-colors flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5035F5]"
                 aria-label="Chat options"
                 aria-expanded={showMobileMenu}
               >
@@ -520,8 +597,8 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               </button>
 
               {showMobileMenu && (
-                <div className="absolute right-0 mt-2 w-56 rounded-2xl bg-[#10182D] border border-slate-700/80 shadow-2xl p-1.5 z-40 space-y-1 text-xs">
-                  <div className="px-3 py-1.5 text-[11px] font-mono text-[#77839F] border-b border-slate-800/80 flex items-center justify-between">
+                <div className="absolute right-0 mt-2 w-56 rounded-2xl bg-[#101A30] border border-[#1E2942] shadow-2xl p-1.5 z-40 space-y-1 text-xs">
+                  <div className="px-3 py-1.5 text-[11px] font-mono tabular-nums text-[#8B99B8] border-b border-[#1E2942] flex items-center justify-between">
                     <span>Ticket</span>
                     <span className="text-slate-200">{formatTicketTag(conversation)}</span>
                   </div>
@@ -531,13 +608,13 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                       handleToggleSound();
                       setShowMobileMenu(false);
                     }}
-                    className="w-full px-3 py-2 rounded-xl hover:bg-[#111B30] text-left flex items-center justify-between text-slate-200"
+                    className="w-full min-h-[40px] px-3 py-2 rounded-xl hover:bg-[#121E33] text-left flex items-center justify-between text-slate-200"
                   >
                     <span className="flex items-center gap-2">
-                      {soundEnabled ? <Volume2 className="w-3.5 h-3.5 text-emerald-400" /> : <VolumeX className="w-3.5 h-3.5 text-[#77839F]" />}
+                      {soundEnabled ? <Volume2 className="w-3.5 h-3.5 text-emerald-400" /> : <VolumeX className="w-3.5 h-3.5 text-[#8B99B8]" />}
                       <span>Sound Chime</span>
                     </span>
-                    <span className="text-[11px] text-[#77839F]">{soundEnabled ? 'On' : 'Off'}</span>
+                    <span className="text-[11px] text-[#8B99B8]">{soundEnabled ? 'On' : 'Off'}</span>
                   </button>
                   <button
                     type="button"
@@ -545,13 +622,13 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                       void handleToggleDesktopNotifs();
                       setShowMobileMenu(false);
                     }}
-                    className="w-full px-3 py-2 rounded-xl hover:bg-[#111B30] text-left flex items-center justify-between text-slate-200"
+                    className="w-full min-h-[40px] px-3 py-2 rounded-xl hover:bg-[#121E33] text-left flex items-center justify-between text-slate-200"
                   >
                     <span className="flex items-center gap-2">
-                      {desktopEnabled ? <Bell className="w-3.5 h-3.5 text-indigo-300" /> : <BellOff className="w-3.5 h-3.5 text-[#77839F]" />}
+                      {desktopEnabled ? <Bell className="w-3.5 h-3.5 text-indigo-300" /> : <BellOff className="w-3.5 h-3.5 text-[#8B99B8]" />}
                       <span>Desktop Alerts</span>
                     </span>
-                    <span className="text-[11px] text-[#77839F]">{desktopEnabled ? 'On' : 'Off'}</span>
+                    <span className="text-[11px] text-[#8B99B8]">{desktopEnabled ? 'On' : 'Off'}</span>
                   </button>
                   <button
                     type="button"
@@ -559,7 +636,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                       setShowMobileMenu(false);
                       onNavigateTab('dashboard');
                     }}
-                    className="w-full px-3 py-2 rounded-xl hover:bg-rose-950/40 text-left flex items-center gap-2 text-rose-300"
+                    className="w-full min-h-[40px] px-3 py-2 rounded-xl hover:bg-rose-950/40 text-left flex items-center gap-2 text-rose-300"
                   >
                     <LogOut className="w-3.5 h-3.5" />
                     <span>Exit to Dashboard</span>
@@ -568,11 +645,18 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               )}
             </div>
           </div>
-        </header>
+        </div>
+      </header>
 
-        {/* QUICK REQUESTS STRIP */}
-        <div className="px-3 sm:px-5 py-2 bg-[#0B1224] border-b border-slate-800/70 flex items-center gap-2 overflow-x-auto no-scrollbar text-xs shrink-0">
-          <span className="text-[11px] font-medium text-[#77839F] shrink-0">Quick Actions:</span>
+      {/* QUICK ACTIONS ROW (Horizontally scrollable below header) */}
+      <div
+        data-testid="customer-chat-quick-actions"
+        className="w-full bg-[#0C1428] border-b border-[#1E2942] shrink-0"
+      >
+        <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-2 flex items-center gap-2 overflow-x-auto no-scrollbar text-xs">
+          <span className="text-[11px] font-medium text-[#8B99B8] whitespace-nowrap shrink-0">
+            Quick Actions:
+          </span>
 
           <button
             type="button"
@@ -580,9 +664,9 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               setInputText('Hello Support, I would like to request a balance Top-Up.');
               textareaRef.current?.focus();
             }}
-            className="px-2.5 py-1.5 rounded-xl bg-[#10182D] hover:bg-[#15203B] border border-slate-800 text-emerald-300 flex items-center gap-1.5 whitespace-nowrap transition-colors shrink-0"
+            className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#101A30] hover:bg-[#172442] border border-[#1E2942] text-emerald-300 flex items-center gap-1.5 whitespace-nowrap transition-colors shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5035F5]"
           >
-            <ArrowDownToLine className="w-3.5 h-3.5 text-emerald-400" />
+            <ArrowDownToLine className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
             <span>Request Top-Up</span>
           </button>
 
@@ -592,9 +676,9 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               setInputText('Hello Support, I would like to request a Cashout withdrawal.');
               textareaRef.current?.focus();
             }}
-            className="px-2.5 py-1.5 rounded-xl bg-[#10182D] hover:bg-[#15203B] border border-slate-800 text-slate-200 flex items-center gap-1.5 whitespace-nowrap transition-colors shrink-0"
+            className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#101A30] hover:bg-[#172442] border border-[#1E2942] text-[#F5C51B] flex items-center gap-1.5 whitespace-nowrap transition-colors shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5035F5]"
           >
-            <ArrowUpFromLine className="w-3.5 h-3.5 text-indigo-400" />
+            <ArrowUpFromLine className="w-3.5 h-3.5 text-[#F5C51B] shrink-0" />
             <span>Request Cashout</span>
           </button>
 
@@ -604,31 +688,36 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               if (gameCatalog.length > 0) setSelectedGameId(gameCatalog[0].id);
               setShowGameRequestModal(true);
             }}
-            className="px-2.5 py-1.5 rounded-xl bg-[#10182D] hover:bg-[#15203B] border border-slate-800 text-indigo-200 flex items-center gap-1.5 whitespace-nowrap transition-colors shrink-0"
+            className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#101A30] hover:bg-[#172442] border border-[#1E2942] text-indigo-200 flex items-center gap-1.5 whitespace-nowrap transition-colors shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5035F5]"
           >
-            <Gamepad2 className="w-3.5 h-3.5 text-[#5538F8]" />
+            <Gamepad2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
             <span>Request Game ID &amp; Password</span>
           </button>
         </div>
+      </div>
 
-        {/* MESSAGES SCROLL AREA */}
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y touch-scroll px-3 sm:px-5 py-4 bg-[#070D20]">
+      {/* MESSAGES SCROLL REGION (Independently scrollable, fills all remaining vertical space) */}
+      <div
+        data-testid="customer-chat-messages"
+        className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y touch-scroll bg-[#080E1D]"
+      >
+        <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-4 min-h-full flex flex-col">
           {visibleMessages.length >= 25 && hasMoreOlder && (
-            <div className="flex justify-center pb-4">
+            <div className="flex justify-center pb-4 shrink-0">
               <button
                 type="button"
                 onClick={handleLoadOlderMessages}
                 disabled={loadingOlder}
-                className="px-3.5 py-1.5 rounded-full bg-[#10182D] hover:bg-[#15203B] border border-slate-800 text-[#77839F] hover:text-white text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                className="px-3.5 py-1.5 rounded-full bg-[#101A30] hover:bg-[#172442] border border-[#1E2942] text-[#8B99B8] hover:text-white text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-50"
               >
                 {loadingOlder ? (
                   <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#5538F8]" />
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#5035F5]" />
                     <span>Loading older messages...</span>
                   </>
                 ) : (
                   <>
-                    <ChevronUp className="w-3.5 h-3.5 text-[#5538F8]" />
+                    <ChevronUp className="w-3.5 h-3.5 text-[#5035F5]" />
                     <span>Load Older Messages</span>
                   </>
                 )}
@@ -637,13 +726,13 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
           )}
 
           {groupedMessages.length === 0 ? (
-            <div className="h-full min-h-[220px] flex flex-col items-center justify-center text-center px-4">
-              <div className="w-12 h-12 rounded-full bg-[#5036F5]/20 border border-[#5036F5]/40 text-indigo-300 flex items-center justify-center mb-3">
-                <Headphones className="w-6 h-6" />
+            <div className="my-auto py-8 flex flex-col items-center justify-center text-center px-4">
+              <div className="w-14 h-14 rounded-full bg-[#5035F5]/15 border border-[#5035F5]/40 text-indigo-300 flex items-center justify-center mb-3.5">
+                <Headphones className="w-7 h-7" />
               </div>
-              <h3 className="text-sm font-bold text-[#F8FAFC]">Welcome to Swift Sweeps Support</h3>
-              <p className="text-xs text-[#77839F] max-w-sm mt-1 leading-relaxed">
-                Send a message below or choose a quick request above to connect directly with our customer care team.
+              <h2 className="text-base font-bold text-white">Welcome to Swift Sweeps Support</h2>
+              <p className="text-xs sm:text-sm text-[#8B99B8] max-w-sm mt-1.5 leading-relaxed">
+                Send a message below or choose a quick action above to connect directly with our customer care team.
               </p>
             </div>
           ) : (
@@ -656,11 +745,11 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                   <React.Fragment key={msg.id}>
                     {showDateDivider && (
                       <div className="flex items-center gap-3 py-3">
-                        <div className="flex-1 h-px bg-slate-800/80" />
-                        <span className="px-3 py-1 rounded-full bg-[#10182D] border border-slate-800/80 text-[11px] font-medium text-[#77839F]">
+                        <div className="flex-1 h-px bg-[#1E2942]" />
+                        <span className="px-3 py-1 rounded-full bg-[#101A30] border border-[#1E2942] text-[11px] font-medium text-[#8B99B8]">
                           {dateLabel}
                         </span>
-                        <div className="flex-1 h-px bg-slate-800/80" />
+                        <div className="flex-1 h-px bg-[#1E2942]" />
                       </div>
                     )}
 
@@ -671,33 +760,43 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                     >
                       {isFirstInGroup && (
                         <div
-                          className={`flex items-center gap-1.5 text-[11px] text-[#77839F] mb-1 ${
-                            isMe ? 'pr-9' : 'pl-9'
+                          className={`flex items-center gap-1.5 text-[11px] text-[#8B99B8] mb-1 ${
+                            isMe ? 'pr-9 sm:pr-10' : 'pl-9 sm:pl-10'
                           }`}
                         >
                           <span className="font-medium text-slate-300">
                             {isMe ? 'You' : msg.senderName || 'Support Team'}
                           </span>
-                          <span>·</span>
-                          <span>{timeStr}</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="tabular-nums">{timeStr}</span>
                         </div>
                       )}
 
                       <div
-                        className={`flex items-end gap-2 max-w-[92%] sm:max-w-[80%] ${
+                        className={`flex items-end gap-2 max-w-[90%] sm:max-w-[78%] ${
                           isMe ? 'flex-row-reverse' : 'flex-row'
                         }`}
                       >
-                        {/* Avatar column (shown on first message in group, invisible spacer otherwise) */}
-                        <div className="w-7 h-7 shrink-0 flex items-center justify-center self-start mt-0.5">
+                        {/* Avatar column (Support Team on left, Customer avatar/initials on right) */}
+                        <div className="w-7 h-7 sm:w-8 sm:h-8 shrink-0 flex items-center justify-center self-start mt-0.5">
                           {isFirstInGroup ? (
                             isMe ? (
-                              <div className="w-7 h-7 rounded-full bg-[#1A2444] border border-slate-700/70 text-indigo-200 text-[10px] font-bold flex items-center justify-center">
-                                {userInitials}
-                              </div>
+                              currentUser.avatarUrl && !avatarLoadFailed ? (
+                                <img
+                                  src={currentUser.avatarUrl}
+                                  alt={currentUser.displayName}
+                                  className="w-7 h-7 sm:w-8 sm:h-8 rounded-full object-cover border border-[#1E2942]"
+                                  referrerPolicy="no-referrer"
+                                  onError={() => setAvatarLoadFailed(true)}
+                                />
+                              ) : (
+                                <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-[#1A2444] border border-[#2A3960] text-indigo-200 text-[10px] sm:text-[11px] font-bold flex items-center justify-center">
+                                  {userInitials}
+                                </div>
+                              )
                             ) : (
-                              <div className="w-7 h-7 rounded-full bg-[#5036F5] text-white flex items-center justify-center shadow-sm">
-                                <Headphones className="w-3.5 h-3.5" />
+                              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-[#5035F5] text-white flex items-center justify-center shadow-sm">
+                                <Headphones className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                               </div>
                             )
                           ) : null}
@@ -705,12 +804,12 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
                         {/* Message Bubble */}
                         <div
-                          className={`px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words shadow-sm ${
+                          className={`px-3.5 py-2.5 text-[13.5px] sm:text-sm leading-relaxed whitespace-pre-wrap break-words shadow-sm ${
                             isMe
-                              ? `bg-[#5036F5] text-[#F8FAFC] ${
+                              ? `bg-[#5035F5] text-white ${
                                   isFirstInGroup ? 'rounded-2xl rounded-tr-md' : 'rounded-2xl'
                                 }`
-                              : `bg-[#111B30] border border-slate-800/75 text-[#F8FAFC] ${
+                              : `bg-[#121E33] border border-[#1E2942] text-white ${
                                   isFirstInGroup ? 'rounded-2xl rounded-tl-md' : 'rounded-2xl'
                                 }`
                           }`}
@@ -809,7 +908,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                                     <ZoomIn className="w-5 h-5 drop-shadow-md" />
                                   </div>
                                 )}
-                                <div className="px-2 py-1 text-[10px] text-slate-300 font-mono truncate bg-[#070D20]/85 flex items-center justify-between">
+                                <div className="px-2 py-1 text-[10px] text-slate-300 font-mono truncate bg-[#080E1D]/85 flex items-center justify-between">
                                   <span className="truncate">{effectiveImgName}</span>
                                   <span className="text-[10px] text-indigo-300 font-sans ml-1.5 shrink-0">
                                     {hasFailed ? 'Tap to retry' : 'Expand'}
@@ -821,8 +920,8 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
                           {/* Deterministic Smart Chat Intent Action */}
                           {msg.intentAction && (
-                            <div className="mt-2.5 p-2.5 rounded-xl bg-[#070D20]/90 border border-slate-700/70 text-[#F8FAFC] space-y-1.5">
-                              <div className="flex items-center gap-1.5 text-[10px] text-indigo-300 font-bold uppercase tracking-wider">
+                            <div className="mt-2.5 p-2.5 rounded-xl bg-[#080E1D]/90 border border-slate-700/70 text-white space-y-1.5">
+                              <div className="flex items-center gap-1.5 text-[10px] text-[#F5C51B] font-bold uppercase tracking-wider">
                                 <Sparkles className="w-3 h-3" />
                                 <span>Quick Action</span>
                               </div>
@@ -861,7 +960,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                                     onNavigateTab('rules');
                                   }
                                 }}
-                                className="w-full py-1.5 px-3 rounded-lg bg-[#5036F5] hover:bg-[#5538F8] text-white font-semibold text-[11px] flex items-center justify-center gap-1 transition-colors"
+                                className="w-full py-1.5 px-3 rounded-lg bg-[#5035F5] hover:bg-[#5E45FF] text-white font-semibold text-[11px] flex items-center justify-center gap-1 transition-colors"
                               >
                                 <span>{msg.intentAction.title || 'Open'}</span>
                                 <ArrowRight className="w-3 h-3" />
@@ -873,10 +972,10 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
                       {/* Delivery Status Indicator */}
                       {isMe && msg.deliveryStatus === 'sending' && (
-                        <span className="text-[10px] text-[#77839F] mt-1 pr-9">Sending...</span>
+                        <span className="text-[10px] text-[#8B99B8] mt-1 pr-9 sm:pr-10">Sending...</span>
                       )}
                       {isMe && isLastInGroup && msg.deliveryStatus === 'sent' && (
-                        <span className="text-[10px] text-[#77839F] mt-0.5 pr-9 inline-flex items-center gap-1">
+                        <span className="text-[10px] text-[#8B99B8] mt-0.5 pr-9 sm:pr-10 inline-flex items-center gap-1">
                           <Check className="w-3 h-3 text-indigo-400" />
                           <span>Sent</span>
                         </span>
@@ -885,7 +984,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                         <button
                           type="button"
                           onClick={() => void dataService.retryChatMessage(`conv_${currentUser.id}`, msg.id)}
-                          className="text-[10px] font-semibold text-rose-400 hover:text-rose-300 flex items-center gap-1 mt-1 pr-9"
+                          className="text-[10px] font-semibold text-rose-400 hover:text-rose-300 flex items-center gap-1 mt-1 pr-9 sm:pr-10"
                           title={msg.deliveryError || 'Message failed to save'}
                         >
                           <RefreshCw className="w-3 h-3" />
@@ -900,60 +999,71 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
           )}
           <div ref={messagesEndRef} />
         </div>
+      </div>
 
+      {/* FIXED BOTTOM COMPOSER SHELL (Safe area aware; adjusts when mobile keyboard opens) */}
+      <div
+        className={`w-full bg-[#101A30] border-t border-[#1E2942] shrink-0 z-20 ${
+          viewportState.isKeyboardOpen ? 'pb-1' : 'pb-safe'
+        }`}
+      >
         {/* Upload or Send Error Banner */}
         {(uploadError || sendError) && (
-          <div className="px-4 py-2 bg-rose-950/75 border-t border-rose-800/60 flex items-center justify-between gap-2 text-xs text-rose-200 shrink-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-              <span className="truncate">{sendError || uploadError}</span>
+          <div className="border-b border-rose-800/60 bg-rose-950/75">
+            <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-2 flex items-center justify-between gap-2 text-xs text-rose-200">
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                <span className="truncate">{sendError || uploadError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadError(null);
+                  setSendError(null);
+                }}
+                className="text-rose-200 hover:text-white font-medium shrink-0"
+              >
+                Dismiss
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                setUploadError(null);
-                setSendError(null);
-              }}
-              className="text-rose-200 hover:text-white font-medium shrink-0"
-            >
-              Dismiss
-            </button>
           </div>
         )}
 
         {/* Attachment Preview Chip */}
         {attachmentName && (
-          <div className="px-4 py-2 bg-[#0B1224] border-t border-slate-800/80 flex items-center justify-between gap-2 text-xs text-indigo-200 shrink-0">
-            <div className="flex items-center gap-2 min-w-0">
-              {attachmentUrl ? (
-                <img
-                  src={attachmentUrl}
-                  alt={attachmentName}
-                  className="w-7 h-7 rounded-lg object-cover border border-slate-700 shrink-0"
-                />
-              ) : (
-                <ImageIcon className="w-4 h-4 text-indigo-400 shrink-0" />
-              )}
-              <span className="font-mono truncate">{attachmentName}</span>
+          <div className="border-b border-[#1E2942] bg-[#0B1326]">
+            <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-2 flex items-center justify-between gap-2 text-xs text-indigo-200">
+              <div className="flex items-center gap-2 min-w-0">
+                {attachmentUrl ? (
+                  <img
+                    src={attachmentUrl}
+                    alt={attachmentName}
+                    className="w-7 h-7 rounded-lg object-cover border border-[#1E2942] shrink-0"
+                  />
+                ) : (
+                  <ImageIcon className="w-4 h-4 text-indigo-400 shrink-0" />
+                )}
+                <span className="font-mono truncate">{attachmentName}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setAttachmentName(null);
+                  setAttachmentUrl(null);
+                }}
+                className="p-1.5 rounded-lg text-[#8B99B8] hover:text-white hover:bg-[#121E33] transition-colors shrink-0"
+                aria-label="Remove attachment"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                setAttachmentName(null);
-                setAttachmentUrl(null);
-              }}
-              className="p-1 rounded-lg text-[#77839F] hover:text-white hover:bg-slate-800/80 transition-colors shrink-0"
-              aria-label="Remove attachment"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
           </div>
         )}
 
-        {/* COMPOSER */}
+        {/* COMPOSER FORM */}
         <form
           onSubmit={handleSendMessage}
-          className="px-3 sm:px-4 py-3 bg-[#10182D] border-t border-slate-800/80 shrink-0"
+          className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-2.5 sm:py-3"
         >
           <input
             ref={fileInputRef}
@@ -964,17 +1074,20 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
           />
 
           <div className="flex items-end gap-2">
-            <div className="flex-1 min-w-0 flex items-end gap-1.5 rounded-2xl bg-[#0B1224] border border-slate-800/90 focus-within:border-[#5036F5] transition-colors px-2 py-1.5">
+            <div
+              ref={emojiContainerRef}
+              className="relative flex-1 min-w-0 flex items-end gap-1 rounded-2xl bg-[#080E1D] border border-[#1E2942] focus-within:border-[#5035F5] transition-colors px-1.5 py-1"
+            >
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isUploadingAttachment || isSending}
-                className="p-2 rounded-xl text-[#77839F] hover:text-white hover:bg-[#10182D] transition-colors disabled:opacity-50 shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5036F5]"
+                className="w-10 h-10 rounded-xl text-[#8B99B8] hover:text-white hover:bg-[#101A30] transition-colors disabled:opacity-50 shrink-0 flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5035F5]"
                 title="Attach payment receipt or image"
                 aria-label="Attach image"
               >
                 {isUploadingAttachment ? (
-                  <RefreshCw className="w-4 h-4 animate-spin text-[#5538F8]" />
+                  <RefreshCw className="w-4 h-4 animate-spin text-[#5035F5]" />
                 ) : (
                   <Paperclip className="w-4 h-4" />
                 )}
@@ -983,6 +1096,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               <textarea
                 ref={textareaRef}
                 rows={1}
+                enterKeyHint="send"
                 value={inputText}
                 onChange={(e) => {
                   setInputText(e.target.value);
@@ -992,45 +1106,45 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                 }}
                 onKeyDown={handleTextareaKeyDown}
                 placeholder="Type a message..."
-                className="flex-1 min-w-0 bg-transparent border-0 py-2 px-1 text-xs sm:text-[13px] text-[#F8FAFC] placeholder-[#77839F] resize-none max-h-[120px] focus:outline-none leading-relaxed"
+                aria-label="Type a message"
+                className="flex-1 min-w-0 bg-transparent border-0 py-2 px-1 text-[15px] sm:text-sm text-white placeholder-[#77839F] resize-none max-h-[120px] focus:outline-none leading-relaxed"
               />
 
-              <div ref={emojiContainerRef} className="relative shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setShowEmojiPicker((prev) => !prev)}
-                  className="p-2 rounded-xl text-[#77839F] hover:text-white hover:bg-[#10182D] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5036F5]"
-                  title="Add emoji"
-                  aria-label="Add emoji"
-                >
-                  <Smile className="w-4 h-4" />
-                </button>
+              <button
+                type="button"
+                onClick={() => setShowEmojiPicker((prev) => !prev)}
+                className="w-10 h-10 rounded-xl text-[#8B99B8] hover:text-white hover:bg-[#101A30] transition-colors shrink-0 flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5035F5]"
+                title="Add emoji"
+                aria-label="Add emoji"
+                aria-expanded={showEmojiPicker}
+              >
+                <Smile className="w-4 h-4" />
+              </button>
 
-                {showEmojiPicker && (
-                  <div className="absolute bottom-12 right-0 w-52 p-2 rounded-2xl bg-[#10182D] border border-slate-700/80 shadow-2xl grid grid-cols-6 gap-1 z-40">
-                    {CHAT_QUICK_EMOJIS.map((emoji) => (
-                      <button
-                        key={emoji}
-                        type="button"
-                        onClick={() => {
-                          setInputText((prev) => `${prev}${emoji}`);
-                          setShowEmojiPicker(false);
-                          textareaRef.current?.focus();
-                        }}
-                        className="p-1.5 rounded-lg hover:bg-[#1E2949] text-base leading-none flex items-center justify-center transition-colors"
-                      >
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              {showEmojiPicker && (
+                <div className="absolute bottom-full mb-2 right-0 w-56 p-2 rounded-2xl bg-[#101A30] border border-[#1E2942] shadow-2xl grid grid-cols-6 gap-1 z-40">
+                  {CHAT_QUICK_EMOJIS.map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() => {
+                        setInputText((prev) => `${prev}${emoji}`);
+                        setShowEmojiPicker(false);
+                        textareaRef.current?.focus();
+                      }}
+                      className="p-1.5 rounded-lg hover:bg-[#1A2847] text-base leading-none flex items-center justify-center transition-colors"
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             <button
               type="submit"
               disabled={isSending || isUploadingAttachment || (!inputText.trim() && !attachmentUrl)}
-              className="p-3 rounded-2xl bg-[#5036F5] hover:bg-[#5538F8] disabled:opacity-45 text-white transition-colors shadow-sm shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300"
+              className="w-12 h-12 sm:w-11 sm:h-11 rounded-2xl bg-[#5035F5] hover:bg-[#5E45FF] disabled:opacity-45 text-white transition-colors shadow-sm shrink-0 flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300"
               aria-label="Send message"
             >
               {isSending ? (
@@ -1062,7 +1176,9 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               <button
                 type="button"
                 onClick={() => setShowGameRequestModal(false)}
-                className="text-xs text-[#77839F] hover:text-white"
+                className="p-1 rounded-lg text-xs text-[#77839F] hover:text-white transition-colors"
+                aria-label="Close game account request modal"
+                title="Close"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -1120,6 +1236,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               onClick={() => setLightboxImage(null)}
               className="absolute -top-10 right-0 p-1.5 rounded-full bg-slate-800 text-slate-300 hover:text-white transition-colors"
               title="Close image viewer"
+              aria-label="Close image viewer"
             >
               <X className="w-5 h-5" />
             </button>
