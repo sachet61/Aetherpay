@@ -6,7 +6,11 @@ import { isSupabaseConfigured } from '../../services/supabaseClient';
 import { realtimeChatHub } from '../../services/chatRealtime';
 import { mapDbMessageRowToChatMessage } from '../../services/chatOrderUtils';
 import { isMessageInternalNote } from '../../utils/chatPresentationUtils';
-import { shouldAcceptIncomingChatMessage } from '../../services/notificationScoping';
+import {
+  globalNotificationAlertIds,
+  shouldAcceptIncomingChatMessage,
+} from '../../services/notificationScoping';
+import { claimNotificationAlertId } from '../../utils/browserNotificationUtils';
 import { Headphones, MessageSquare, X, ArrowRight, Bell } from 'lucide-react';
 
 interface GlobalChatNotificationManagerProps {
@@ -30,6 +34,8 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
 
   const [hasPromptedPermission, setHasPromptedPermission] = useState(false);
   const toastTimeoutRef = useRef<any>(null);
+  const activeTabRef = useRef<string>(activeTab);
+  activeTabRef.current = activeTab;
   const isCustomer = currentUser.role === 'customer';
 
   // Request browser desktop notification permission on user engagement
@@ -46,7 +52,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
     }
   }, [hasPromptedPermission]);
 
-  // Handle new incoming chat message
+  // Handle new incoming chat message (deduplicated across broadcast, postgres_changes, and local events)
   const handleIncomingMessage = (msg: ChatMessage) => {
     if (!msg || !msg.id) return;
     const activeUser = dataService.getCurrentUser();
@@ -59,22 +65,28 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
     if (!shouldAcceptIncomingChatMessage(normalizedMsg, activeUser, { forNotificationAlert: true })) {
       return;
     }
+    if (!claimNotificationAlertId(msg.id, globalNotificationAlertIds)) {
+      return;
+    }
+
+    const activeIsCustomer = activeUser.role === 'customer';
 
     // 1. Play real-time synthesized Web Audio API notification chime
     notificationSoundService.playIncomingMessageSound();
 
-    // 2. Trigger native desktop browser notification (alerts even when user is on background tab or minimized)
-    const notificationTitle = isCustomer
-      ? `Swift Sweeps Support (${msg.senderName})`
-      : `New Player Message (${msg.senderName})`;
+    // 2. Trigger native mobile PWA / desktop browser notification
+    const notificationTitle = activeIsCustomer
+      ? `Swift Sweeps Support (${msg.senderName || 'Support'})`
+      : `New Player Message (${msg.senderName || 'Player'})`;
 
     notificationSoundService.showDesktopNotification(notificationTitle, {
-      body: msg.text || 'You have received a new message.',
+      body: msg.text || (msg.attachmentUrl ? 'Sent a photo attachment.' : 'You have received a new message.'),
       tag: `msg_${msg.id}`,
     });
 
-    // 3. Show in-app floating toast if user is not currently in the chat view
-    const isCurrentlyInChat = isCustomer ? activeTab === 'chat' : activeTab === 'ops_chat';
+    // 3. Show in-app floating toast if user is not currently in the chat view or tab is hidden
+    const currentTab = activeTabRef.current;
+    const isCurrentlyInChat = activeIsCustomer ? currentTab === 'chat' : currentTab === 'ops_chat';
     if (!isCurrentlyInChat || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) {
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
 
@@ -117,42 +129,37 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
 
     if (isCustomer && currentUser.role === 'customer') {
       const canonicalConvId = `conv_${currentUser.id}`;
-      const conv = dataService
-        .getConversations()
-        .find((c) => c.id === canonicalConvId || c.customerId === currentUser.id);
-      if (!conv || conv.status !== 'closed') {
-        unsubs.push(
-          realtimeChatHub.subscribeChatRoom(
-            `chat_${canonicalConvId}`,
-            {
-              postgresFilter: {
-                event: 'INSERT',
-                schema: 'public',
-                table: 'messages',
-                filter: `conversation_id=eq.${canonicalConvId}`,
-              },
+      unsubs.push(
+        realtimeChatHub.subscribeChatRoom(
+          `chat_${canonicalConvId}`,
+          {
+            postgresFilter: {
+              event: 'INSERT',
+              schema: 'public',
+              table: 'messages',
+              filter: `conversation_id=eq.${canonicalConvId}`,
             },
-            {
-              onBroadcast: (payload) => {
-                if (payload && payload.id) {
-                  if (isMessageInternalNote(payload)) return;
-                  dataService.appendIncomingMessage(payload);
-                  handleIncomingMessage(payload);
-                }
-              },
-              onPostgresChange: (payload) => {
-                const raw = payload?.new;
-                if (raw && raw.id && raw.sender_id !== currentUser.id) {
-                  const formattedMsg = mapDbMessageRowToChatMessage(raw, canonicalConvId);
-                  if (isMessageInternalNote(formattedMsg)) return;
-                  dataService.appendIncomingMessage(formattedMsg);
-                  handleIncomingMessage(formattedMsg);
-                }
-              },
-            }
-          )
-        );
-      }
+          },
+          {
+            onBroadcast: (payload) => {
+              if (payload && payload.id) {
+                if (isMessageInternalNote(payload)) return;
+                dataService.appendIncomingMessage(payload);
+                handleIncomingMessage(payload);
+              }
+            },
+            onPostgresChange: (payload) => {
+              const raw = payload?.new;
+              if (raw && raw.id && raw.sender_id !== currentUser.id) {
+                const formattedMsg = mapDbMessageRowToChatMessage(raw, canonicalConvId);
+                if (isMessageInternalNote(formattedMsg)) return;
+                dataService.appendIncomingMessage(formattedMsg);
+                handleIncomingMessage(formattedMsg);
+              }
+            },
+          }
+        )
+      );
     } else {
       unsubs.push(
         realtimeChatHub.subscribeChatRoom(
@@ -199,7 +206,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
       setActiveToast(null);
     };
-  }, [currentUser.id, currentUser.role, activeTab]);
+  }, [currentUser.id, currentUser.role]);
 
   if (!activeToast) return null;
 

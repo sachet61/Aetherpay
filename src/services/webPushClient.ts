@@ -1,9 +1,8 @@
 // Client Web Push & Service Worker Registration Manager
 import { UserProfile } from '../types';
-import { notificationSoundService } from './notificationSoundService';
-import { DEFAULT_NOTIFICATION_ICON_URL, NOTIFICATION_BADGE_URL } from '../utils/pwaAssets';
 import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { authSessionService } from './authSessionService';
+import { executeSendTestAlertFlow } from '../utils/webPushTestUtils';
 
 const LAST_ENDPOINT_STORAGE_KEY = 'swiftsweeps_push_endpoint';
 
@@ -261,14 +260,20 @@ class WebPushClient {
         return { success: false, error: 'Could not initialize background service worker.' };
       }
 
-      // 3. Fetch VAPID public key from backend
-      const res = await fetch('/api/push/vapid-public-key');
+      // 3. Fetch VAPID public key from backend (bypass caches to avoid stale error responses)
+      const res = await fetch('/api/push/vapid-public-key', { cache: 'no-store' });
+      const keyData = await res.json().catch(() => ({}));
       if (!res.ok) {
         this.isSubscribing = false;
-        return { success: false, error: 'Failed to retrieve push encryption credentials.' };
+        return {
+          success: false,
+          error:
+            keyData?.error ||
+            `Failed to retrieve push encryption credentials (HTTP ${res.status}).`,
+        };
       }
-      const { publicKey } = await res.json();
-      if (!publicKey) {
+      const { publicKey } = keyData || {};
+      if (!publicKey || typeof publicKey !== 'string') {
         this.isSubscribing = false;
         return { success: false, error: 'Invalid VAPID public key returned from server.' };
       }
@@ -279,6 +284,15 @@ class WebPushClient {
 
       try {
         subscription = await reg.pushManager.getSubscription();
+        if (subscription) {
+          const existingPayload = this.formatSubscriptionPayload(subscription);
+          if (!existingPayload.keys.p256dh || !existingPayload.keys.auth) {
+            try {
+              await subscription.unsubscribe();
+            } catch {}
+            subscription = null;
+          }
+        }
         if (!subscription) {
           subscription = await reg.pushManager.subscribe({
             userVisibleOnly: true,
@@ -307,6 +321,13 @@ class WebPushClient {
 
       // 5. Explicitly format subscription with base64 keys
       const normalizedSubscription = this.formatSubscriptionPayload(subscription);
+      if (!normalizedSubscription.keys.p256dh || !normalizedSubscription.keys.auth) {
+        this.isSubscribing = false;
+        return {
+          success: false,
+          error: 'Browser did not generate complete push encryption keys. Please refresh and try again.',
+        };
+      }
       this.setCachedEndpoint(normalizedSubscription.endpoint);
 
       // 6. Send subscription to backend API with verified auth headers
@@ -323,12 +344,21 @@ class WebPushClient {
           browser: this.getBrowserName(),
         }),
       });
+      const subData = await subResponse.json().catch(() => ({}));
 
-      if (subResponse.ok) {
+      if (subResponse.ok && subData?.success !== false) {
         this.lastSyncedBindingKey = `${currentUser.id}:${currentUser.role}:${normalizedSubscription.endpoint}`;
+        this.isSubscribing = false;
+        return { success: true };
       }
+
       this.isSubscribing = false;
-      return { success: subResponse.ok };
+      return {
+        success: false,
+        error:
+          subData?.error ||
+          `Failed to register push subscription with server (HTTP ${subResponse.status}).`,
+      };
     } catch (err: any) {
       this.isSubscribing = false;
       console.warn('[WebPushClient] Push subscription error:', err);
@@ -351,7 +381,7 @@ class WebPushClient {
       // silently establish a fresh PushSubscription for the newly logged-in user.
       if (!sub) {
         try {
-          const vapidRes = await fetch('/api/push/vapid-public-key');
+          const vapidRes = await fetch('/api/push/vapid-public-key', { cache: 'no-store' });
           if (vapidRes.ok) {
             const { publicKey } = await vapidRes.json();
             if (publicKey) {
@@ -503,97 +533,27 @@ class WebPushClient {
     });
   }
 
-  // Trigger a test alert directly to the current user's device with self-healing sync
+  // Trigger a truthful end-to-end test alert verified by backend Web Push delivery
   public async sendTestAlert(currentUser: UserProfile): Promise<{ success: boolean; message: string }> {
     try {
-      const reg = await this.getRegistration();
-
-      // Check permission first
-      if (Notification.permission !== 'granted') {
-        return {
-          success: false,
-          message: 'Notifications are not enabled yet. Tap "Enable Alerts" first.',
-        };
-      }
-
-      const authHeaders = await this.buildPushAuthHeaders(currentUser);
-
-      // Pre-flight self-healing: re-sync local PushSubscription to backend before dispatching
-      if (reg) {
-        try {
-          const localSub = await reg.pushManager.getSubscription();
-          if (localSub) {
-            const normalized = this.formatSubscriptionPayload(localSub);
-            this.setCachedEndpoint(normalized.endpoint);
-            await fetch('/api/push/subscribe', {
-              method: 'POST',
-              headers: authHeaders,
-              body: JSON.stringify({
-                subscription: normalized,
-                userId: currentUser.id,
-                userRole: currentUser.role,
-                userEmail: currentUser.email,
-                platform: this.getDevicePlatform(),
-                browser: this.getBrowserName(),
-              }),
-            });
-          }
-        } catch {}
-      }
-
-      // Dispatch backend push
-      const res = await fetch('/api/push/notify', {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({
-          recipientId: currentUser.id,
-          recipientRole: currentUser.role,
-          senderId: currentUser.id,
-          title: 'Swift Sweeps Support',
-          body: 'Test alert: Background notification received with sound & vibration!',
-          url: currentUser.role === 'customer' ? '/#chat' : '/#ops_chat',
-          tag: `test_${Date.now()}`,
-        }),
+      return await executeSendTestAlertFlow({
+        permission: typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : 'denied',
+        isIOS: this.isIOS(),
+        isStandalone: this.isStandalone(),
+        browserName: this.getBrowserName(),
+        platform: this.getDevicePlatform(),
+        user: {
+          id: currentUser.id,
+          role: currentUser.role,
+          email: currentUser.email,
+        },
+        getRegistration: () => this.getRegistration(),
+        formatSubscription: (sub) => this.formatSubscriptionPayload(sub),
+        buildAuthHeaders: () => this.buildPushAuthHeaders(currentUser),
+        fetchFn: (input, init) => fetch(input, init),
+        urlBase64ToUint8Array: (b64) => urlBase64ToUint8Array(b64),
+        onEndpointCached: (endpoint) => this.setCachedEndpoint(endpoint),
       });
-
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.sent > 0) {
-        return {
-          success: true,
-          message: `Heads-up alert dispatched! (${data.sent} device reached on ${this.getBrowserName()})`,
-        };
-      }
-
-      // Self-healing fallback: If server reported 0 devices or push service was blocked in Brave,
-      // dispatch direct service worker notification + chime immediately so user experiences the alert!
-      if (reg && 'showNotification' in reg) {
-        try {
-          await reg.showNotification('Swift Sweeps Support', {
-            body: 'Test alert: Heads-up notification active with sound & vibration!',
-            icon: DEFAULT_NOTIFICATION_ICON_URL,
-            badge: NOTIFICATION_BADGE_URL,
-            vibrate: [200, 100, 200, 100, 250],
-            tag: `test_local_${Date.now()}`,
-            data: { url: '/#chat' },
-          } as any);
-          notificationSoundService.playIncomingMessageSound();
-          return {
-            success: true,
-            message: `Alert triggered on ${this.getBrowserName()}! Minimize or lock screen to test background alerts.`,
-          };
-        } catch {}
-      }
-
-      // Last fallback: Web Audio + Desktop notification
-      notificationSoundService.playIncomingMessageSound();
-      notificationSoundService.showDesktopNotification('Swift Sweeps Support', {
-        body: 'Test alert: Background notification chime and banner active!',
-      });
-
-      return {
-        success: true,
-        message: `Alert tested on ${this.getBrowserName()}! Chime and heads-up banner active.`,
-      };
     } catch (err: any) {
       return { success: false, message: err?.message || 'Network error sending test alert' };
     }

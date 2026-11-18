@@ -9,14 +9,14 @@ import {
   handlePostReferralEvaluate,
   handlePostReviewReferral,
   type ReferralHandlerDeps,
-} from './referralHandlers';
+} from './referralHandlers.js';
 import {
   deactivatePushSubscriptionsInList,
   isStaffRole,
   pruneExpiredPushSubscriptions,
   rebindPushSubscriptionList,
   selectPushTargets,
-} from './pushUtils';
+} from './pushUtils.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://fsykihwprqdptrqapxxg.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY =
@@ -954,7 +954,7 @@ export async function handlePostChatSend(adminClient: any, body: any, res: any, 
         ? String(senderId).trim()
         : String(
             recipientId ||
-              (conversationId ? String(conversationId).replace(/^conv_cust_/, '').replace(/^conv_/, '') : '')
+              (conversationId ? String(conversationId).replace(/^conv_/, '') : '')
           ).trim();
 
     if (!customerId) {

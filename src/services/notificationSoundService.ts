@@ -1,4 +1,4 @@
-// Audio and Desktop Notification Helper with Web Audio API synthesis
+import { dispatchBrowserNotification } from '../utils/browserNotificationUtils';
 import { DEFAULT_NOTIFICATION_ICON_URL, NOTIFICATION_BADGE_URL } from '../utils/pwaAssets';
 
 class NotificationSoundService {
@@ -144,40 +144,19 @@ class NotificationSoundService {
   }
 
   /**
-   * Triggers native browser push/desktop notification.
-   * Works even when user is on another application or browser tab is in background.
+   * Triggers native browser/PWA notification across both Mobile PWAs and Desktop browsers.
+   * Uses ServiceWorkerRegistration.showNotification() first (required on Android/Samsung/Brave/iOS PWA)
+   * and falls back to window.Notification on desktop when no active worker registration is available.
    */
   public showDesktopNotification(title: string, options?: NotificationOptions): void {
     if (typeof window === 'undefined' || !('Notification' in window)) return;
 
     if (Notification.permission === 'granted') {
-      try {
-        const notif = new Notification(title, {
-          icon: DEFAULT_NOTIFICATION_ICON_URL,
-          badge: NOTIFICATION_BADGE_URL,
-          silent: true, // We handle our own precise audio chime via Web Audio API
-          ...options,
-        });
-
-        notif.onclick = () => {
-          window.focus();
-          notif.close();
-        };
-
-        // Auto close after 6 seconds
-        setTimeout(() => {
-          try {
-            notif.close();
-          } catch {}
-        }, 6000);
-      } catch (err) {
-        console.warn('Desktop notification dispatch notice:', err);
-      }
+      void dispatchBrowserNotification(title, options);
     } else if (Notification.permission === 'default' && this.desktopEnabled) {
-      // Opportunistically request permission on user activity
       this.requestDesktopPermission().then((granted) => {
         if (granted) {
-          this.showDesktopNotification(title, options);
+          void dispatchBrowserNotification(title, options);
         }
       });
     }

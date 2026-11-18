@@ -118,6 +118,10 @@ export function shouldAcceptIncomingChatMessage(
   if (options?.forNotificationAlert) {
     if (msg.senderId === activeUser.id) return false;
     if (msg.senderRole !== 'customer') return false;
+    return true;
   }
   return true;
 }
+
+export const globalNotificationAlertIds = new Set<string>();
+

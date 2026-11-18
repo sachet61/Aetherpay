@@ -11,7 +11,7 @@ import handler, {
   handlePushStatus,
   handlePushNotify,
   sendVercelPushNotification,
-} from './index';
+} from './index.js';
 
 function createMockRes() {
   const headers: Record<string, string> = {};

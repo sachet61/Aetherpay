@@ -506,7 +506,7 @@ class DataService {
     const referralAwardRows = filterRealtimeRowsForUser('referral_awards', rowsByTable['referral_awards'], activeUser);
 
     if (messageRows.length) {
-      this.applyMessageRows(messageRows);
+      this.applyMessageRows(messageRows, true);
       tablesModified.add('messages');
     }
     if (conversationRows.length) {
@@ -917,7 +917,7 @@ class DataService {
           this.reconcileCustomerWallet(currentUserId);
         }
         if (msgsRes.data && msgsRes.data.length > 0) {
-          this.applyMessageRows(msgsRes.data);
+          this.applyMessageRows(msgsRes.data, Boolean(this.lastSyncTimestamp));
           changed = true;
         }
       } else if (isAdmin) {
@@ -1884,12 +1884,13 @@ class DataService {
     this.saveToLocalStorage(STORAGE_KEYS.CONVERSATIONS, cleanList);
   }
 
-  private applyMessageRows(rows: any[]): void {
+  private applyMessageRows(rows: any[], emitIncomingAlerts: boolean = false): void {
     const activeUser = this.getCurrentUser();
     const viewerRole = activeUser?.role || 'customer';
     const currentMsgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
     const msgMap: Record<string, ChatMessage[]> = { ...currentMsgs };
     const touchedIds = new Set<string>();
+    const newlyReceivedAlerts: Array<{ item: ChatMessage; canonicalId: string }> = [];
 
     for (const m of rows) {
       if (!m || !m.id) continue;
@@ -1899,6 +1900,7 @@ class DataService {
         continue;
       }
       const targetIds = Array.from(new Set([m.conversation_id, canonicalId].filter(Boolean)));
+      let isBrandNewMessage = false;
       for (const tid of targetIds) {
         const list = msgMap[tid] ? [...msgMap[tid]] : [];
         const idx = list.findIndex((x) => x.id === item.id);
@@ -1910,9 +1912,24 @@ class DataService {
           });
         } else {
           list.push(item);
+          if (tid === canonicalId) {
+            isBrandNewMessage = true;
+          }
         }
         msgMap[tid] = list;
         touchedIds.add(tid);
+      }
+
+      if (
+        emitIncomingAlerts &&
+        isBrandNewMessage &&
+        activeUser &&
+        shouldAcceptIncomingChatMessage(item, activeUser, { forNotificationAlert: true })
+      ) {
+        const msgAgeMs = Date.now() - (Date.parse(item.createdAt || '') || Date.now());
+        if (msgAgeMs < 120000) {
+          newlyReceivedAlerts.push({ item, canonicalId });
+        }
       }
     }
 
@@ -1925,6 +1942,20 @@ class DataService {
 
     this.cache[STORAGE_KEYS.MESSAGES] = msgMap;
     this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, msgMap);
+
+    if (newlyReceivedAlerts.length > 0 && typeof window !== 'undefined') {
+      for (const alertEntry of newlyReceivedAlerts) {
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: {
+              key: 'chat_incoming',
+              message: alertEntry.item,
+              conversationId: alertEntry.canonicalId,
+            },
+          })
+        );
+      }
+    }
   }
 
   private applyAppConfig(data: any): void {
@@ -6469,6 +6500,7 @@ class DataService {
           const { data: sessionData } = await supabase.auth.getSession();
           if (sessionData?.session?.access_token) {
             sendHeaders['Authorization'] = `Bearer ${sessionData.session.access_token}`;
+            sendHeaders['x-supabase-token'] = sessionData.session.access_token;
           }
         } catch {}
       }

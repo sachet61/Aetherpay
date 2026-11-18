@@ -5,7 +5,7 @@ import {
   handlePostAuditLog,
   writeServerAuditLog,
   resolveVerifiedCallerProfile,
-} from './index';
+} from './index.js';
 
 function createMockRes() {
   const headers: Record<string, string> = {};

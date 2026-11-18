@@ -11,7 +11,7 @@ import {
   handlePostReviewReferral,
   type ReferralCallerProfile,
   type ReferralHandlerDeps,
-} from './referralHandlers';
+} from './referralHandlers.js';
 
 function createMockRes() {
   const headers: Record<string, string> = {};

@@ -76,8 +76,9 @@ export const BackgroundNotificationPrompt: React.FC<BackgroundNotificationPrompt
     setIsLoading(false);
 
     if (res.success) {
+      setIsSubscribed(true);
       setFeedbackMsg({
-        text: 'Test alert sent! Minimize your browser or lock your screen now to see the heads-up banner.',
+        text: res.message,
         type: 'success',
       });
     } else {
@@ -152,7 +153,7 @@ export const BackgroundNotificationPrompt: React.FC<BackgroundNotificationPrompt
 
           {/* Right Action Buttons */}
           <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto justify-end">
-            {permission === 'granted' ? (
+            {permission === 'granted' && isSubscribed ? (
               <button
                 onClick={handleSendTestAlert}
                 disabled={isLoading}

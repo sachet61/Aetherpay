@@ -40,6 +40,8 @@ import {
   Image as ImageIcon,
 } from 'lucide-react';
 import { notificationSoundService } from '../../services/notificationSoundService';
+import { globalNotificationAlertIds } from '../../services/notificationScoping';
+import { claimNotificationAlertId } from '../../utils/browserNotificationUtils';
 import { storageService } from '../../services/storageService';
 import { validateImageFile } from '../../utils/uploadUtils';
 import { toProxyStorageUrl, toDirectSupabaseStorageUrl } from '../../services/storageUrlUtils';
@@ -268,8 +270,17 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
           setMessages((prev) =>
             filterVisibleMessagesForRole(sortAndDeduplicateMessages([...prev, payload], true), 'customer')
           );
-          if (payload.senderRole === 'agent' || payload.senderRole === 'admin') {
+          if (
+            (payload.senderRole === 'agent' || payload.senderRole === 'admin' || payload.senderRole === 'system') &&
+            claimNotificationAlertId(payload.id, globalNotificationAlertIds)
+          ) {
             notificationSoundService.playIncomingMessageSound();
+            if (document.hidden) {
+              notificationSoundService.showDesktopNotification(
+                `Support: ${payload.senderName || 'Support'}`,
+                { body: payload.text || 'You have received a new message.', tag: `msg_${payload.id}` }
+              );
+            }
           }
         },
         onPostgresChange: (payload) => {
@@ -282,12 +293,15 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
             filterVisibleMessagesForRole(sortAndDeduplicateMessages([...prev, incoming], true), 'customer')
           );
 
-          if (incoming.senderRole === 'agent' || incoming.senderRole === 'admin') {
+          if (
+            (incoming.senderRole === 'agent' || incoming.senderRole === 'admin' || incoming.senderRole === 'system') &&
+            claimNotificationAlertId(incoming.id, globalNotificationAlertIds)
+          ) {
             notificationSoundService.playIncomingMessageSound();
             if (document.hidden) {
               notificationSoundService.showDesktopNotification(
-                `Support: ${incoming.senderName}`,
-                { body: incoming.text }
+                `Support: ${incoming.senderName || 'Support'}`,
+                { body: incoming.text || 'You have received a new message.', tag: `msg_${incoming.id}` }
               );
             }
           }

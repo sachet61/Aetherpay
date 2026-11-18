@@ -8,7 +8,7 @@ import {
   normalizeReferralCodeInput,
   normalizeReferralConfig,
   normalizeReferralLedgerRow,
-} from '../src/utils/referralUtils';
+} from '../src/utils/referralUtils.js';
 import type {
   ReferralLedgerEntry,
   ReferralPayoutTarget,

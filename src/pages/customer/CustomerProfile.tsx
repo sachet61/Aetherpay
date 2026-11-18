@@ -87,9 +87,14 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
   React.useEffect(() => {
     if (typeof window !== 'undefined' && webPushClient.isPushSupported()) {
       webPushClient.hasActiveSubscription().then((active) => {
-        setIsPushActive(active || Notification.permission === 'granted');
+        setIsPushActive(active);
         if (active || Notification.permission === 'granted') {
-          webPushClient.autoSyncIfGranted(currentUser).catch(() => {});
+          webPushClient
+            .autoSyncIfGranted(currentUser)
+            .then((synced) => {
+              if (synced) setIsPushActive(true);
+            })
+            .catch(() => {});
         }
       });
     }
