@@ -53,6 +53,12 @@ import {
   mergeSingleMessage,
 } from './chatOrderUtils';
 import {
+  filterVisibleMessagesForRole,
+  isMessageInternalNote,
+  normalizeTicketStatus,
+  type TicketStatusValue,
+} from '../utils/chatPresentationUtils';
+import {
   mergeWithdrawalRequests,
   mergeTopupRequests,
   findRequestById,
@@ -950,6 +956,9 @@ class DataService {
         }
       }
 
+      const activeUser = this.getCurrentUser();
+      const viewerRole = activeUser?.role || 'customer';
+
       const persistAndReturnMerged = (remoteRows: any[]): ChatMessage[] => {
         const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
         const existingPool: ChatMessage[] = [];
@@ -958,9 +967,11 @@ class DataService {
             existingPool.push(...all[cid]);
           }
         }
-        const remoteMsgs = (remoteRows || []).map((row) => mapDbMessageRowToChatMessage(row, targetConvId));
+        const mappedRemote = (remoteRows || []).map((row) => mapDbMessageRowToChatMessage(row, targetConvId));
+        const remoteMsgs = filterVisibleMessagesForRole(mappedRemote, viewerRole);
+        const filteredPool = filterVisibleMessagesForRole(existingPool, viewerRole);
         const shouldPruneSnapshot = !options?.beforeCreatedAt && !options?.afterCreatedAt;
-        const merged = mergeAuthoritativeMessages(existingPool, remoteMsgs, targetConvId, {
+        const merged = mergeAuthoritativeMessages(filteredPool, remoteMsgs, targetConvId, {
           pruneToServerSnapshot: shouldPruneSnapshot,
           pageLimit: limit,
         });
@@ -982,6 +993,22 @@ class DataService {
         return this.getMessages(targetConvId);
       };
 
+      const buildChatAuthHeaders = async (): Promise<Record<string, string>> => {
+        const headers: Record<string, string> = { 'Cache-Control': 'no-cache' };
+        if (activeUser?.id) headers['x-user-id'] = activeUser.id;
+        if (activeUser?.role) headers['x-user-role'] = activeUser.role;
+        if (supabase && isSupabaseConfigured()) {
+          try {
+            const { data } = await supabase.auth.getSession();
+            const token = data?.session?.access_token;
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+          } catch {
+            // Optional session header
+          }
+        }
+        return headers;
+      };
+
       // 1. Authoritative cross-browser fetch via server endpoint (Service Role + Cache-Control: no-store)
       try {
         const queryCustId = customerId || (targetConvId.startsWith('conv_') ? targetConvId.replace(/^conv_/, '') : '');
@@ -990,12 +1017,13 @@ class DataService {
           customerId: queryCustId || '',
           limit: String(limit),
         });
+        if (activeUser?.id) params.set('userId', activeUser.id);
         if (options?.beforeCreatedAt) params.set('beforeCreatedAt', options.beforeCreatedAt);
         if (options?.afterCreatedAt) params.set('afterCreatedAt', options.afterCreatedAt);
 
         const srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
           cache: 'no-store',
-          headers: { 'Cache-Control': 'no-cache' },
+          headers: await buildChatAuthHeaders(),
         });
         if (srvRes.ok) {
           const srvData = await srvRes.json();
@@ -1086,33 +1114,28 @@ class DataService {
     limit: number = 50,
     beforeId?: string
   ): Promise<{ newCount: number; hasMore: boolean }> {
-    if (!supabase || !isSupabaseConfigured() || !conversationId || !beforeCreatedAt) {
+    if (!conversationId || !beforeCreatedAt) {
       return { newCount: 0, hasMore: false };
     }
 
-    try {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('conversation_id', conversationId)
-        .lt('created_at', beforeCreatedAt)
-        .order('created_at', { ascending: false })
-        .limit(limit);
+    const activeUser = this.getCurrentUser();
+    const viewerRole = activeUser?.role || 'customer';
+    const canonicalId = this.resolveCanonicalConvId(conversationId);
 
-      if (error || !data) {
-        console.warn('fetchOlderMessages notice:', error);
-        return { newCount: 0, hasMore: false };
-      }
+    const applyOlderRows = (rows: any[], hasMoreFlag: boolean) => {
+      const filteredData = beforeId ? rows.filter((row: any) => row.id !== beforeId) : rows;
+      const mapped = filterVisibleMessagesForRole(
+        filteredData.map((row: any) => mapDbMessageRowToChatMessage(row, canonicalId)),
+        viewerRole
+      );
 
-      // Filter out beforeId if edge collision occurs on identical timestamps
-      const filteredData = beforeId ? data.filter((row: any) => row.id !== beforeId) : data;
-
-      if (filteredData.length > 0) {
-        const canonicalId = this.resolveCanonicalConvId(conversationId);
+      if (mapped.length > 0) {
         const all = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
-        const currentList = all[canonicalId] || all[conversationId] || [];
-        const remoteMapped = filteredData.map((row: any) => mapDbMessageRowToChatMessage(row, canonicalId));
-        const merged = mergeAuthoritativeMessages(currentList, remoteMapped, canonicalId);
+        const currentList = filterVisibleMessagesForRole(
+          all[canonicalId] || all[conversationId] || [],
+          viewerRole
+        );
+        const merged = mergeAuthoritativeMessages(currentList, mapped, canonicalId);
 
         all[canonicalId] = merged;
         if (conversationId !== canonicalId) {
@@ -1122,12 +1145,66 @@ class DataService {
         this.saveToLocalStorage(STORAGE_KEYS.MESSAGES, all);
         window.dispatchEvent(
           new CustomEvent('aetherpay_state_changed', {
-            detail: { key: 'conversation_messages_fetched', conversationId: canonicalId, count: filteredData.length },
+            detail: { key: 'conversation_messages_fetched', conversationId: canonicalId, count: mapped.length },
           })
         );
       }
 
-      return { newCount: filteredData.length, hasMore: filteredData.length === limit };
+      return { newCount: mapped.length, hasMore: hasMoreFlag };
+    };
+
+    try {
+      const headers: Record<string, string> = { 'Cache-Control': 'no-cache' };
+      if (activeUser?.id) headers['x-user-id'] = activeUser.id;
+      if (activeUser?.role) headers['x-user-role'] = activeUser.role;
+      if (supabase && isSupabaseConfigured()) {
+        try {
+          const { data: sessionData } = await supabase.auth.getSession();
+          if (sessionData?.session?.access_token) {
+            headers['Authorization'] = `Bearer ${sessionData.session.access_token}`;
+          }
+        } catch {}
+      }
+
+      const params = new URLSearchParams({
+        conversationId: canonicalId,
+        beforeCreatedAt,
+        limit: String(limit),
+      });
+      if (activeUser?.id) params.set('userId', activeUser.id);
+      const srvRes = await fetch(`/api/chat/messages?${params.toString()}`, {
+        cache: 'no-store',
+        headers,
+      });
+      if (srvRes.ok) {
+        const srvJson = await srvRes.json();
+        if (srvJson.success && Array.isArray(srvJson.messages)) {
+          return applyOlderRows(srvJson.messages, Boolean(srvJson.hasMore));
+        }
+      }
+    } catch {
+      // Fallback to direct Supabase query below
+    }
+
+    if (!supabase || !isSupabaseConfigured()) {
+      return { newCount: 0, hasMore: false };
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', canonicalId)
+        .lt('created_at', beforeCreatedAt)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (error || !data) {
+        console.warn('fetchOlderMessages notice:', error);
+        return { newCount: 0, hasMore: false };
+      }
+
+      return applyOlderRows(data, data.length === limit);
     } catch (e) {
       console.warn('fetchOlderMessages exception:', e);
       return { newCount: 0, hasMore: false };
@@ -1742,6 +1819,8 @@ class DataService {
   }
 
   private applyMessageRows(rows: any[]): void {
+    const activeUser = this.getCurrentUser();
+    const viewerRole = activeUser?.role || 'customer';
     const currentMsgs = this.load<Record<string, ChatMessage[]>>(STORAGE_KEYS.MESSAGES, INITIAL_MESSAGES);
     const msgMap: Record<string, ChatMessage[]> = { ...currentMsgs };
     const touchedIds = new Set<string>();
@@ -1750,6 +1829,9 @@ class DataService {
       if (!m || !m.id) continue;
       const canonicalId = this.resolveCanonicalConvId(m.conversation_id);
       const item = mapDbMessageRowToChatMessage(m, canonicalId);
+      if (viewerRole === 'customer' && isMessageInternalNote(item)) {
+        continue;
+      }
       const targetIds = Array.from(new Set([m.conversation_id, canonicalId].filter(Boolean)));
       for (const tid of targetIds) {
         const list = msgMap[tid] ? [...msgMap[tid]] : [];
@@ -1769,7 +1851,10 @@ class DataService {
     }
 
     for (const tid of touchedIds) {
-      msgMap[tid] = sortAndDeduplicateMessages(msgMap[tid] || [], true);
+      msgMap[tid] = filterVisibleMessagesForRole(
+        sortAndDeduplicateMessages(msgMap[tid] || [], true),
+        viewerRole
+      );
     }
 
     this.cache[STORAGE_KEYS.MESSAGES] = msgMap;
@@ -6175,7 +6260,9 @@ class DataService {
       ...(targetId && Array.isArray(all[targetId]) ? all[targetId] : []),
       ...(conversationId && conversationId !== targetId && Array.isArray(all[conversationId]) ? all[conversationId] : []),
     ];
-    return sortAndDeduplicateMessages(combined, true);
+    const sorted = sortAndDeduplicateMessages(combined, true);
+    const activeUser = this.getCurrentUser();
+    return filterVisibleMessagesForRole(sorted, activeUser?.role);
   }
 
   private updateCachedMessageDelivery(
@@ -6249,10 +6336,23 @@ class DataService {
 
     // 1. Authoritative server write with deterministic client ID (guarantees parent users + conversations FK)
     try {
+      const sendHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      const currentActor = this.getCurrentUser();
+      if (currentActor?.id) sendHeaders['x-user-id'] = currentActor.id;
+      if (currentActor?.role) sendHeaders['x-user-role'] = currentActor.role;
+      if (supabase && isSupabaseConfigured()) {
+        try {
+          const { data: sessionData } = await supabase.auth.getSession();
+          if (sessionData?.session?.access_token) {
+            sendHeaders['Authorization'] = `Bearer ${sessionData.session.access_token}`;
+          }
+        } catch {}
+      }
+
       const srvRes = await fetch('/api/chat/send', {
         method: 'POST',
         cache: 'no-store',
-        headers: { 'Content-Type': 'application/json' },
+        headers: sendHeaders,
         body: JSON.stringify({
           id: newMsg.id,
           conversationId: targetConvId,
@@ -6318,6 +6418,7 @@ class DataService {
           content: newMsg.text,
           attachment_url: normalizedAttachmentUrl || null,
           attachment_name: newMsg.attachmentName || null,
+          is_internal_note: Boolean(newMsg.isInternalNote),
           transaction_data: txPayload,
           created_at: newMsg.createdAt,
         };
@@ -6333,10 +6434,12 @@ class DataService {
           (directErr.code === '42703' ||
             directErr.code === 'PGRST204' ||
             String(directErr.message || '').includes('attachment_url') ||
-            String(directErr.message || '').includes('attachment_name'))
+            String(directErr.message || '').includes('attachment_name') ||
+            String(directErr.message || '').includes('is_internal_note'))
         ) {
           delete directRow.attachment_url;
           delete directRow.attachment_name;
+          delete directRow.is_internal_note;
           const retryRes = await supabase
             .from('messages')
             .upsert(directRow, { onConflict: 'id' })
@@ -6372,9 +6475,12 @@ class DataService {
           deliveryError: undefined,
         })) || confirmedMsg;
 
-      // Broadcast via ref-counted, collision-free Realtime hub on aligned topics
+      // Broadcast via ref-counted, collision-free Realtime hub on aligned topics.
+      // Security invariant: NEVER broadcast internal notes to customer room `chat_${targetConvId}`.
       if (supabase && isSupabaseConfigured()) {
-        void realtimeChatHub.broadcastMessage(`chat_${targetConvId}`, updated);
+        if (!updated.isInternalNote) {
+          void realtimeChatHub.broadcastMessage(`chat_${targetConvId}`, updated);
+        }
         void realtimeChatHub.broadcastMessage('room_admin_support', updated);
       }
 
@@ -6567,10 +6673,15 @@ class DataService {
 
   public appendIncomingMessage(msg: ChatMessage): void {
     if (!msg || !msg.conversationId || !msg.id) return;
+    const activeUser = this.getCurrentUser();
+    if (activeUser?.role === 'customer' && isMessageInternalNote(msg)) {
+      return;
+    }
     const targetConvId = this.resolveCanonicalConvId(msg.conversationId);
     const normalizedMsg: ChatMessage = {
       ...msg,
       conversationId: targetConvId,
+      isInternalNote: isMessageInternalNote(msg),
       deliveryStatus: 'sent',
       deliveryError: undefined,
     };
@@ -6787,6 +6898,89 @@ class DataService {
         })
       );
     }
+  }
+
+  public async updateConversationStatusAsync(
+    conversationId: string,
+    status: TicketStatusValue
+  ): Promise<{ success: boolean; status?: TicketStatusValue; message?: string }> {
+    const actingUser = this.getCurrentUser();
+    if (!actingUser || (actingUser.role !== 'agent' && actingUser.role !== 'admin')) {
+      return { success: false, message: 'Only support staff can update ticket status.' };
+    }
+    const targetConvId = this.resolveCanonicalConvId(conversationId);
+    const normalizedStatus = normalizeTicketStatus(status);
+    let persisted = false;
+    let errorMessage = '';
+
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-user-id': actingUser.id,
+        'x-user-role': actingUser.role,
+      };
+      if (supabase && isSupabaseConfigured()) {
+        try {
+          const { data: sessionData } = await supabase.auth.getSession();
+          if (sessionData?.session?.access_token) {
+            headers['Authorization'] = `Bearer ${sessionData.session.access_token}`;
+          }
+        } catch {}
+      }
+      const res = await fetch('/api/chat/conversation-status', {
+        method: 'PATCH',
+        cache: 'no-store',
+        headers,
+        body: JSON.stringify({
+          conversationId: targetConvId,
+          status: normalizedStatus,
+          actingUserId: actingUser.id,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json?.success) {
+        persisted = true;
+      } else {
+        errorMessage = json?.error || `Failed to update status (${res.status})`;
+      }
+    } catch (err: any) {
+      errorMessage = err?.message || 'Network error updating ticket status';
+    }
+
+    if (!persisted && supabase && isSupabaseConfigured()) {
+      try {
+        const { error } = await supabase
+          .from('conversations')
+          .update({ status: normalizedStatus })
+          .eq('id', targetConvId);
+        if (!error) {
+          persisted = true;
+        } else {
+          errorMessage = error.message || errorMessage;
+        }
+      } catch (fbErr: any) {
+        errorMessage = fbErr?.message || errorMessage;
+      }
+    }
+
+    if (!persisted && isSupabaseConfigured()) {
+      return { success: false, message: errorMessage || 'Unable to persist ticket status change.' };
+    }
+
+    const conversations = this.getConversations();
+    const conv = conversations.find((c) => c.id === targetConvId || c.id === conversationId);
+    if (conv) {
+      conv.status = normalizedStatus;
+      conv.updatedAt = new Date().toISOString();
+      this.save(STORAGE_KEYS.CONVERSATIONS, conversations, true);
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'conversation_status_updated', conversationId: targetConvId, status: normalizedStatus },
+        })
+      );
+    }
+
+    return { success: true, status: normalizedStatus };
   }
 
   // Notifications

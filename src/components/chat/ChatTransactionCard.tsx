@@ -240,35 +240,35 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
 
   return (
     <>
-      <div className="mt-2.5 w-full rounded-2xl bg-slate-950/90 border border-slate-800 p-3.5 shadow-xl text-left select-text">
+      <div className="mt-2.5 w-full rounded-2xl bg-[#070D20]/95 border border-slate-700/75 p-3.5 shadow-lg text-left select-text text-[#F8FAFC]">
         {/* Card Header */}
         <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-800/80">
           <div className="flex items-center gap-2">
             <div
               className={`w-7 h-7 rounded-xl flex items-center justify-center shrink-0 ${
                 isTopUp
-                  ? 'bg-amber-950/60 text-amber-400 border border-amber-500/30'
+                  ? 'bg-[#5036F5]/20 text-indigo-300 border border-[#5036F5]/40'
                   : 'bg-emerald-950 text-emerald-400 border border-emerald-800'
               }`}
             >
               {isTopUp ? <Gamepad2 className="w-3.5 h-3.5" /> : <ArrowUpFromLine className="w-3.5 h-3.5" />}
             </div>
             <div>
-              <div className="text-xs font-bold text-white flex items-center gap-1.5">
+              <div className="text-xs font-bold text-[#F8FAFC] flex items-center gap-1.5 flex-wrap">
                 <span>{isTopUp ? 'Game Top-Up Request' : 'Game Cashout Request'}</span>
-                <span className="font-mono text-[10px] text-slate-400">
+                <span className="font-mono text-[10px] text-[#77839F]">
                   #{transaction.requestId.slice(-6)}
                 </span>
               </div>
-              <div className="text-[10px] text-slate-400">Forwarded to Support Desk</div>
+              <div className="text-[10px] text-[#77839F]">Forwarded to Support Desk</div>
             </div>
           </div>
 
           {/* Status Badge */}
           {isPending && (
-            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30 animate-pulse">
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
               <Clock className="w-3 h-3" />
-              <span>PENDING APPROVAL</span>
+              <span>PENDING</span>
             </span>
           )}
           {isCompleted && (
@@ -288,21 +288,21 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
         {/* Transaction Details Grid */}
         <div className="py-2.5 grid grid-cols-2 gap-2 text-[11px]">
           {/* Game */}
-          <div className="p-2 rounded-xl bg-slate-900/80 border border-slate-800/80">
-            <span className="text-[10px] text-slate-400 block">Game Platform</span>
-            <span className="font-bold text-white truncate block">
+          <div className="p-2 rounded-xl bg-[#10182D] border border-slate-800/80">
+            <span className="text-[10px] text-[#77839F] block">Game Platform</span>
+            <span className="font-bold text-[#F8FAFC] truncate block">
               {transaction.gameName || 'Selected Game'}
             </span>
             {transaction.gameUsername && (
-              <span className="text-[10px] text-amber-300 font-mono block truncate">
+              <span className="text-[10px] text-indigo-300 font-mono block truncate">
                 ID: {transaction.gameUsername}
               </span>
             )}
           </div>
 
           {/* Amount & Bonus */}
-          <div className="p-2 rounded-xl bg-slate-900/80 border border-slate-800/80">
-            <span className="text-[10px] text-slate-400 block">
+          <div className="p-2 rounded-xl bg-[#10182D] border border-slate-800/80">
+            <span className="text-[10px] text-[#77839F] block">
               {isTopUp ? 'Deposit & Bonus' : 'Requested Cashout'}
             </span>
             <div className="font-bold text-emerald-400 font-mono text-xs">
@@ -326,14 +326,14 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
           </div>
 
           {/* Payment Method */}
-          <div className="p-2 rounded-xl bg-slate-900/80 border border-slate-800/80 col-span-2 flex items-center justify-between gap-2">
-            <div>
-              <span className="text-[10px] text-slate-400 block">Payment Method</span>
-              <span className="font-semibold text-slate-200">
+          <div className="p-2 rounded-xl bg-[#10182D] border border-slate-800/80 col-span-2 flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <span className="text-[10px] text-[#77839F] block">Payment Method</span>
+              <span className="font-semibold text-slate-200 truncate block">
                 {transaction.methodName || 'Support Manual'}
               </span>
               {transaction.details && (
-                <span className="text-[10px] text-slate-400 font-mono block truncate max-w-xs">
+                <span className="text-[10px] text-[#77839F] font-mono block truncate max-w-xs">
                   {transaction.details}
                 </span>
               )}
@@ -341,8 +341,8 @@ export const ChatTransactionCard: React.FC<ChatTransactionCardProps> = ({
 
             {/* Total Game Credits Credited */}
             {isTopUp && (
-              <div className="text-right">
-                <span className="text-[10px] text-slate-400 block">Total Game Credits</span>
+              <div className="text-right shrink-0">
+                <span className="text-[10px] text-[#77839F] block">Total Game Credits</span>
                 <span className="font-bold text-emerald-400 font-mono text-sm">
                   {transaction.amount === 0 && isPending
                     ? 'Verify from Proof'

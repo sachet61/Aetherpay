@@ -5,6 +5,7 @@ import { notificationSoundService } from '../../services/notificationSoundServic
 import { isSupabaseConfigured } from '../../services/supabaseClient';
 import { realtimeChatHub } from '../../services/chatRealtime';
 import { mapDbMessageRowToChatMessage } from '../../services/chatOrderUtils';
+import { isMessageInternalNote } from '../../utils/chatPresentationUtils';
 import { Headphones, MessageSquare, X, ArrowRight, Bell } from 'lucide-react';
 
 interface GlobalChatNotificationManagerProps {
@@ -128,6 +129,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
             {
               onBroadcast: (payload) => {
                 if (payload && payload.id) {
+                  if (isMessageInternalNote(payload)) return;
                   dataService.appendIncomingMessage(payload);
                   handleIncomingMessage(payload);
                 }
@@ -136,6 +138,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
                 const raw = payload?.new;
                 if (raw && raw.id && raw.sender_id !== currentUser.id) {
                   const formattedMsg = mapDbMessageRowToChatMessage(raw, canonicalConvId);
+                  if (isMessageInternalNote(formattedMsg)) return;
                   dataService.appendIncomingMessage(formattedMsg);
                   handleIncomingMessage(formattedMsg);
                 }
@@ -195,17 +198,17 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
 
   return (
     <div className="fixed top-18 sm:top-20 right-4 sm:right-6 z-50 max-w-sm w-full animate-in slide-in-from-top-4 fade-in duration-300">
-      <div className="p-4 rounded-2xl bg-[#0E1726]/98 border border-amber-500/40 shadow-2xl shadow-black/80 backdrop-blur-xl flex items-start gap-3.5 ring-1 ring-amber-500/20">
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-yellow-500 text-slate-950 flex items-center justify-center shrink-0 shadow-md shadow-amber-500/30">
+      <div className="p-4 rounded-2xl bg-[#10182D]/98 border border-[#5036F5]/45 shadow-2xl shadow-black/80 backdrop-blur-xl flex items-start gap-3.5 ring-1 ring-[#5036F5]/20">
+        <div className="w-10 h-10 rounded-xl bg-[#5036F5] text-white flex items-center justify-center shrink-0 shadow-md shadow-[#5036F5]/30">
           <Headphones className="w-5 h-5" />
         </div>
 
         <div className="flex-1 min-w-0 pr-1">
           <div className="flex items-center justify-between gap-1 mb-0.5">
-            <h4 className="text-xs font-bold text-white truncate">
+            <h4 className="text-xs font-bold text-[#F8FAFC] truncate">
               {activeToast.senderName}
             </h4>
-            <span className="text-[10px] font-mono text-amber-400 bg-amber-500/10 px-1.5 py-0.2 rounded border border-amber-500/20 shrink-0">
+            <span className="text-[10px] font-mono text-indigo-300 bg-[#5036F5]/15 px-1.5 py-0.2 rounded border border-[#5036F5]/30 shrink-0">
               New Message
             </span>
           </div>
@@ -224,7 +227,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
                   onNavigateTab('ops_chat', { highlightConvId: activeToast.conversationId });
                 }
               }}
-              className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 text-xs font-bold flex items-center gap-1.5 hover:brightness-110 active:scale-95 transition-all shadow-sm"
+              className="px-3 py-1.5 rounded-lg bg-[#5036F5] hover:bg-[#5538F8] text-white text-xs font-bold flex items-center gap-1.5 active:scale-95 transition-all shadow-sm"
             >
               <span>Open Chat</span>
               <ArrowRight className="w-3.5 h-3.5" />

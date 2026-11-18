@@ -337,7 +337,69 @@ function enrichMessageRowForClient(row: any): any {
   };
 }
 
-export async function handleGetChatMessages(adminClient: any, parsedUrl: URL, res: any) {
+export function isInternalNoteMessageRow(row: any): boolean {
+  if (!row || typeof row !== 'object') return false;
+  const parsedTx = parseJsonObject(row.transaction_data ?? row.transactionData);
+  return Boolean(
+    row.is_internal_note ||
+      row.isInternalNote ||
+      parsedTx?.isInternalNote ||
+      parsedTx?.is_internal_note
+  );
+}
+
+export async function resolveVerifiedCallerRole(
+  adminClient: any,
+  context?: { headers?: Record<string, any>; viewerUserId?: string }
+): Promise<'admin' | 'agent' | 'customer' | 'anonymous'> {
+  const headers = context?.headers || {};
+  const rawAuth = String(headers.authorization || headers.Authorization || '').trim();
+  const bearerToken = rawAuth.toLowerCase().startsWith('bearer ') ? rawAuth.slice(7).trim() : '';
+
+  if (bearerToken && typeof adminClient?.auth?.getUser === 'function') {
+    try {
+      const { data: authData, error: authErr } = await adminClient.auth.getUser(bearerToken);
+      const authUser = !authErr ? authData?.user : null;
+      if (authUser?.id) {
+        const { data: dbUser } = await adminClient
+          .from('users')
+          .select('id, role, email')
+          .eq('id', authUser.id)
+          .maybeSingle();
+        const email = String(dbUser?.email || authUser.email || '').toLowerCase();
+        const role = dbUser?.role || authUser.user_metadata?.role;
+        if (role === 'admin' || email === 'sachet61@gmail.com') return 'admin';
+        if (role === 'agent') return 'agent';
+        return 'customer';
+      }
+    } catch {
+      // Fall through cleanly if token validation fails
+    }
+  }
+
+  const candidateUserId = String(headers['x-user-id'] || context?.viewerUserId || '').trim();
+  if (candidateUserId) {
+    try {
+      const { data: dbUser } = await adminClient
+        .from('users')
+        .select('id, role, email')
+        .eq('id', candidateUserId)
+        .maybeSingle();
+      if (dbUser) {
+        const email = String(dbUser.email || '').toLowerCase();
+        if (dbUser.role === 'admin' || email === 'sachet61@gmail.com') return 'admin';
+        if (dbUser.role === 'agent') return 'agent';
+        return 'customer';
+      }
+    } catch {
+      // Fall through to anonymous
+    }
+  }
+
+  return 'anonymous';
+}
+
+export async function handleGetChatMessages(adminClient: any, parsedUrl: URL, res: any, req?: any) {
   setNoStoreHeaders(res);
   try {
     const customerId = (parsedUrl.searchParams.get('customerId') || '').trim();
@@ -350,6 +412,12 @@ export async function handleGetChatMessages(adminClient: any, parsedUrl: URL, re
     if (!customerId && !conversationId) {
       return res.status(400).json({ error: 'customerId or conversationId is required' });
     }
+
+    const callerRole = await resolveVerifiedCallerRole(adminClient, {
+      headers: req?.headers,
+      viewerUserId: (parsedUrl.searchParams.get('userId') || '').trim() || undefined,
+    });
+    const includeInternalNotes = callerRole === 'admin' || callerRole === 'agent';
 
     const effectiveCustomerId =
       customerId || conversationId.replace(/^conv_cust_/, '').replace(/^conv_/, '');
@@ -390,7 +458,10 @@ export async function handleGetChatMessages(adminClient: any, parsedUrl: URL, re
       return res.status(500).json({ error: msgErr.message, code: msgErr.code });
     }
 
-    const sortedMessages = sortRawMessagesChronologically(messages || []).map(enrichMessageRowForClient);
+    const enrichedMessages = sortRawMessagesChronologically(messages || []).map(enrichMessageRowForClient);
+    const sortedMessages = includeInternalNotes
+      ? enrichedMessages
+      : enrichedMessages.filter((m: any) => !isInternalNoteMessageRow(m));
 
     // Hydrate topup receipt proof_url onto transaction cards if linked topup request exists without proofUrl
     const missingTopupIds = sortedMessages
@@ -452,7 +523,7 @@ export async function handleGetChatMessages(adminClient: any, parsedUrl: URL, re
   }
 }
 
-export async function handlePostChatSend(adminClient: any, body: any, res: any) {
+export async function handlePostChatSend(adminClient: any, body: any, res: any, req?: any) {
   setNoStoreHeaders(res);
   try {
     const {
@@ -475,6 +546,22 @@ export async function handlePostChatSend(adminClient: any, body: any, res: any) 
 
     if (!senderId) {
       return res.status(400).json({ error: 'senderId is required' });
+    }
+
+    const parsedTxRaw = parseJsonObject(transactionData);
+    const wantsInternalNote = Boolean(isInternalNote || parsedTxRaw?.isInternalNote || parsedTxRaw?.is_internal_note);
+    if (wantsInternalNote) {
+      const callerRole = await resolveVerifiedCallerRole(adminClient, {
+        headers: req?.headers,
+        viewerUserId: String(senderId).trim(),
+      });
+      const isDeclaredStaff = senderRole === 'agent' || senderRole === 'admin';
+      const isVerifiedStaff = callerRole === 'agent' || callerRole === 'admin';
+      if (!isDeclaredStaff || !isVerifiedStaff) {
+        return res.status(403).json({
+          error: 'Forbidden: Only verified support agents or administrators can create internal notes.',
+        });
+      }
     }
 
     const textStr = typeof text === 'string' ? text : '';
@@ -580,7 +667,7 @@ export async function handlePostChatSend(adminClient: any, body: any, res: any) 
     // 2. Guarantee parent public.conversations row exists BEFORE inserting into messages
     const { data: existingConv, error: existingConvErr } = await adminClient
       .from('conversations')
-      .select('id, customer_name, status, last_message')
+      .select('id, customer_name, status, last_message, last_message_at')
       .eq('id', canonicalConvId)
       .maybeSingle();
 
@@ -601,10 +688,12 @@ export async function handlePostChatSend(adminClient: any, body: any, res: any) 
       id: canonicalConvId,
       customer_id: customerId,
       customer_name: customerDisplayName,
-      last_message: isInternalNote
+      last_message: wantsInternalNote
         ? existingConv?.last_message || ''
         : textStr.trim() || (attachmentUrl ? '[Photo Attachment]' : ''),
-      last_message_at: now,
+      last_message_at: wantsInternalNote && existingConv?.last_message_at
+        ? existingConv.last_message_at
+        : now,
       status: existingConv?.status || 'open',
     };
 
@@ -719,6 +808,54 @@ export async function handlePostChatSend(adminClient: any, body: any, res: any) 
     return res.status(200).json({ success: true, message: enrichedSaved, canonicalId: canonicalConvId });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Failed to dispatch chat message' });
+  }
+}
+
+export async function handleUpdateConversationStatus(adminClient: any, body: any, res: any, req?: any) {
+  setNoStoreHeaders(res);
+  try {
+    const { conversationId, status, actingUserId } = body || {};
+    const validStatuses = new Set(['open', 'pending', 'resolved', 'closed']);
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    const convId = String(conversationId || '').trim();
+
+    if (!convId) {
+      return res.status(400).json({ error: 'conversationId is required' });
+    }
+    if (!validStatuses.has(normalizedStatus)) {
+      return res.status(400).json({ error: 'status must be one of open, pending, resolved, or closed' });
+    }
+
+    const callerRole = await resolveVerifiedCallerRole(adminClient, {
+      headers: req?.headers,
+      viewerUserId: String(actingUserId || '').trim() || undefined,
+    });
+    if (callerRole !== 'admin' && callerRole !== 'agent') {
+      return res.status(403).json({
+        error: 'Forbidden: Only verified support agents or administrators can update ticket status.',
+      });
+    }
+
+    const customerId = convId.replace(/^conv_cust_/, '').replace(/^conv_/, '');
+    const canonicalConvId = convId.startsWith('conv_') ? `conv_${customerId}` : convId;
+
+    const { data: updated, error } = await adminClient
+      .from('conversations')
+      .update({ status: normalizedStatus })
+      .in('id', Array.from(new Set([convId, canonicalConvId])))
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      return res.status(500).json({ error: error.message || 'Failed to update conversation status' });
+    }
+    if (!updated) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    return res.status(200).json({ success: true, conversation: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to update conversation status' });
   }
 }
 
@@ -1529,7 +1666,10 @@ export default async function handler(req: any, res: any) {
   if (url.includes('/api/push/notify') && req.method === 'POST') {
     try {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      const { recipientId, recipientRole, userEmail, title, body: msgBody, url: targetUrl, tag, conversationId } = body || {};
+      const { recipientId, recipientRole, userEmail, title, body: msgBody, url: targetUrl, tag, conversationId, isInternalNote } = body || {};
+      if (isInternalNote) {
+        return res.status(200).json({ success: true, skipped: true, sent: 0, failed: 0 });
+      }
       const result = await sendVercelPushNotification(
         recipientId,
         recipientRole,
@@ -1619,11 +1759,15 @@ export default async function handler(req: any, res: any) {
 
   // 7. Chat Consolidation & Guaranteed Parent Conversation Send
   if (url.includes('/api/chat/messages') && req.method === 'GET') {
-    return handleGetChatMessages(supabaseAdmin, parsedUrl, res);
+    return handleGetChatMessages(supabaseAdmin, parsedUrl, res, req);
   }
 
   if (url.includes('/api/chat/send') && req.method === 'POST') {
-    return handlePostChatSend(supabaseAdmin, getBody(req), res);
+    return handlePostChatSend(supabaseAdmin, getBody(req), res, req);
+  }
+
+  if (url.includes('/api/chat/conversation-status') && (req.method === 'PATCH' || req.method === 'POST')) {
+    return handleUpdateConversationStatus(supabaseAdmin, getBody(req), res, req);
   }
 
   // 8. Stateless Telegram Zero-Egress Notification Endpoints (persisted in Supabase app_config)

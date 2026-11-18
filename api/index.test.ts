@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import handler, {
   handleGetChatMessages,
   handlePostChatSend,
+  handleUpdateConversationStatus,
   handleStorageUpload,
   handleStorageFileProxy,
 } from './index';
@@ -59,7 +60,7 @@ function createFakeAdminClient(options?: {
 
   const buildQuery = (table: string) => {
     const state: {
-      op: 'select' | 'upsert' | 'insert';
+      op: 'select' | 'upsert' | 'insert' | 'update';
       payload?: any;
       filters: Array<(row: any) => boolean>;
       orderBy?: { col: string; asc: boolean };
@@ -71,6 +72,25 @@ function createFakeAdminClient(options?: {
     };
 
     const execute = async () => {
+      if (state.op === 'update') {
+        opLog.push(`update:${table}`);
+        const list = tables[table];
+        const updatedRows: any[] = [];
+        for (let i = 0; i < list.length; i++) {
+          if (state.filters.every((fn) => fn(list[i]))) {
+            list[i] = { ...list[i], ...state.payload };
+            updatedRows.push(list[i]);
+          }
+        }
+        if (state.singleMode === 'maybeSingle') {
+          return { data: updatedRows[0] || null, error: null };
+        }
+        if (state.singleMode === 'single') {
+          return updatedRows[0] ? { data: updatedRows[0], error: null } : { data: null, error: { message: 'Row not found' } };
+        }
+        return { data: updatedRows, error: null };
+      }
+
       if (state.op === 'upsert') {
         opLog.push(`upsert:${table}`);
         if (table === 'conversations' && options?.failConvUpsert) {
@@ -168,6 +188,11 @@ function createFakeAdminClient(options?: {
       },
       upsert(payload: any) {
         state.op = 'upsert';
+        state.payload = payload;
+        return builder;
+      },
+      update(payload: any) {
+        state.op = 'update';
         state.payload = payload;
         return builder;
       },
@@ -471,3 +496,179 @@ test('handleGetChatMessages enriches stringified transaction_data and normalizes
   );
   assert.equal(state.body.messages[0].attachment_name, 'ss.webp');
 });
+
+test('handleGetChatMessages excludes internal notes for customers/anonymous callers and includes them for verified staff', async () => {
+  const fake = createFakeAdminClient({
+    initialUsers: [
+      { id: 'u1', email: 'player@test.com', role: 'customer', display_name: 'Player' },
+      { id: 'a1', email: 'agent@test.com', role: 'agent', display_name: 'Agent' },
+    ],
+    initialConversations: [{ id: 'conv_u1', customer_id: 'u1', status: 'open' }],
+    initialMessages: [
+      {
+        id: 'm_public',
+        conversation_id: 'conv_u1',
+        sender_id: 'u1',
+        sender_role: 'customer',
+        content: 'Hello support',
+        is_internal_note: false,
+        created_at: '2026-11-16T09:00:00.000Z',
+      },
+      {
+        id: 'm_internal_col',
+        conversation_id: 'conv_u1',
+        sender_id: 'a1',
+        sender_role: 'agent',
+        content: 'VIP check internal note',
+        is_internal_note: true,
+        created_at: '2026-11-16T09:05:00.000Z',
+      },
+      {
+        id: 'm_internal_tx',
+        conversation_id: 'conv_u1',
+        sender_id: 'a1',
+        sender_role: 'agent',
+        content: 'Team only follow-up',
+        transaction_data: { isInternalNote: true },
+        created_at: '2026-11-16T09:06:00.000Z',
+      },
+    ],
+  });
+
+  // 1. Anonymous request (fail closed)
+  const anon = createMockRes();
+  await handleGetChatMessages(
+    fake.client,
+    new URL('https://localhost/api/chat/messages?conversationId=conv_u1&customerId=u1&limit=20'),
+    anon.res
+  );
+  assert.equal(anon.state.statusCode, 200);
+  assert.deepEqual(
+    anon.state.body.messages.map((m: any) => m.id),
+    ['m_public']
+  );
+
+  // 2. Customer request (even if attempting to pass x-user-role: admin header, DB role is customer)
+  const cust = createMockRes();
+  await handleGetChatMessages(
+    fake.client,
+    new URL('https://localhost/api/chat/messages?conversationId=conv_u1&customerId=u1&limit=20'),
+    cust.res,
+    { headers: { 'x-user-id': 'u1', 'x-user-role': 'admin' } }
+  );
+  assert.equal(cust.state.statusCode, 200);
+  assert.deepEqual(
+    cust.state.body.messages.map((m: any) => m.id),
+    ['m_public']
+  );
+
+  // 3. Verified agent request receives full thread including internal notes
+  const staff = createMockRes();
+  await handleGetChatMessages(
+    fake.client,
+    new URL('https://localhost/api/chat/messages?conversationId=conv_u1&customerId=u1&limit=20'),
+    staff.res,
+    { headers: { 'x-user-id': 'a1' } }
+  );
+  assert.equal(staff.state.statusCode, 200);
+  assert.deepEqual(
+    staff.state.body.messages.map((m: any) => m.id),
+    ['m_public', 'm_internal_col', 'm_internal_tx']
+  );
+});
+
+test('handlePostChatSend rejects customer internal-note creation and preserves customer-facing last_message for staff notes', async () => {
+  const fake = createFakeAdminClient({
+    initialUsers: [
+      { id: 'u1', email: 'player@test.com', role: 'customer', display_name: 'Player' },
+      { id: 'a1', email: 'agent@test.com', role: 'agent', display_name: 'Agent' },
+    ],
+    initialConversations: [
+      {
+        id: 'conv_u1',
+        customer_id: 'u1',
+        customer_name: 'Player',
+        status: 'open',
+        last_message: 'Customer latest question',
+        last_message_at: '2026-11-16T09:00:00.000Z',
+      },
+    ],
+  });
+
+  // Customer trying to forge internal note -> 403
+  const custAttempt = createMockRes();
+  await handlePostChatSend(
+    fake.client,
+    {
+      id: 'msg_forged_note',
+      conversationId: 'conv_u1',
+      senderId: 'u1',
+      senderRole: 'agent',
+      text: 'Forged note',
+      isInternalNote: true,
+    },
+    custAttempt.res,
+    { headers: { 'x-user-id': 'u1' } }
+  );
+  assert.equal(custAttempt.state.statusCode, 403);
+  assert.equal(fake.tables.messages.length, 0);
+
+  // Verified agent sending internal note -> 200 and preserves last_message & last_message_at
+  const staffAttempt = createMockRes();
+  await handlePostChatSend(
+    fake.client,
+    {
+      id: 'msg_staff_note',
+      conversationId: 'conv_u1',
+      senderId: 'a1',
+      senderName: 'Agent',
+      senderRole: 'agent',
+      recipientId: 'u1',
+      text: 'Private team verification',
+      isInternalNote: true,
+      createdAt: '2026-11-16T12:00:00.000Z',
+    },
+    staffAttempt.res,
+    { headers: { 'x-user-id': 'a1' } }
+  );
+  assert.equal(staffAttempt.state.statusCode, 200);
+  assert.equal(fake.tables.conversations[0].last_message, 'Customer latest question');
+  assert.equal(fake.tables.conversations[0].last_message_at, '2026-11-16T09:00:00.000Z');
+});
+
+test('handleUpdateConversationStatus enforces staff authorization and persists valid statuses', async () => {
+  const fake = createFakeAdminClient({
+    initialUsers: [
+      { id: 'u1', email: 'player@test.com', role: 'customer', display_name: 'Player' },
+      { id: 'a1', email: 'agent@test.com', role: 'agent', display_name: 'Agent' },
+    ],
+    initialConversations: [{ id: 'conv_u1', customer_id: 'u1', status: 'open' }],
+  });
+
+  const custRes = createMockRes();
+  await handleUpdateConversationStatus(
+    fake.client,
+    { conversationId: 'conv_u1', status: 'resolved', actingUserId: 'u1' },
+    custRes.res
+  );
+  assert.equal(custRes.state.statusCode, 403);
+
+  const badRes = createMockRes();
+  await handleUpdateConversationStatus(
+    fake.client,
+    { conversationId: 'conv_u1', status: 'invalid_state', actingUserId: 'a1' },
+    badRes.res
+  );
+  assert.equal(badRes.state.statusCode, 400);
+
+  const okRes = createMockRes();
+  await handleUpdateConversationStatus(
+    fake.client,
+    { conversationId: 'conv_u1', status: 'pending', actingUserId: 'a1' },
+    okRes.res
+  );
+  assert.equal(okRes.state.statusCode, 200);
+  assert.equal(okRes.state.body.conversation.status, 'pending');
+  assert.equal(fake.tables.conversations[0].status, 'pending');
+});
+
