@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { UserProfile } from '../../types';
 import { dataService } from '../../services/dataService';
 import { RealtimeSyncBadge } from '../../components/common/RealtimeSyncBadge';
+import { AdminReferralGovernancePanel } from '../../components/admin/AdminReferralGovernancePanel';
 import {
   ShieldAlert,
   ArrowDownToLine,
@@ -33,11 +34,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 }) => {
   const isAgent = currentUser.role === 'agent';
   const isAdmin = currentUser.role === 'admin';
+  const [auditError, setAuditError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (dataService.getAuditLogs().length === 0) {
+      void dataService.fetchAuditLogsFromServer({ limit: 25 }).then((res) => {
+        if (res.error) setAuditError(res.error);
+        else setAuditError(null);
+      });
+    }
+  }, [isAdmin, currentUser.id]);
 
   const topups = dataService.getTopUpRequests();
   const withdrawals = dataService.getWithdrawalRequests();
   const conversations = dataService.getConversations();
-  const auditLogs = dataService.getAuditLogs().slice(0, 6);
+  const auditLogs = isAdmin ? dataService.getAuditLogs().slice(0, 6) : [];
   const users = dataService.getUsers().filter((u) => u.role === 'customer');
   const pendingGameRequests = dataService.getPendingGameRequests();
   const catalog = dataService.getGameCatalog();
@@ -396,39 +408,82 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Live Audit Trail or Support Summary */}
+        {/* Right Column: Admin-Only System Audit Trail or Agent Operations Summary */}
         <div className="lg:col-span-5 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-bold text-white flex items-center gap-2">
-              <ShieldAlert className="w-4 h-4 text-emerald-400" />
-              <span>{isAdmin ? 'System Audit Trail' : 'Recent Support Activity'}</span>
-            </h2>
-            {isAdmin && (
-              <button
-                onClick={() => onNavigateTab('ops_audit')}
-                className="text-xs text-indigo-400 hover:text-indigo-300 font-medium"
-              >
-                Full Audit Log &rarr;
-              </button>
-            )}
-          </div>
-
-          <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900 space-y-3">
-            {auditLogs.map((log) => (
-              <div key={log.id} className="pb-3 border-b border-slate-800/80 last:border-b-0 last:pb-0 text-xs space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-[10px] text-indigo-400 font-semibold">{log.action}</span>
-                  <span className="text-[10px] text-slate-500 font-mono">
-                    {new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                </div>
-                <p className="text-slate-300 text-[11px] leading-relaxed">{log.details}</p>
-                <div className="text-[10px] text-slate-500">By: {log.actorName} ({log.actorRole})</div>
+          {isAdmin ? (
+            <>
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                  <ShieldAlert className="w-4 h-4 text-emerald-400" />
+                  <span>System Audit Trail</span>
+                </h2>
+                <button
+                  onClick={() => onNavigateTab('ops_audit')}
+                  className="text-xs text-indigo-400 hover:text-indigo-300 font-medium"
+                >
+                  Full Audit Log &rarr;
+                </button>
               </div>
-            ))}
-          </div>
+
+              <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900 space-y-3">
+                {auditError ? (
+                  <div className="text-xs text-rose-400 py-4 text-center">{auditError}</div>
+                ) : auditLogs.length === 0 ? (
+                  <div className="text-xs text-slate-500 py-6 text-center">
+                    No audit events recorded yet.
+                  </div>
+                ) : (
+                  auditLogs.map((log) => (
+                    <div key={log.id} className="pb-3 border-b border-slate-800/80 last:border-b-0 last:pb-0 text-xs space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-[10px] text-indigo-400 font-semibold">{log.action}</span>
+                        <span className="text-[10px] text-slate-500 font-mono">
+                          {new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                      <p className="text-slate-300 text-[11px] leading-relaxed">{log.details}</p>
+                      <div className="text-[10px] text-slate-500">By: {log.actorName} ({log.actorRole})</div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                  <Headphones className="w-4 h-4 text-cyan-400" />
+                  <span>Support Desk Summary</span>
+                </h2>
+                <button
+                  onClick={() => onNavigateTab('ops_chat')}
+                  className="text-xs text-cyan-400 hover:text-cyan-300 font-medium"
+                >
+                  Open Inbox &rarr;
+                </button>
+              </div>
+
+              <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900 space-y-3 text-xs">
+                <div className="flex items-center justify-between py-2 border-b border-slate-800/80">
+                  <span className="text-slate-400">Unread Player Messages</span>
+                  <span className="font-mono font-bold text-cyan-400">{unreadMessagesCount}</span>
+                </div>
+                <div className="flex items-center justify-between py-2 border-b border-slate-800/80">
+                  <span className="text-slate-400">Pending Game ID Assignments</span>
+                  <span className="font-mono font-bold text-amber-400">{pendingGameRequests.length}</span>
+                </div>
+                <div className="flex items-center justify-between py-2">
+                  <span className="text-slate-400">Open Treasury Queue Items</span>
+                  <span className="font-mono font-bold text-indigo-400">{pendingTopUps.length + pendingWithdrawals.length}</span>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
+
+      {/* Referral Governance, Fraud Review Queue & Top Referrers Leaderboard */}
+      <AdminReferralGovernancePanel currentUser={currentUser} />
     </div>
   );
 };

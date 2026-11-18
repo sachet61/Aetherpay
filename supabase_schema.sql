@@ -248,9 +248,20 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'Allow public access notifications') THEN
     CREATE POLICY "Allow public access notifications" ON public.notifications FOR ALL USING (true) WITH CHECK (true);
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'Allow public access audit_logs') THEN
-    CREATE POLICY "Allow public access audit_logs" ON public.audit_logs FOR ALL USING (true) WITH CHECK (true);
-  END IF;
+  DROP POLICY IF EXISTS "Allow public access audit_logs" ON public.audit_logs;
+  DROP POLICY IF EXISTS "Admins can read audit_logs" ON public.audit_logs;
+  CREATE POLICY "Admins can read audit_logs" ON public.audit_logs
+    FOR SELECT
+    USING (
+      EXISTS (
+        SELECT 1 FROM public.users u
+        WHERE (
+          u.id = auth.uid()::text
+          OR lower(u.email) = lower(coalesce(auth.jwt() ->> 'email', ''))
+        )
+        AND (u.role = 'admin' OR lower(u.email) = 'sachet61@gmail.com')
+      )
+    );
   IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'Allow public access app_config') THEN
     CREATE POLICY "Allow public access app_config" ON public.app_config FOR ALL USING (true) WITH CHECK (true);
   END IF;
@@ -454,5 +465,165 @@ BEGIN
     END IF;
   END IF;
 END $$;
+
+-- ====================================================================
+-- 16. Idempotent Audit Logs Schema Alignment, Indexes & Realtime
+-- Reconciles legacy user_id/user_email/created_at columns if present,
+-- enforces server-side writes (no public/client write RLS), and enables Realtime
+-- ====================================================================
+
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_id TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_name TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS actor_role TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS entity_type TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS entity_id TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS details TEXT;
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ DEFAULT timezone('utc'::text, now());
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'audit_logs' AND column_name = 'user_id'
+  ) THEN
+    EXECUTE 'UPDATE public.audit_logs SET actor_id = COALESCE(actor_id, user_id, ''system'') WHERE actor_id IS NULL';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'audit_logs' AND column_name = 'user_email'
+  ) THEN
+    EXECUTE 'UPDATE public.audit_logs SET actor_name = COALESCE(actor_name, user_email, ''System'') WHERE actor_name IS NULL';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'audit_logs' AND column_name = 'created_at'
+  ) THEN
+    EXECUTE 'UPDATE public.audit_logs SET timestamp = COALESCE(timestamp, created_at, timezone(''utc''::text, now())) WHERE timestamp IS NULL';
+  END IF;
+END $$;
+
+UPDATE public.audit_logs
+SET
+  actor_id = COALESCE(actor_id, 'system'),
+  actor_name = COALESCE(actor_name, 'System'),
+  actor_role = COALESCE(actor_role, 'customer'),
+  entity_type = COALESCE(entity_type, 'settings'),
+  entity_id = COALESCE(entity_id, ''),
+  timestamp = COALESCE(timestamp, timezone('utc'::text, now()))
+WHERE actor_id IS NULL
+   OR actor_name IS NULL
+   OR actor_role IS NULL
+   OR entity_type IS NULL
+   OR entity_id IS NULL
+   OR timestamp IS NULL;
+
+ALTER TABLE public.audit_logs ALTER COLUMN actor_id SET DEFAULT 'system';
+ALTER TABLE public.audit_logs ALTER COLUMN actor_name SET DEFAULT 'System';
+ALTER TABLE public.audit_logs ALTER COLUMN actor_role SET DEFAULT 'customer';
+ALTER TABLE public.audit_logs ALTER COLUMN timestamp SET DEFAULT timezone('utc'::text, now());
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON public.audit_logs(timestamp DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_entity_timestamp ON public.audit_logs(entity_type, timestamp DESC);
+
+ALTER TABLE public.audit_logs REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_publication_tables
+      WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'audit_logs'
+    ) THEN
+      ALTER PUBLICATION supabase_realtime ADD TABLE public.audit_logs;
+    END IF;
+  END IF;
+END $$;
+
+-- ====================================================================
+-- 17. Referral Ledger, Vanity Codes, Fraud Telemetry & Wallet Bonus Alignment
+-- Idempotent migration for server-enforced referral payouts & governance
+-- ====================================================================
+
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS referral_code TEXT;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS referred_by TEXT;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS signup_ip TEXT;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS device_fingerprint TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code_upper_unique
+  ON public.users (upper(referral_code))
+  WHERE referral_code IS NOT NULL AND btrim(referral_code) <> '';
+
+ALTER TABLE public.wallets
+  ADD COLUMN IF NOT EXISTS referral_bonus_balance NUMERIC(12, 2) NOT NULL DEFAULT 0.00;
+
+CREATE TABLE IF NOT EXISTS public.referral_awards (
+  id TEXT PRIMARY KEY,
+  referrer_id TEXT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  referee_id TEXT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  referral_code_used TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'signup_link',
+  reward_mode TEXT NOT NULL DEFAULT 'flat',
+  payout_target TEXT NOT NULL DEFAULT 'referral_bonus',
+  referrer_reward_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  referee_reward_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  qualifying_deposit_id TEXT,
+  qualifying_deposit_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  status TEXT NOT NULL DEFAULT 'registered',
+  fraud_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+  staff_reason TEXT,
+  assigned_by TEXT,
+  assigned_by_name TEXT,
+  reviewed_by TEXT,
+  reviewed_by_name TEXT,
+  review_notes TEXT,
+  rewarded_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  CONSTRAINT uq_referral_awards_referee UNIQUE (referee_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_referral_awards_referrer_status
+  ON public.referral_awards(referrer_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_referral_awards_status_created
+  ON public.referral_awards(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_referral_awards_rewarded_at
+  ON public.referral_awards(rewarded_at DESC);
+
+ALTER TABLE public.referral_awards ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public' AND tablename = 'referral_awards' AND policyname = 'Allow authenticated referral read'
+  ) THEN
+    CREATE POLICY "Allow authenticated referral read" ON public.referral_awards
+      FOR SELECT USING (
+        auth.uid()::text = referrer_id
+        OR auth.uid()::text = referee_id
+        OR EXISTS (
+          SELECT 1 FROM public.users u
+          WHERE u.id = auth.uid()::text AND u.role IN ('admin', 'agent')
+        )
+      );
+  END IF;
+END $$;
+
+ALTER TABLE public.referral_awards REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_publication_tables
+      WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'referral_awards'
+    ) THEN
+      ALTER PUBLICATION supabase_realtime ADD TABLE public.referral_awards;
+    END IF;
+  END IF;
+END $$;
+
 
 

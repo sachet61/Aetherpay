@@ -1,4 +1,15 @@
 import { createClient } from '@supabase/supabase-js';
+import {
+  handleGetAdminReferralLedger,
+  handleGetReferralSummary,
+  handlePatchVanityReferralCode,
+  handlePostAdminReferralConfig,
+  handlePostManualAssignReferral,
+  handlePostReferralAttribute,
+  handlePostReferralEvaluate,
+  handlePostReviewReferral,
+  type ReferralHandlerDeps,
+} from './referralHandlers';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://fsykihwprqdptrqapxxg.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY =
@@ -348,32 +359,96 @@ export function isInternalNoteMessageRow(row: any): boolean {
   );
 }
 
-export async function resolveVerifiedCallerRole(
+export interface VerifiedCallerProfile {
+  id: string;
+  email?: string;
+  displayName: string;
+  role: 'admin' | 'agent' | 'customer' | 'anonymous';
+  verifiedByJwt: boolean;
+  jwtRejected?: boolean;
+}
+
+export async function resolveVerifiedCallerProfile(
   adminClient: any,
   context?: { headers?: Record<string, any>; viewerUserId?: string }
-): Promise<'admin' | 'agent' | 'customer' | 'anonymous'> {
+): Promise<VerifiedCallerProfile> {
   const headers = context?.headers || {};
+  const proxySafeToken = String(
+    headers['x-supabase-token'] || headers['X-Supabase-Token'] || ''
+  ).trim();
   const rawAuth = String(headers.authorization || headers.Authorization || '').trim();
   const bearerToken = rawAuth.toLowerCase().startsWith('bearer ') ? rawAuth.slice(7).trim() : '';
+  const jwtToken = proxySafeToken || bearerToken;
 
-  if (bearerToken && typeof adminClient?.auth?.getUser === 'function') {
+  if (jwtToken && typeof adminClient?.auth?.getUser === 'function') {
     try {
-      const { data: authData, error: authErr } = await adminClient.auth.getUser(bearerToken);
+      const { data: authData, error: authErr } = await adminClient.auth.getUser(jwtToken);
       const authUser = !authErr ? authData?.user : null;
       if (authUser?.id) {
-        const { data: dbUser } = await adminClient
-          .from('users')
-          .select('id, role, email')
-          .eq('id', authUser.id)
-          .maybeSingle();
-        const email = String(dbUser?.email || authUser.email || '').toLowerCase();
-        const role = dbUser?.role || authUser.user_metadata?.role;
-        if (role === 'admin' || email === 'sachet61@gmail.com') return 'admin';
-        if (role === 'agent') return 'agent';
-        return 'customer';
+        let dbUser: any = null;
+        try {
+          const { data: byId } = await adminClient
+            .from('users')
+            .select('id, role, email, display_name')
+            .eq('id', authUser.id)
+            .maybeSingle();
+          dbUser = byId || null;
+        } catch {}
+
+        const authEmail = String(authUser.email || '').trim().toLowerCase();
+        if (!dbUser && authEmail) {
+          try {
+            const usersTable = adminClient.from('users').select('id, role, email, display_name');
+            if (typeof usersTable?.ilike === 'function') {
+              const { data: byEmail } = await usersTable
+                .ilike('email', authEmail)
+                .limit(1)
+                .maybeSingle();
+              dbUser = byEmail || null;
+            }
+          } catch {}
+        }
+
+        const email = String(dbUser?.email || authEmail || '').toLowerCase();
+        const rawRole =
+          dbUser?.role || authUser.app_metadata?.role || authUser.user_metadata?.role;
+        const role: VerifiedCallerProfile['role'] =
+          rawRole === 'admin' || email === 'sachet61@gmail.com'
+            ? 'admin'
+            : rawRole === 'agent'
+              ? 'agent'
+              : 'customer';
+        const displayName =
+          String(
+            dbUser?.display_name ||
+              authUser.user_metadata?.display_name ||
+              authUser.user_metadata?.full_name ||
+              (email ? email.split('@')[0] : 'User')
+          ).trim() || 'User';
+        return {
+          id: dbUser?.id || authUser.id,
+          email: email || undefined,
+          displayName,
+          role,
+          verifiedByJwt: true,
+        };
       }
+      // Explicit JWT failed verification: do NOT fall back to unverified x-user-id
+      return {
+        id: '',
+        displayName: 'Anonymous',
+        role: 'anonymous',
+        verifiedByJwt: false,
+        jwtRejected: true,
+      };
     } catch {
-      // Fall through cleanly if token validation fails
+      return {
+        id: '',
+        displayName: 'Anonymous',
+        role: 'anonymous',
+        verifiedByJwt: false,
+        jwtRejected: true,
+      };
     }
   }
 
@@ -382,21 +457,41 @@ export async function resolveVerifiedCallerRole(
     try {
       const { data: dbUser } = await adminClient
         .from('users')
-        .select('id, role, email')
+        .select('id, role, email, display_name')
         .eq('id', candidateUserId)
         .maybeSingle();
       if (dbUser) {
         const email = String(dbUser.email || '').toLowerCase();
-        if (dbUser.role === 'admin' || email === 'sachet61@gmail.com') return 'admin';
-        if (dbUser.role === 'agent') return 'agent';
-        return 'customer';
+        const role: VerifiedCallerProfile['role'] =
+          dbUser.role === 'admin' || email === 'sachet61@gmail.com'
+            ? 'admin'
+            : dbUser.role === 'agent'
+              ? 'agent'
+              : 'customer';
+        const displayName =
+          String(dbUser.display_name || (email ? email.split('@')[0] : 'User')).trim() || 'User';
+        return {
+          id: dbUser.id,
+          email: email || undefined,
+          displayName,
+          role,
+          verifiedByJwt: false,
+        };
       }
     } catch {
       // Fall through to anonymous
     }
   }
 
-  return 'anonymous';
+  return { id: '', displayName: 'Anonymous', role: 'anonymous', verifiedByJwt: false };
+}
+
+export async function resolveVerifiedCallerRole(
+  adminClient: any,
+  context?: { headers?: Record<string, any>; viewerUserId?: string }
+): Promise<'admin' | 'agent' | 'customer' | 'anonymous'> {
+  const profile = await resolveVerifiedCallerProfile(adminClient, context);
+  return profile.role;
 }
 
 export async function handleGetChatMessages(adminClient: any, parsedUrl: URL, res: any, req?: any) {
@@ -958,6 +1053,296 @@ export async function handleStorageFileProxy(adminClient: any, parsedUrl: URL, r
   }
 }
 
+const AUDIT_SELECT_COLUMNS =
+  'id, actor_id, actor_name, actor_role, action, entity_type, entity_id, details, timestamp';
+const LEGACY_AUDIT_SELECT_COLUMNS =
+  'id, user_id, user_email, action, entity_type, entity_id, details, created_at';
+const ALLOWED_AUDIT_ENTITY_TYPES = new Set([
+  'topup',
+  'withdrawal',
+  'wallet',
+  'game_account',
+  'settings',
+  'user',
+  'chat',
+  'auth',
+]);
+
+function isMissingColumnError(err: any): boolean {
+  const code = String(err?.code || '');
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    code === '42703' ||
+    code === 'PGRST204' ||
+    msg.includes('column') ||
+    msg.includes('schema cache')
+  );
+}
+
+export function normalizeServerAuditRow(raw: any) {
+  if (!raw || typeof raw !== 'object' || !raw.id) return null;
+  const rawRole = String(raw.actor_role ?? raw.actorRole ?? 'customer').trim().toLowerCase();
+  const actorRole =
+    rawRole === 'admin' || rawRole === 'agent' || rawRole === 'customer' ? rawRole : 'customer';
+  const rawTs = raw.timestamp ?? raw.created_at ?? new Date().toISOString();
+  const parsedMs = Date.parse(String(rawTs));
+  return {
+    id: String(raw.id),
+    actorId: String(raw.actor_id ?? raw.user_id ?? 'system'),
+    actorName: String(raw.actor_name ?? raw.user_email ?? 'System'),
+    actorRole,
+    action: String(raw.action || 'UNKNOWN_ACTION'),
+    entityType: String(raw.entity_type || 'settings'),
+    entityId: String(raw.entity_id || ''),
+    details: String(raw.details || ''),
+    timestamp: Number.isFinite(parsedMs) ? new Date(parsedMs).toISOString() : new Date().toISOString(),
+  };
+}
+
+export async function writeServerAuditLog(
+  adminClient: any,
+  entry: {
+    id?: string;
+    actorId: string;
+    actorName: string;
+    actorRole: 'admin' | 'agent' | 'customer' | string;
+    action: string;
+    entityType: string;
+    entityId: string;
+    details: string;
+    timestamp?: string;
+  }
+): Promise<{ ok: boolean; log?: any; error?: string }> {
+  if (!adminClient) {
+    return { ok: false, error: 'Supabase admin client unavailable' };
+  }
+
+  const nowIso = entry.timestamp || new Date().toISOString();
+  const id = entry.id || `aud_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const normalizedEntity = ALLOWED_AUDIT_ENTITY_TYPES.has(String(entry.entityType || '').toLowerCase())
+    ? String(entry.entityType).toLowerCase()
+    : 'settings';
+  const safeRole =
+    entry.actorRole === 'admin' || entry.actorRole === 'agent' || entry.actorRole === 'customer'
+      ? entry.actorRole
+      : 'customer';
+
+  const canonicalRow = {
+    id,
+    actor_id: String(entry.actorId || 'system').slice(0, 120),
+    actor_name: String(entry.actorName || 'System').slice(0, 160),
+    actor_role: safeRole,
+    action: String(entry.action || 'SYSTEM_EVENT').trim().slice(0, 100),
+    entity_type: normalizedEntity,
+    entity_id: String(entry.entityId || '').slice(0, 160),
+    details: String(entry.details || '').slice(0, 1000),
+    timestamp: nowIso,
+  };
+
+  try {
+    const { data, error } = await adminClient
+      .from('audit_logs')
+      .insert(canonicalRow)
+      .select(AUDIT_SELECT_COLUMNS)
+      .maybeSingle();
+
+    if (!error) {
+      return { ok: true, log: normalizeServerAuditRow(data || canonicalRow) };
+    }
+
+    if (isMissingColumnError(error)) {
+      console.warn('[Vercel AuditLog Schema Notice] Retrying legacy audit_logs column insert:', error.message);
+      const legacyRow = {
+        id,
+        user_id: canonicalRow.actor_id,
+        user_email: canonicalRow.actor_name,
+        action: canonicalRow.action,
+        entity_type: canonicalRow.entity_type,
+        entity_id: canonicalRow.entity_id,
+        details: canonicalRow.details,
+        created_at: nowIso,
+      };
+      const { data: legData, error: legErr } = await adminClient
+        .from('audit_logs')
+        .insert(legacyRow)
+        .select(LEGACY_AUDIT_SELECT_COLUMNS)
+        .maybeSingle();
+
+      if (!legErr) {
+        return {
+          ok: true,
+          log: normalizeServerAuditRow({ ...(legData || legacyRow), actor_role: safeRole }),
+        };
+      }
+      console.error('[Vercel AuditLog Legacy Insert Error]:', legErr.message);
+      return { ok: false, error: legErr.message };
+    }
+
+    console.error('[Vercel AuditLog Insert Error]:', error.message);
+    return { ok: false, error: error.message };
+  } catch (err: any) {
+    console.error('[Vercel AuditLog Exception]:', err?.message || err);
+    return { ok: false, error: err?.message || 'Audit log persistence failed' };
+  }
+}
+
+function sanitizePostgrestLikeTerm(input: string): string {
+  return input.replace(/[,()*%\\]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+export async function handleGetAuditLogs(adminClient: any, parsedUrl: URL, res: any, req?: any) {
+  setNoStoreHeaders(res);
+  try {
+    const caller = await resolveVerifiedCallerProfile(adminClient, {
+      headers: req?.headers,
+      viewerUserId: (parsedUrl.searchParams.get('userId') || '').trim() || undefined,
+    });
+
+    if (caller.jwtRejected) {
+      return res.status(401).json({
+        error: 'Session token expired or invalid. Refreshing authentication...',
+        code: 'TOKEN_EXPIRED',
+      });
+    }
+
+    if (caller.role !== 'admin') {
+      return res.status(403).json({
+        error: 'Access Denied: Only Platform Administrators can view system audit logs.',
+      });
+    }
+
+    const isExport =
+      parsedUrl.searchParams.get('format') === 'csv' ||
+      parsedUrl.searchParams.get('export') === '1';
+    const maxAllowed = isExport ? 500 : 100;
+    const rawLimit = Number.parseInt(parsedUrl.searchParams.get('limit') || '100', 10);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, maxAllowed) : 100;
+    const entityType = (parsedUrl.searchParams.get('entityType') || 'all').trim().toLowerCase();
+    const search = sanitizePostgrestLikeTerm(parsedUrl.searchParams.get('search') || '');
+    const fromDate = (parsedUrl.searchParams.get('fromDate') || '').trim();
+    const toDate = (parsedUrl.searchParams.get('toDate') || '').trim();
+    const beforeTimestamp = (parsedUrl.searchParams.get('beforeTimestamp') || '').trim();
+
+    const runQuery = async (legacyMode: boolean) => {
+      const tsCol = legacyMode ? 'created_at' : 'timestamp';
+      const actorCol = legacyMode ? 'user_email' : 'actor_name';
+      const selectCols = legacyMode ? LEGACY_AUDIT_SELECT_COLUMNS : AUDIT_SELECT_COLUMNS;
+
+      let query = adminClient.from('audit_logs').select(selectCols);
+
+      if (entityType && entityType !== 'all' && ALLOWED_AUDIT_ENTITY_TYPES.has(entityType)) {
+        query = query.eq('entity_type', entityType);
+      }
+      if (beforeTimestamp) {
+        query = query.lt(tsCol, beforeTimestamp);
+      }
+      if (fromDate) {
+        const startIso = fromDate.includes('T') ? fromDate : `${fromDate}T00:00:00.000Z`;
+        if (Number.isFinite(Date.parse(startIso))) {
+          query = query.gte(tsCol, startIso);
+        }
+      }
+      if (toDate) {
+        const endIso = toDate.includes('T') ? toDate : `${toDate}T23:59:59.999Z`;
+        if (Number.isFinite(Date.parse(endIso))) {
+          query = query.lte(tsCol, endIso);
+        }
+      }
+      if (search) {
+        query = query.or(
+          `action.ilike.%${search}%,${actorCol}.ilike.%${search}%,entity_id.ilike.%${search}%,details.ilike.%${search}%`
+        );
+      }
+
+      return query
+        .order(tsCol, { ascending: false })
+        .order('id', { ascending: false })
+        .limit(limit + 1);
+    };
+
+    let { data, error } = await runQuery(false);
+    if (error && isMissingColumnError(error)) {
+      console.warn('[Vercel AuditLog Query Notice] Retrying with legacy column mapping:', error.message);
+      const retryRes = await runQuery(true);
+      data = retryRes.data;
+      error = retryRes.error;
+    }
+
+    if (error) {
+      return res.status(500).json({ error: error.message || 'Failed to query audit logs' });
+    }
+
+    const rows = Array.isArray(data) ? data : [];
+    const hasMore = rows.length > limit;
+    const sliced = hasMore ? rows.slice(0, limit) : rows;
+    const logs = sliced.map((r: any) => normalizeServerAuditRow(r)).filter(Boolean);
+    const nextCursor = logs.length > 0 ? logs[logs.length - 1]!.timestamp : null;
+
+    return res.status(200).json({
+      success: true,
+      logs,
+      hasMore,
+      nextCursor,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to retrieve audit logs' });
+  }
+}
+
+export async function handlePostAuditLog(adminClient: any, body: any, res: any, req?: any) {
+  setNoStoreHeaders(res);
+  try {
+    const caller = await resolveVerifiedCallerProfile(adminClient, {
+      headers: req?.headers,
+      viewerUserId: body?.actorId ? String(body.actorId).trim() : undefined,
+    });
+
+    if (caller.jwtRejected) {
+      return res.status(401).json({
+        error: 'Session token expired or invalid. Refreshing authentication...',
+        code: 'TOKEN_EXPIRED',
+      });
+    }
+
+    if (caller.role === 'anonymous' || !caller.id) {
+      return res.status(401).json({
+        error: 'Authentication required to record audit events.',
+      });
+    }
+
+    const action = String(body?.action || '').trim().toUpperCase();
+    if (!action || action.length > 100) {
+      return res.status(400).json({ error: 'A valid action name is required.' });
+    }
+
+    const rawEntityType = String(body?.entityType || 'settings').trim().toLowerCase();
+    const entityType = ALLOWED_AUDIT_ENTITY_TYPES.has(rawEntityType) ? rawEntityType : 'settings';
+    const entityId = String(body?.entityId ?? caller.id).trim().slice(0, 160);
+    const details = String(body?.details ?? '').trim().slice(0, 1000);
+
+    const allowSystemAlias =
+      caller.role === 'admin' && String(body?.actorId || '').trim() === 'system';
+
+    const result = await writeServerAuditLog(adminClient, {
+      actorId: allowSystemAlias ? 'system' : caller.id,
+      actorName: allowSystemAlias ? String(body?.actorName || 'System Engine').trim() : caller.displayName,
+      actorRole: allowSystemAlias ? 'admin' : caller.role,
+      action,
+      entityType,
+      entityId,
+      details,
+    });
+
+    if (!result.ok) {
+      return res.status(500).json({ error: result.error || 'Failed to persist audit log' });
+    }
+
+    return res.status(201).json({ success: true, log: result.log });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to record audit log' });
+  }
+}
+
 export default async function handler(req: any, res: any) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -965,7 +1350,7 @@ export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, x-user-id, x-user-role'
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, x-supabase-token, x-user-id, x-user-role, x-device-fingerprint'
   );
 
   if (req.method === 'OPTIONS') {
@@ -1222,6 +1607,20 @@ export default async function handler(req: any, res: any) {
         }
       }
 
+      const actor = await resolveVerifiedCallerProfile(supabaseAdmin, {
+        headers: req?.headers,
+        viewerUserId: getBody(req)?.actingUserId,
+      });
+      await writeServerAuditLog(supabaseAdmin, {
+        actorId: actor.id || 'admin',
+        actorName: actor.displayName || 'Administrator',
+        actorRole: actor.role === 'admin' ? 'admin' : 'admin',
+        action: 'USER_ROLE_UPDATED',
+        entityType: 'user',
+        entityId: targetUser.id,
+        details: `Updated role for ${targetUser.display_name || targetUser.email} from ${targetUser.role} to ${newRole}.`,
+      });
+
       return res.status(200).json({
         success: true,
         message: `Role successfully updated to ${newRole.toUpperCase()} for ${targetUser.display_name}.`,
@@ -1261,6 +1660,19 @@ export default async function handler(req: any, res: any) {
       await supabaseAdmin.from('wallets').delete().eq('customer_id', userId);
       await supabaseAdmin.from('users').delete().eq('id', userId);
       await supabaseAdmin.auth.admin.deleteUser(userId).catch(() => {});
+
+      const actor = await resolveVerifiedCallerProfile(supabaseAdmin, {
+        headers: req?.headers,
+      });
+      await writeServerAuditLog(supabaseAdmin, {
+        actorId: actor.id || 'admin',
+        actorName: actor.displayName || 'Administrator',
+        actorRole: 'admin',
+        action: 'USER_DELETED',
+        entityType: 'user',
+        entityId: userId,
+        details: `Deleted account ${targetUser?.email || userId} and related records.`,
+      });
 
       return res.status(200).json({ success: true, message: `User ${userId} and all related records deleted completely.` });
     } catch (err: any) {
@@ -1329,6 +1741,16 @@ export default async function handler(req: any, res: any) {
         return res.status(400).json({ error: resetErr.message || 'Failed to dispatch reset email.' });
       }
 
+      await writeServerAuditLog(supabaseAdmin, {
+        actorId: dbUser?.id || authUser?.id || cleanEmail,
+        actorName: dbUser?.display_name || cleanEmail,
+        actorRole: 'customer',
+        action: 'PASSWORD_RESET_REQUESTED',
+        entityType: 'auth',
+        entityId: dbUser?.id || cleanEmail,
+        details: `Password reset email dispatched to ${cleanEmail}.`,
+      });
+
       console.log(`[Vercel Serverless Auth] Password reset email dispatched for ${cleanEmail}`);
       return res.status(200).json({
         success: true,
@@ -1372,6 +1794,16 @@ export default async function handler(req: any, res: any) {
       if (updateErr) {
         return res.status(400).json({ error: updateErr.message });
       }
+
+      await writeServerAuditLog(supabaseAdmin, {
+        actorId: targetUser.id,
+        actorName: cleanEmail,
+        actorRole: String(targetUser.user_metadata?.role || 'customer'),
+        action: 'PASSWORD_RESET_COMPLETED',
+        entityType: 'auth',
+        entityId: targetUser.id,
+        details: `Password reset completed for ${cleanEmail}.`,
+      });
 
       return res.status(200).json({
         success: true,
@@ -1486,12 +1918,55 @@ export default async function handler(req: any, res: any) {
     if (body?.token) {
       res.setHeader('Set-Cookie', `aetherpay_session=${encodeURIComponent(body.token)}; Path=/; SameSite=Lax; Max-Age=86400`);
     }
-    return res.status(200).json({ success: true, userId: body?.userId });
+    const isRegister = url.includes('/api/auth/register');
+    const caller = await resolveVerifiedCallerProfile(supabaseAdmin, {
+      headers: req?.headers,
+      viewerUserId: body?.userId ? String(body.userId).trim() : undefined,
+    });
+    if (caller.role !== 'anonymous' && caller.id) {
+      await writeServerAuditLog(supabaseAdmin, {
+        actorId: caller.id,
+        actorName: caller.displayName,
+        actorRole: caller.role,
+        action: isRegister ? 'USER_REGISTERED' : 'USER_LOGGED_IN',
+        entityType: 'auth',
+        entityId: caller.id,
+        details: isRegister
+          ? `Account registered (${caller.email || caller.id}).`
+          : `User signed in (${caller.email || caller.id}).`,
+      });
+    }
+    return res.status(200).json({ success: true, userId: caller.id || body?.userId });
   }
 
   if (url.includes('/api/auth/logout') && req.method === 'POST') {
+    const body = getBody(req);
+    const caller = await resolveVerifiedCallerProfile(supabaseAdmin, {
+      headers: req?.headers,
+      viewerUserId: body?.userId ? String(body.userId).trim() : undefined,
+    });
+    if (caller.role !== 'anonymous' && caller.id) {
+      await writeServerAuditLog(supabaseAdmin, {
+        actorId: caller.id,
+        actorName: caller.displayName,
+        actorRole: caller.role,
+        action: 'USER_LOGGED_OUT',
+        entityType: 'auth',
+        entityId: caller.id,
+        details: `User signed out (${caller.email || caller.id}).`,
+      });
+    }
     res.setHeader('Set-Cookie', 'aetherpay_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax');
     return res.status(200).json({ success: true });
+  }
+
+  // 4d. Server-Side Audit Logs Routes (Admin-only read, Authenticated server-enforced write)
+  if (url.includes('/api/audit-logs') && req.method === 'GET') {
+    return handleGetAuditLogs(supabaseAdmin, parsedUrl, res, req);
+  }
+
+  if (url.includes('/api/audit-logs') && req.method === 'POST') {
+    return handlePostAuditLog(supabaseAdmin, getBody(req), res, req);
   }
 
   // 5. Storage Fallback Upload Endpoint (Uses Service Role for Production Serverless)
@@ -1722,17 +2197,21 @@ export default async function handler(req: any, res: any) {
         return res.status(500).json({ error: error.message });
       }
 
-      // Log to audit trail
-      await supabaseAdmin.from('audit_logs').insert({
-        id: `aud_${Date.now()}`,
-        user_id: reviewerId || 'staff',
-        user_email: reviewerName || 'Support Staff',
+      // Log to authoritative server-side audit trail
+      const caller = await resolveVerifiedCallerProfile(supabaseAdmin, {
+        headers: req?.headers,
+        viewerUserId: reviewerId,
+      });
+      await writeServerAuditLog(supabaseAdmin, {
+        actorId: caller.id || reviewerId || 'staff',
+        actorName: caller.id ? caller.displayName : reviewerName || 'Support Staff',
+        actorRole: caller.id && caller.role !== 'anonymous' ? caller.role : 'agent',
         action: 'GAME_CREDENTIALS_DIRECT_PROVISION',
-        entity_type: 'game_account',
-        entity_id: accountId,
+        entityType: 'game_account',
+        entityId: accountId,
         details: `Provisioned credentials for ${gameTitle || gameId} (Username: ${username}) via Admin Desk.`,
-        created_at: now,
-      }).then(() => {}, () => {});
+        timestamp: now,
+      });
 
       return res.status(200).json({ success: true, account: data });
     } catch (err: any) {
@@ -2004,6 +2483,38 @@ export default async function handler(req: any, res: any) {
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Failed to purge bot greetings' });
     }
+  }
+
+  // 9b. Production Referral System Routes (Attribution, Qualification, Manual Assign, Vanity Codes, Fraud Review & Config)
+  const referralDeps: ReferralHandlerDeps = {
+    adminClient: supabaseAdmin,
+    resolveCaller: resolveVerifiedCallerProfile,
+    writeAudit: writeServerAuditLog,
+  };
+
+  if (url.includes('/api/referrals/attribute') && req.method === 'POST') {
+    return handlePostReferralAttribute(referralDeps, getBody(req), res, req);
+  }
+  if (url.includes('/api/referrals/evaluate') && req.method === 'POST') {
+    return handlePostReferralEvaluate(referralDeps, getBody(req), res, req);
+  }
+  if (url.includes('/api/referrals/manual-assign') && req.method === 'POST') {
+    return handlePostManualAssignReferral(referralDeps, getBody(req), res, req);
+  }
+  if (url.includes('/api/referrals/vanity-code') && req.method === 'PATCH') {
+    return handlePatchVanityReferralCode(referralDeps, getBody(req), res, req);
+  }
+  if (url.includes('/api/referrals/admin-ledger') && req.method === 'GET') {
+    return handleGetAdminReferralLedger(referralDeps, parsedUrl, res, req);
+  }
+  if (url.includes('/api/referrals/review') && req.method === 'POST') {
+    return handlePostReviewReferral(referralDeps, getBody(req), res, req);
+  }
+  if (url.includes('/api/referrals/summary') && req.method === 'GET') {
+    return handleGetReferralSummary(referralDeps, parsedUrl, res, req);
+  }
+  if (url.includes('/api/admin/referral-config') && req.method === 'POST') {
+    return handlePostAdminReferralConfig(referralDeps, getBody(req), res, req);
   }
 
   // 10. Health & Status

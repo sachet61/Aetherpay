@@ -27,6 +27,8 @@ import {
   X,
   Edit3,
   RefreshCw,
+  Gift,
+  Link2,
 } from 'lucide-react';
 
 interface AdminUsersProps {
@@ -95,6 +97,14 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
   const [assignedNotes, setAssignedNotes] = useState('');
   const [revealedPasswords, setRevealedPasswords] = useState<Record<string, boolean>>({});
   const [copiedField, setCopiedField] = useState<string | null>(null);
+
+  // Referral attribution & vanity code state
+  const [referrerInput, setReferrerInput] = useState('');
+  const [assignMode, setAssignMode] = useState<'link_only' | 'link_and_reward'>('link_only');
+  const [reassignReason, setReassignReason] = useState('');
+  const [vanityCodeInput, setVanityCodeInput] = useState('');
+  const [isSubmittingReferral, setIsSubmittingReferral] = useState(false);
+  const [isSavingVanity, setIsSavingVanity] = useState(false);
 
   // Load live users on-demand from PostgreSQL database
   const loadUsersLive = async (showSpinner = false) => {
@@ -218,6 +228,75 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
     navigator.clipboard.writeText(text);
     setCopiedField(fieldId);
     setTimeout(() => setCopiedField(null), 2000);
+  };
+
+  const openUserInspector = (u: UserProfile) => {
+    setSelectedUser(u);
+    setModalFeedback(null);
+    setReferrerInput('');
+    setAssignMode('link_only');
+    setReassignReason('');
+    setVanityCodeInput(u.referralCode || '');
+  };
+
+  const handleManualAssignReferrer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedUser) return;
+    if (!referrerInput.trim()) {
+      setModalFeedback({ type: 'error', text: 'Select or enter a referrer email, user ID, or referral code.' });
+      return;
+    }
+    const alreadyHasReferrer = Boolean(selectedUser.referredBy && selectedUser.referredBy.trim() !== '');
+    if (alreadyHasReferrer && isAdmin && reassignReason.trim().length < 3) {
+      setModalFeedback({ type: 'error', text: 'Please enter a brief reason (3+ chars) to reassign an existing referrer.' });
+      return;
+    }
+
+    setIsSubmittingReferral(true);
+    setModalFeedback(null);
+    const res = await dataService.manualAssignReferral({
+      refereeId: selectedUser.id,
+      referrerQuery: referrerInput.trim(),
+      mode: assignMode,
+      reason: reassignReason.trim() || undefined,
+    });
+    setIsSubmittingReferral(false);
+    if (res.success) {
+      const msg = res.message || 'Referral attribution updated.';
+      setModalFeedback({ type: 'success', text: msg });
+      setFeedback({ type: 'success', text: msg });
+      setReferrerInput('');
+      setReassignReason('');
+      void loadUsersLive(false);
+    } else {
+      setModalFeedback({ type: 'error', text: res.error || 'Failed to assign referral.' });
+    }
+  };
+
+  const handleSaveVanityCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedUser || !isAdmin) return;
+    if (!vanityCodeInput.trim()) {
+      setModalFeedback({ type: 'error', text: 'Enter a custom vanity code (3–24 letters/numbers).' });
+      return;
+    }
+    setIsSavingVanity(true);
+    setModalFeedback(null);
+    const res = await dataService.setVanityReferralCode({
+      userId: selectedUser.id,
+      vanityCode: vanityCodeInput.trim(),
+    });
+    setIsSavingVanity(false);
+    if (res.success) {
+      const nextCode = res.referralCode || vanityCodeInput.trim().toUpperCase();
+      setSelectedUser((prev) => (prev ? { ...prev, referralCode: nextCode } : null));
+      setVanityCodeInput(nextCode);
+      setModalFeedback({ type: 'success', text: res.message || `Custom code ${nextCode} saved.` });
+      setFeedback({ type: 'success', text: res.message || `Custom code ${nextCode} saved.` });
+      void loadUsersLive(false);
+    } else {
+      setModalFeedback({ type: 'error', text: res.error || 'Failed to save vanity code.' });
+    }
   };
 
   const togglePasswordVisibility = (accountId: string) => {
@@ -616,7 +695,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                       <td className="py-3.5 px-4 text-center">
                         <div className="flex items-center justify-center gap-1.5 flex-wrap">
                           <button
-                            onClick={() => setSelectedUser(u)}
+                            onClick={() => openUserInspector(u)}
                             className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-medium text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
                             title="View individual profile"
                           >
@@ -991,6 +1070,180 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                   <span className="text-slate-500">Registered:</span>
                   <span className="font-mono">{new Date(selectedUser.createdAt).toLocaleDateString()}</span>
                 </div>
+              </div>
+
+              {/* REFERRAL ATTRIBUTION & VANITY CODE SECTION */}
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-bold text-white">
+                    <Gift className="w-4 h-4 text-amber-400" />
+                    <span>Referral Attribution &amp; Code</span>
+                  </div>
+                  <span className="text-[10px] font-mono text-slate-400">
+                    {selectedUser.referredBy ? `Referred by ${selectedUser.referredBy}` : 'Organic (No Referrer)'}
+                  </span>
+                </div>
+
+                {/* Current Code Row */}
+                <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-slate-900 border border-slate-800 text-[11px]">
+                  <div>
+                    <span className="text-slate-400">Player Invite Code: </span>
+                    <span className="font-mono font-bold text-amber-300">
+                      {selectedUser.referralCode || `REF_${selectedUser.id.slice(-5).toUpperCase()}`}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleCopy(
+                        selectedUser.referralCode || `REF_${selectedUser.id.slice(-5).toUpperCase()}`,
+                        `modal_ref_${selectedUser.id}`
+                      )
+                    }
+                    className="text-slate-400 hover:text-white flex items-center gap-1 whitespace-nowrap shrink-0"
+                  >
+                    {copiedField === `modal_ref_${selectedUser.id}` ? (
+                      <Check className="w-3 h-3 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3 h-3" />
+                    )}
+                    <span>{copiedField === `modal_ref_${selectedUser.id}` ? 'Copied' : 'Copy'}</span>
+                  </button>
+                </div>
+
+                {/* Manual Referrer Assignment */}
+                {Boolean(selectedUser.referredBy && selectedUser.referredBy.trim() !== '') && !isAdmin ? (
+                  <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800 text-[11px] text-slate-300 flex items-center gap-2">
+                    <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>
+                      Linked to <strong className="font-mono text-amber-300">{selectedUser.referredBy}</strong>. Only Administrators can reassign an existing referrer.
+                    </span>
+                  </div>
+                ) : (
+                  <form onSubmit={handleManualAssignReferrer} className="space-y-2.5">
+                    <div className="space-y-1">
+                      <label className="text-[11px] text-slate-400 font-medium">
+                        {selectedUser.referredBy ? 'Reassign Existing Referrer (Admin Only)' : 'Assign Referrer (Email, Code, or User ID)'}
+                      </label>
+                      <input
+                        type="text"
+                        list={`ref-candidates-${selectedUser.id}`}
+                        value={referrerInput}
+                        onChange={(e) => setReferrerInput(e.target.value)}
+                        placeholder="Search player email or paste code (leave blank if organic)"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
+                      />
+                      <datalist id={`ref-candidates-${selectedUser.id}`}>
+                        {users
+                          .filter((cand) => cand.id !== selectedUser.id)
+                          .map((cand) => (
+                            <option
+                              key={cand.id}
+                              value={cand.referralCode || cand.email}
+                            >
+                              {cand.displayName} ({cand.email})
+                            </option>
+                          ))}
+                      </datalist>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      <label
+                        className={`p-2 rounded-lg border cursor-pointer flex items-center gap-1.5 ${
+                          assignMode === 'link_only'
+                            ? 'bg-indigo-950/60 border-indigo-500 text-white'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="assignMode"
+                          checked={assignMode === 'link_only'}
+                          onChange={() => setAssignMode('link_only')}
+                          className="accent-indigo-500"
+                        />
+                        <span>Link Only</span>
+                      </label>
+                      <label
+                        className={`p-2 rounded-lg border cursor-pointer flex items-center gap-1.5 ${
+                          assignMode === 'link_and_reward'
+                            ? 'bg-amber-950/50 border-amber-500 text-amber-200'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="assignMode"
+                          checked={assignMode === 'link_and_reward'}
+                          onChange={() => setAssignMode('link_and_reward')}
+                          className="accent-amber-500"
+                        />
+                        <span>Link + Reward</span>
+                      </label>
+                    </div>
+
+                    {Boolean(selectedUser.referredBy) && isAdmin && (
+                      <div className="space-y-1">
+                        <label className="text-[11px] text-amber-300 font-medium">
+                          Reassignment Reason (Required &amp; Audited)
+                        </label>
+                        <input
+                          type="text"
+                          value={reassignReason}
+                          onChange={(e) => setReassignReason(e.target.value)}
+                          placeholder="e.g. Player signed up before receiving VIP link"
+                          className="w-full bg-slate-900 border border-amber-800/60 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
+                        />
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={isSubmittingReferral}
+                      className="w-full py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold text-xs flex items-center justify-center gap-1.5 whitespace-nowrap"
+                    >
+                      {isSubmittingReferral ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Link2 className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {selectedUser.referredBy
+                          ? assignMode === 'link_and_reward'
+                            ? 'Reassign & Issue Reward'
+                            : 'Reassign Referrer'
+                          : assignMode === 'link_and_reward'
+                          ? 'Link Referrer & Issue Reward'
+                          : 'Link Referrer Only'}
+                      </span>
+                    </button>
+                  </form>
+                )}
+
+                {/* Custom Vanity Referral Code (Admin Only) */}
+                {isAdmin && (
+                  <form onSubmit={handleSaveVanityCode} className="pt-2 border-t border-slate-800/80 space-y-1.5">
+                    <label className="text-[11px] text-slate-400 font-medium">
+                      Custom Vanity Code (Admin Only · VIP / Promoter)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={vanityCodeInput}
+                        onChange={(e) => setVanityCodeInput(e.target.value.toUpperCase())}
+                        placeholder="e.g. VIP_MARCUS"
+                        className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs font-mono text-amber-300 uppercase focus:outline-none focus:border-amber-400"
+                      />
+                      <button
+                        type="submit"
+                        disabled={isSavingVanity}
+                        className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs whitespace-nowrap shrink-0"
+                      >
+                        {isSavingVanity ? 'Saving...' : 'Set Vanity Code'}
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
 
               {/* Provisioned Game IDs */}

@@ -37,10 +37,27 @@ export async function compressImageToWebP(
     const originalSize = file.size;
     const img = new Image();
     const objectUrl = URL.createObjectURL(file);
+    let settled = false;
+
+    const finish = (result: {
+      file: File;
+      width: number;
+      height: number;
+      originalSize: number;
+      compressedSize: number;
+    }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      URL.revokeObjectURL(objectUrl);
+      resolve(result);
+    };
+
+    const timeoutId = setTimeout(() => {
+      finish({ file, width: 0, height: 0, originalSize, compressedSize: originalSize });
+    }, 12000);
 
     img.onload = () => {
-      URL.revokeObjectURL(objectUrl);
-
       let targetWidth = img.width;
       let targetHeight = img.height;
 
@@ -57,7 +74,7 @@ export async function compressImageToWebP(
       const ctx = canvas.getContext('2d');
 
       if (!ctx) {
-        resolve({ file, width: img.width, height: img.height, originalSize, compressedSize: originalSize });
+        finish({ file, width: img.width, height: img.height, originalSize, compressedSize: originalSize });
         return;
       }
 
@@ -66,39 +83,41 @@ export async function compressImageToWebP(
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
 
-      // Check if browser supports WebP canvas export
-      canvas.toBlob(
-        (blob) => {
-          if (!blob) {
-            resolve({ file, width: targetWidth, height: targetHeight, originalSize, compressedSize: originalSize });
-            return;
-          }
+      try {
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              finish({ file, width: targetWidth, height: targetHeight, originalSize, compressedSize: originalSize });
+              return;
+            }
 
-          // Build clean filename with .webp extension
-          const originalBaseName = file.name.replace(/\.[^/.]+$/, '');
-          const newName = `${originalBaseName}.webp`;
+            // Build clean filename with .webp extension
+            const originalBaseName = file.name.replace(/\.[^/.]+$/, '') || 'upload';
+            const newName = `${originalBaseName}.webp`;
 
-          const compressedFile = new File([blob], newName, {
-            type: format,
-            lastModified: Date.now(),
-          });
+            const compressedFile = new File([blob], newName, {
+              type: format,
+              lastModified: Date.now(),
+            });
 
-          resolve({
-            file: compressedFile,
-            width: targetWidth,
-            height: targetHeight,
-            originalSize,
-            compressedSize: compressedFile.size,
-          });
-        },
-        format,
-        quality
-      );
+            finish({
+              file: compressedFile,
+              width: targetWidth,
+              height: targetHeight,
+              originalSize,
+              compressedSize: compressedFile.size,
+            });
+          },
+          format,
+          quality
+        );
+      } catch {
+        finish({ file, width: targetWidth, height: targetHeight, originalSize, compressedSize: originalSize });
+      }
     };
 
     img.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve({ file, width: 0, height: 0, originalSize, compressedSize: originalSize });
+      finish({ file, width: 0, height: 0, originalSize, compressedSize: originalSize });
     };
 
     img.src = objectUrl;

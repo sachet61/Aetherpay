@@ -14,6 +14,9 @@ import {
   AppConfig,
   AuditLog,
   ReferralSummary,
+  ReferralProgramConfig,
+  ReferralLedgerEntry,
+  TopReferrerEntry,
   PayoutMethodType,
   PaymentMethodType,
   WithdrawalStatus,
@@ -37,10 +40,19 @@ import {
 } from './seedData';
 import { resolveGameImageUrl } from '../utils/imageUtils';
 import { authSessionService, PREDEFINED_ADMINS } from './authSessionService';
+import { shouldRunSilentBackgroundRefresh } from './sessionHydrationUtils';
 import { supabase, isSupabaseConfigured, testSupabaseConnection } from './supabaseClient';
 import { supabaseAuthService } from './supabaseAuthService';
 import { webPushClient } from './webPushClient';
 import { realtimeChatHub } from './chatRealtime';
+import {
+  normalizeAuditLogRow,
+  mergeAuditLogs,
+} from '../utils/auditLogUtils';
+import {
+  normalizeReferralConfig,
+  normalizeReferralCodeInput,
+} from '../utils/referralUtils';
 import {
   mergeVerifiedStatus,
   readVerifiedCache,
@@ -167,9 +179,10 @@ class DataService {
   private cleanLegacyStorage(): void {
     if (typeof localStorage === 'undefined') return;
     try {
-      // Invariant: Users directory is NEVER cached to browser localStorage
+      // Invariant: Users directory and System Audit Logs are NEVER cached to browser localStorage
       localStorage.removeItem(STORAGE_KEYS.USERS);
       localStorage.removeItem('aetherpay_users');
+      localStorage.removeItem(STORAGE_KEYS.AUDIT_LOGS);
 
       const CLEAN_FLAG = 'swift_sweeps_prod_clean_v7';
       if (!localStorage.getItem(CLEAN_FLAG)) {
@@ -263,8 +276,8 @@ class DataService {
     if (typeof localStorage === 'undefined') return;
     try {
       for (const key of Object.values(STORAGE_KEYS)) {
-        // Invariant: NEVER load user records from localStorage
-        if (key === STORAGE_KEYS.USERS) continue;
+        // Invariant: NEVER load user records or system audit logs from localStorage
+        if (key === STORAGE_KEYS.USERS || key === STORAGE_KEYS.AUDIT_LOGS) continue;
         const stored = localStorage.getItem(key);
         if (stored) {
           try {
@@ -281,8 +294,8 @@ class DataService {
 
   private saveToLocalStorage(key: string, value: any): void {
     if (typeof localStorage === 'undefined') return;
-    // Invariant: NEVER persist user directory records into browser localStorage
-    if (key === STORAGE_KEYS.USERS) return;
+    // Invariant: NEVER persist user directory or system audit logs into browser localStorage
+    if (key === STORAGE_KEYS.USERS || key === STORAGE_KEYS.AUDIT_LOGS) return;
 
     if (key === STORAGE_KEYS.MESSAGES && typeof value === 'object' && value !== null) {
       if (this.messageSaveDebounceTimer) {
@@ -409,6 +422,12 @@ class DataService {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'app_config' }, (p) => {
         this.queueRealtimeMutation('app_config', p.eventType, p.new, p.old);
       })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'audit_logs' }, (p) => {
+        this.queueRealtimeMutation('audit_logs', p.eventType, p.new, p.old);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'referral_awards' }, (p) => {
+        this.queueRealtimeMutation('referral_awards', p.eventType, p.new, p.old);
+      })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           this.syncStatus = 'connected';
@@ -505,6 +524,21 @@ class DataService {
         tablesModified.add('app_config');
       }
     }
+    if (rowsByTable['audit_logs']?.length && activeUser?.role === 'admin') {
+      const normalizedLogs = rowsByTable['audit_logs']
+        .map((row) => normalizeAuditLogRow(row))
+        .filter((item): item is AuditLog => Boolean(item));
+      if (normalizedLogs.length > 0) {
+        const existing = Array.isArray(this.cache[STORAGE_KEYS.AUDIT_LOGS])
+          ? (this.cache[STORAGE_KEYS.AUDIT_LOGS] as AuditLog[])
+          : [];
+        this.cache[STORAGE_KEYS.AUDIT_LOGS] = mergeAuditLogs(existing, normalizedLogs, { maxItems: 100 });
+        tablesModified.add('audit_logs');
+      }
+    }
+    if (rowsByTable['referral_awards']?.length) {
+      tablesModified.add('referral_awards');
+    }
 
     if (tablesModified.size > 0) {
       window.dispatchEvent(
@@ -578,6 +612,11 @@ class DataService {
         if (gameAccsRes?.data) this.applyGameAccountRows(gameAccsRes.data, false);
         if (topupsRes.error && withdrawalsRes.error && walletsRes.error) {
           this.lastHydrationError = topupsRes.error.message || 'Unable to load staff operations data.';
+        }
+        if (user?.role === 'admin') {
+          await this.fetchAuditLogsFromServer({ limit: 100 });
+        } else {
+          this.cache[STORAGE_KEYS.AUDIT_LOGS] = [];
         }
       } else if (currentUserId) {
         // Customer session: strictly scoped to CURRENT user only (no global table downloads)
@@ -904,6 +943,9 @@ class DataService {
         if (msgsRes.data && msgsRes.data.length > 0) {
           this.applyMessageRows(msgsRes.data);
           changed = true;
+        }
+        if (user?.role === 'admin') {
+          await this.fetchAuditLogsFromServer({ limit: 100 });
         }
       }
 
@@ -1501,8 +1543,8 @@ class DataService {
         avatarUrl: dbU.avatar_url || existing?.avatarUrl,
         status: dbU.status || 'active',
         emailVerified: isVerifiedMerged,
-        referralCode: existing?.referralCode || `REF_${dbU.id.slice(-5).toUpperCase()}`,
-        referredBy: dbU.referred_by || existing?.referredBy,
+        referralCode: dbU.referral_code || existing?.referralCode || `REF_${dbU.id.slice(-5).toUpperCase()}`,
+        referredBy: dbU.referred_by ?? existing?.referredBy,
         createdAt: dbU.created_at || existing?.createdAt || new Date().toISOString(),
         lastLoginAt: existing?.lastLoginAt || new Date().toISOString(),
       };
@@ -1863,10 +1905,12 @@ class DataService {
 
   private applyAppConfig(data: any): void {
     const currentConfig = this.getAppConfig();
-    this.cache[STORAGE_KEYS.CONFIG] = {
+    const merged = {
       ...currentConfig,
       ...data,
     };
+    merged.referralProgram = normalizeReferralConfig(merged.referralProgram);
+    this.cache[STORAGE_KEYS.CONFIG] = merged;
     this.saveToLocalStorage(STORAGE_KEYS.CONFIG, this.cache[STORAGE_KEYS.CONFIG]);
   }
 
@@ -2402,10 +2446,16 @@ class DataService {
       [STORAGE_KEYS.CONVERSATIONS]: [],
       [STORAGE_KEYS.MESSAGES]: {},
       [STORAGE_KEYS.NOTIFICATIONS]: [],
+      [STORAGE_KEYS.AUDIT_LOGS]: [],
     };
     for (const [key, val] of Object.entries(emptyState)) {
       this.cache[key] = val;
       this.saveToLocalStorage(key, val);
+    }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.removeItem(STORAGE_KEYS.AUDIT_LOGS);
+      } catch {}
     }
     this.lastSyncTimestamp = null;
     this.authoritativelyLoadedTopupsForUser.clear();
@@ -2424,6 +2474,29 @@ class DataService {
   }
 
   public logout(): void {
+    const prevUser = this.getCurrentUser();
+    const dispatchServerLogout = async () => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (prevUser?.id) headers['x-user-id'] = prevUser.id;
+      if (supabase && isSupabaseConfigured()) {
+        try {
+          const { data } = await supabase.auth.getSession();
+          if (data?.session?.access_token) {
+            headers['x-supabase-token'] = data.session.access_token;
+          }
+        } catch {}
+      }
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          keepalive: true,
+          headers,
+          body: JSON.stringify({ userId: prevUser?.id }),
+        });
+      } catch {}
+      supabaseAuthService.logout().catch(() => {});
+    };
+
     this.currentUserId = null;
     this.isHydratingSession = false;
     this.hydrationUserId = null;
@@ -2433,7 +2506,11 @@ class DataService {
     this.lastHydrationError = null;
     this.clearUserScopedCache();
     authSessionService.destroySession();
-    supabaseAuthService.logout().catch(() => {});
+    if (prevUser?.id) {
+      void dispatchServerLogout();
+    } else {
+      supabaseAuthService.logout().catch(() => {});
+    }
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
   }
 
@@ -4109,6 +4186,7 @@ class DataService {
           };
         }
         await this.persistChatTransactionStatusInSupabase(updatedReq.id, updatedReq.customerId);
+        void this.triggerServerReferralEvaluation(updatedReq.customerId);
       }
     }
 
@@ -6028,12 +6106,21 @@ class DataService {
     if (this.activeHydrationPromise && this.hydrationUserId === target.id) {
       return this.activeHydrationPromise;
     }
+
+    // Never unmount active screens (e.g. Top-Up file uploaders resuming from mobile gallery)
+    // when the exact same user session is already hydrated without error.
     if (
-      !options?.force &&
-      !this.lastHydrationError &&
-      this.lastHydratedUserId === target.id &&
-      Date.now() - this.lastHydratedAt < 2500
+      shouldRunSilentBackgroundRefresh({
+        targetUserId: target.id,
+        lastHydratedUserId: this.lastHydratedUserId,
+        lastHydrationError: this.lastHydrationError,
+        force: options?.force,
+      })
     ) {
+      if (Date.now() - this.lastHydratedAt >= 2500) {
+        this.lastHydratedAt = Date.now();
+        void this.syncDelta().catch(() => {});
+      }
       return;
     }
 
@@ -7019,141 +7106,417 @@ class DataService {
     this.save(STORAGE_KEYS.NOTIFICATIONS, list);
   }
 
-  // Referral Program
+  // Referral Program & Server-Enforced Referral Engine
+  public getBrowserDeviceFingerprint(): string {
+    if (typeof window === 'undefined') return '';
+    try {
+      const existing = localStorage.getItem('ss_device_fp');
+      if (existing && existing.length >= 8) return existing;
+      const raw = [
+        navigator.userAgent || '',
+        navigator.language || '',
+        String(screen?.width || 0),
+        String(screen?.height || 0),
+        Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+      ].join('|');
+      let hash = 2166136261;
+      for (let i = 0; i < raw.length; i++) {
+        hash ^= raw.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      const fp = `fp_${(hash >>> 0).toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      localStorage.setItem('ss_device_fp', fp);
+      return fp;
+    } catch {
+      return '';
+    }
+  }
+
   public getReferralSummary(userId: string): ReferralSummary {
     const user = this.getUserById(userId);
     const config = this.getAppConfig();
+    const refCfg = normalizeReferralConfig(config.referralProgram);
     const allUsers = this.getUsers();
+    const allTopups = this.getTopUpRequests();
     const allTxs = this.getTransactions();
 
-    const referralCode = user?.referralCode || 'REF_DEFAULT';
-    const referralLink = `${window.location.origin}/signup?ref=${referralCode}`;
+    const referralCode = user?.referralCode || `REF_${userId.slice(-5).toUpperCase()}`;
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const referralLink = origin ? `${origin}/signup?ref=${referralCode}` : `/signup?ref=${referralCode}`;
 
-    const referredUsersList = allUsers.filter((u) => u.referredBy?.toUpperCase() === referralCode.toUpperCase());
+    const referredUsersList = allUsers.filter(
+      (u) => normalizeReferralCodeInput(u.referredBy) === normalizeReferralCodeInput(referralCode)
+    );
+
     const referredSummaryUsers = referredUsersList.map((ru) => {
-      // Calculate their deposit volume
-      const deposits = allTxs
-        .filter((t) => t.customerId === ru.id && t.type === 'deposit' && t.status === 'completed')
-        .reduce((sum, t) => sum + t.amount, 0);
+      const realCashDeposits = allTopups
+        .filter(
+          (t) =>
+            t.customerId === ru.id &&
+            (t.status === 'completed' || t.status === 'approved') &&
+            t.method !== ('referral_bonus' as any)
+        )
+        .reduce((sum, t) => sum + Number(t.amount || 0), 0);
 
-      // Check if referee has verified email
-      const isEmailVerified = !!ru.emailVerified;
-
-      // Check if referee has played (loaded credits into any game account)
-      const hasLoadedGame = allTxs.some(
-        (t) => t.customerId === ru.id && (t.type === 'adjustment' || t.type === 'bonus') && !!t.targetGameName && t.status === 'completed'
-      );
-
+      const isEmailVerified = Boolean(ru.emailVerified);
+      const hasRealDepositMet = realCashDeposits >= refCfg.qualificationDepositMin;
       const hasEarnedReward = allTxs.some(
         (t) => t.customerId === userId && t.type === 'referral_reward' && t.description.includes(ru.displayName)
       );
 
-      // Referral bonus is qualified ONLY if referee's email is verified AND referee has played (loaded game credits)
-      const isQualified = isEmailVerified && hasLoadedGame;
-      const status: 'registered' | 'qualified' | 'rewarded' = hasEarnedReward ? 'rewarded' : isQualified ? 'qualified' : 'registered';
+      const status = hasEarnedReward
+        ? 'rewarded'
+        : isEmailVerified && hasRealDepositMet
+        ? 'pending_deposit'
+        : isEmailVerified
+        ? 'pending_deposit'
+        : 'registered';
 
       return {
         id: ru.id,
         displayName: ru.displayName,
         joinedAt: ru.createdAt,
         status,
-        depositTotal: deposits,
-        rewardEarned: hasEarnedReward ? config.referralProgram.rewardPerReferral : 0,
+        depositTotal: Number(realCashDeposits.toFixed(2)),
+        rewardEarned: hasEarnedReward ? refCfg.referrerRewardValue : 0,
         emailVerified: isEmailVerified,
-        hasLoadedGame,
+        hasRealDepositMet,
       };
     });
 
     const totalRewardsEarned = referredSummaryUsers.reduce((sum, u) => sum + u.rewardEarned, 0);
-    const pendingRewards = referredSummaryUsers.filter((u) => u.status === 'qualified').length * config.referralProgram.rewardPerReferral;
 
     return {
       referralCode,
       referralLink,
       totalReferred: referredUsersList.length,
-      activeReferred: referredSummaryUsers.filter((u) => u.depositTotal > 0).length,
-      totalRewardsEarned,
-      pendingRewards,
-      rewardPerReferral: config.referralProgram.rewardPerReferral,
-      qualifyingDepositMin: config.referralProgram.qualificationDepositMin,
+      activeReferred: referredSummaryUsers.filter((u) => u.status === 'rewarded').length,
+      totalRewardsEarned: Number(totalRewardsEarned.toFixed(2)),
+      pendingRewards: 0,
+      heldRewardsCount: 0,
+      rewardMode: refCfg.rewardMode,
+      referrerRewardValue: refCfg.referrerRewardValue,
+      refereeRewardValue: refCfg.refereeRewardValue,
+      rewardPerReferral: refCfg.referrerRewardValue,
+      qualifyingDepositMin: refCfg.qualificationDepositMin,
+      payoutTarget: refCfg.payoutTarget,
+      maxReferralsPerUser: refCfg.maxReferralsPerUser,
+      programEnabled: refCfg.enabled,
       referredUsers: referredSummaryUsers,
     };
   }
 
-  public checkAndAwardReferral(customerId: string, newDepositAmount: number = 0): void {
+  public checkAndAwardReferral(customerId: string, _newDepositAmount: number = 0): void {
     const customer = this.getUserById(customerId);
     if (!customer || !customer.referredBy) return;
-
     const config = this.getAppConfig();
-    if (!config.referralProgram.enabled) return;
+    if (!config.referralProgram?.enabled) return;
 
-    const allUsers = this.getUsers();
-    const referrer = allUsers.find((u) => u.referralCode.toUpperCase() === customer.referredBy?.toUpperCase());
-    if (!referrer || referrer.id === customer.id) return; // Prevent self-referral
+    // Trigger authoritative server evaluation & PostgreSQL referral_awards ledger
+    void this.triggerServerReferralEvaluation(customerId);
+  }
 
-    // CRITICAL REQUIREMENT 1: Referee email must be verified
-    const isEmailVerified = customer.emailVerified === true;
-    if (!isEmailVerified) {
-      console.log(`[Referral Engine] Referral reward for referee ${customer.displayName} withheld: email not verified.`);
-      return;
+  public async attributeSignupReferral(params: {
+    refereeId: string;
+    referralCode?: string;
+    accessToken?: string;
+  }): Promise<{ success: boolean; error?: string }> {
+    try {
+      const headers = await this.buildAuditAuthHeaders(false);
+      if (params.accessToken) {
+        headers['x-supabase-token'] = params.accessToken;
+      }
+      const fp = this.getBrowserDeviceFingerprint();
+      if (fp) headers['x-device-fingerprint'] = fp;
+
+      const res = await fetch('/api/referrals/attribute', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          refereeId: params.refereeId,
+          referralCode: params.referralCode ? normalizeReferralCodeInput(params.referralCode) : undefined,
+          deviceFingerprint: fp || undefined,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, error: json.error || `Attribution failed (${res.status})` };
+      }
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Attribution request failed' };
     }
+  }
 
-    // CRITICAL REQUIREMENT 2: Referee must have played (loaded credits into any game account)
-    const txs = this.getTransactions(customerId);
-    const hasLoadedGame = txs.some(
-      (t) => (t.type === 'adjustment' || t.type === 'bonus') && !!t.targetGameName && t.status === 'completed'
-    );
-    if (!hasLoadedGame) {
-      console.log(`[Referral Engine] Referral reward for referee ${customer.displayName} withheld: player has not loaded game credits.`);
-      return;
+  public async triggerServerReferralEvaluation(refereeId?: string): Promise<void> {
+    try {
+      const targetId = refereeId || this.getCurrentUser()?.id;
+      if (!targetId) return;
+      const headers = await this.buildAuditAuthHeaders(false);
+      const fp = this.getBrowserDeviceFingerprint();
+      if (fp) headers['x-device-fingerprint'] = fp;
+
+      const res = await fetch('/api/referrals/evaluate', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ refereeId: targetId }),
+      });
+      if (res.ok) {
+        const json = await res.json().catch(() => ({}));
+        if (json?.status === 'rewarded') {
+          window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'referrals_updated' } }));
+        }
+      }
+    } catch {
+      // Non-blocking server evaluation
     }
+  }
 
-    // Check if reward already paid to referrer for this specific customer
-    const referrerTxs = this.getTransactions(referrer.id);
-    const alreadyAwarded = referrerTxs.some(
-      (t) => t.type === 'referral_reward' && t.description.includes(customer.displayName)
-    );
-
-    if (!alreadyAwarded) {
-      const reward = config.referralProgram.rewardPerReferral;
-      const refWallet = this.getWallet(referrer.id);
-      refWallet.referralBonusBalance = (refWallet.referralBonusBalance || 0) + reward;
-      refWallet.lastUpdatedAt = new Date().toISOString();
-
-      const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
-      wallets[referrer.id] = refWallet;
-      this.save(STORAGE_KEYS.WALLETS, wallets);
-
-      this.recordTransaction({
-        customerId: referrer.id,
-        type: 'referral_reward',
-        amount: reward,
-        fee: 0,
-        netAmount: reward,
-        currency: config.currency,
-        balanceAfter: refWallet.availableBalance,
-        description: `Referral Bonus Credit: ${customer.displayName} verified email and loaded game account`,
-        idempotencyKey: `idemp_ref_${referrer.id}_${customer.id}`,
-        status: 'completed',
+  public async fetchReferralSummaryFromServer(
+    userId?: string
+  ): Promise<{ success: boolean; summary?: ReferralSummary; error?: string }> {
+    try {
+      const targetId = userId || this.getCurrentUser()?.id || '';
+      const params = new URLSearchParams();
+      if (targetId) params.set('userId', targetId);
+      let res = await fetch(`/api/referrals/summary?${params.toString()}`, {
+        cache: 'no-store',
+        headers: await this.buildAuditAuthHeaders(false),
       });
+      if (res.status === 401) {
+        res = await fetch(`/api/referrals/summary?${params.toString()}`, {
+          cache: 'no-store',
+          headers: await this.buildAuditAuthHeaders(true),
+        });
+      }
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.summary) {
+        return { success: false, error: json?.error || `Failed to load referral summary (${res.status})` };
+      }
+      return { success: true, summary: json.summary };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Unable to load referral summary' };
+    }
+  }
 
-      this.createNotification({
-        userId: referrer.id,
-        title: 'Referral Reward Credited',
-        message: `Congratulations! You received a $${reward.toFixed(2)} referral reward because ${customer.displayName} verified their email and loaded game credits.`,
-        type: 'referral',
-        linkTab: 'referrals',
-      });
+  public async fetchAdminReferralLedger(params?: {
+    status?: string;
+    search?: string;
+    limit?: number;
+  }): Promise<{
+    success: boolean;
+    awards: ReferralLedgerEntry[];
+    topReferrers: TopReferrerEntry[];
+    stats?: any;
+    error?: string;
+    code?: string;
+  }> {
+    try {
+      const q = new URLSearchParams();
+      if (params?.status) q.set('status', params.status);
+      if (params?.search) q.set('search', params.search);
+      if (params?.limit) q.set('limit', String(params.limit));
+      const activeId = this.getCurrentUser()?.id;
+      if (activeId) q.set('userId', activeId);
 
-      this.logAudit({
-        actorId: 'system',
-        actorName: 'Referral Engine',
-        actorRole: 'admin',
-        action: 'REFERRAL_REWARD_ISSUED',
-        entityType: 'wallet',
-        entityId: referrer.id,
-        details: `Credited $${reward} to ${referrer.displayName} for referee ${customer.displayName} (email verified & game loaded).`,
+      let res = await fetch(`/api/referrals/admin-ledger?${q.toString()}`, {
+        cache: 'no-store',
+        headers: await this.buildAuditAuthHeaders(false),
       });
+      if (res.status === 401) {
+        res = await fetch(`/api/referrals/admin-ledger?${q.toString()}`, {
+          cache: 'no-store',
+          headers: await this.buildAuditAuthHeaders(true),
+        });
+      }
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return {
+          success: false,
+          awards: [],
+          topReferrers: [],
+          error: json?.error || `Failed to load referral ledger (${res.status})`,
+          code: json?.code,
+        };
+      }
+      return {
+        success: true,
+        awards: Array.isArray(json.awards) ? json.awards : [],
+        topReferrers: Array.isArray(json.topReferrers) ? json.topReferrers : [],
+        stats: json.stats,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        awards: [],
+        topReferrers: [],
+        error: err?.message || 'Network error loading referral ledger',
+      };
+    }
+  }
+
+  public async manualAssignReferral(params: {
+    refereeId: string;
+    referrerQuery: string;
+    mode: 'link_only' | 'link_and_reward';
+    reason?: string;
+  }): Promise<{ success: boolean; message?: string; status?: string; award?: ReferralLedgerEntry; error?: string }> {
+    try {
+      const activeUser = this.getCurrentUser();
+      let res = await fetch('/api/referrals/manual-assign', {
+        method: 'POST',
+        headers: await this.buildAuditAuthHeaders(false),
+        body: JSON.stringify({
+          ...params,
+          actingUserId: activeUser?.id,
+        }),
+      });
+      if (res.status === 401) {
+        res = await fetch('/api/referrals/manual-assign', {
+          method: 'POST',
+          headers: await this.buildAuditAuthHeaders(true),
+          body: JSON.stringify({
+            ...params,
+            actingUserId: activeUser?.id,
+          }),
+        });
+      }
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, error: json?.error || `Manual assignment failed (${res.status})` };
+      }
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'referrals_updated' } }));
+      return {
+        success: true,
+        message: json.message,
+        status: json.status,
+        award: json.award,
+      };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to assign referral' };
+    }
+  }
+
+  public async setVanityReferralCode(params: {
+    userId: string;
+    vanityCode: string;
+  }): Promise<{ success: boolean; referralCode?: string; message?: string; error?: string }> {
+    try {
+      const activeUser = this.getCurrentUser();
+      let res = await fetch('/api/referrals/vanity-code', {
+        method: 'PATCH',
+        headers: await this.buildAuditAuthHeaders(false),
+        body: JSON.stringify({
+          userId: params.userId,
+          vanityCode: normalizeReferralCodeInput(params.vanityCode),
+          actingUserId: activeUser?.id,
+        }),
+      });
+      if (res.status === 401) {
+        res = await fetch('/api/referrals/vanity-code', {
+          method: 'PATCH',
+          headers: await this.buildAuditAuthHeaders(true),
+          body: JSON.stringify({
+            userId: params.userId,
+            vanityCode: normalizeReferralCodeInput(params.vanityCode),
+            actingUserId: activeUser?.id,
+          }),
+        });
+      }
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, error: json?.error || `Failed to save vanity code (${res.status})` };
+      }
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'referrals_updated' } }));
+      return {
+        success: true,
+        referralCode: json.referralCode,
+        message: json.message,
+      };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to save vanity code' };
+    }
+  }
+
+  public async reviewHeldReferral(params: {
+    awardId: string;
+    decision: 'approve' | 'reject';
+    reviewNotes?: string;
+  }): Promise<{ success: boolean; status?: string; message?: string; error?: string }> {
+    try {
+      const activeUser = this.getCurrentUser();
+      let res = await fetch('/api/referrals/review', {
+        method: 'POST',
+        headers: await this.buildAuditAuthHeaders(false),
+        body: JSON.stringify({
+          ...params,
+          actingUserId: activeUser?.id,
+        }),
+      });
+      if (res.status === 401) {
+        res = await fetch('/api/referrals/review', {
+          method: 'POST',
+          headers: await this.buildAuditAuthHeaders(true),
+          body: JSON.stringify({
+            ...params,
+            actingUserId: activeUser?.id,
+          }),
+        });
+      }
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, error: json?.error || `Review failed (${res.status})` };
+      }
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'referrals_updated' } }));
+      return {
+        success: true,
+        status: json.status,
+        message: json.message,
+      };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to review referral' };
+    }
+  }
+
+  public async saveReferralProgramSettings(
+    referralProgram: ReferralProgramConfig
+  ): Promise<{ success: boolean; referralProgram?: ReferralProgramConfig; error?: string }> {
+    try {
+      const activeUser = this.getCurrentUser();
+      const normalized = normalizeReferralConfig(referralProgram);
+      let res = await fetch('/api/admin/referral-config', {
+        method: 'POST',
+        headers: await this.buildAuditAuthHeaders(false),
+        body: JSON.stringify({
+          referralProgram: normalized,
+          actingUserId: activeUser?.id,
+        }),
+      });
+      if (res.status === 401) {
+        res = await fetch('/api/admin/referral-config', {
+          method: 'POST',
+          headers: await this.buildAuditAuthHeaders(true),
+          body: JSON.stringify({
+            referralProgram: normalized,
+            actingUserId: activeUser?.id,
+          }),
+        });
+      }
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, error: json?.error || `Failed to save referral settings (${res.status})` };
+      }
+      const current = this.getAppConfig();
+      const nextCfg: AppConfig = {
+        ...current,
+        referralProgram: normalizeReferralConfig(json.referralProgram || normalized),
+      };
+      this.cache[STORAGE_KEYS.CONFIG] = nextCfg;
+      this.saveToLocalStorage(STORAGE_KEYS.CONFIG, nextCfg);
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.CONFIG } }));
+      return { success: true, referralProgram: nextCfg.referralProgram };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to save referral settings' };
     }
   }
 
@@ -7161,6 +7524,17 @@ class DataService {
   public getAppConfig(): AppConfig {
     const cfg = this.load<AppConfig>(STORAGE_KEYS.CONFIG, INITIAL_CONFIG);
     let dirty = false;
+    const normalizedRef = normalizeReferralConfig(cfg.referralProgram);
+    if (
+      !cfg.referralProgram ||
+      cfg.referralProgram.rewardMode !== normalizedRef.rewardMode ||
+      cfg.referralProgram.payoutTarget !== normalizedRef.payoutTarget ||
+      cfg.referralProgram.maxReferralsPerUser === undefined ||
+      cfg.referralProgram.refereeRewardValue === undefined
+    ) {
+      cfg.referralProgram = normalizedRef;
+      dirty = true;
+    }
     if (!cfg.gatewaySimulator) {
       cfg.gatewaySimulator = INITIAL_CONFIG.gatewaySimulator;
       dirty = true;
@@ -7211,21 +7585,343 @@ class DataService {
     }
   }
 
-  // Audit Logs
+  // Audit Logs (Admin-Only Read, Server-Side Vercel API Writes, Zero LocalStorage)
+  private async buildAuditAuthHeaders(forceRefresh: boolean = false): Promise<Record<string, string>> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-cache',
+    };
+    const activeUser = this.getCurrentUser();
+    if (activeUser?.id) {
+      headers['x-user-id'] = activeUser.id;
+    }
+    if (supabase && isSupabaseConfigured()) {
+      try {
+        let token: string | undefined;
+        if (forceRefresh) {
+          const { data: refreshed } = await supabase.auth.refreshSession();
+          token = refreshed?.session?.access_token;
+        }
+        if (!token) {
+          const { data } = await supabase.auth.getSession();
+          token = data?.session?.access_token;
+        }
+        if (token) {
+          headers['x-supabase-token'] = token;
+        }
+      } catch {}
+    }
+    return headers;
+  }
+
   public getAuditLogs(): AuditLog[] {
-    return this.load<AuditLog[]>(STORAGE_KEYS.AUDIT_LOGS, INITIAL_AUDIT_LOGS).sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-    );
+    if (this.getCurrentUser()?.role !== 'admin') {
+      return [];
+    }
+    const cached = Array.isArray(this.cache[STORAGE_KEYS.AUDIT_LOGS])
+      ? (this.cache[STORAGE_KEYS.AUDIT_LOGS] as AuditLog[])
+      : [];
+    return mergeAuditLogs([], cached);
+  }
+
+  private async fetchAuditLogsDirectViaRls(options?: {
+    limit?: number;
+    entityType?: string;
+    search?: string;
+    fromDate?: string;
+    toDate?: string;
+    beforeTimestamp?: string;
+    append?: boolean;
+    format?: 'json' | 'csv';
+    skipCacheUpdate?: boolean;
+  }): Promise<{ logs: AuditLog[]; hasMore: boolean; nextCursor: string | null; error: string | null }> {
+    if (!supabase || !isSupabaseConfigured()) {
+      return {
+        logs: [],
+        hasMore: false,
+        nextCursor: null,
+        error: 'Supabase connection is not configured.',
+      };
+    }
+
+    const maxAllowed = options?.format === 'csv' ? 500 : 100;
+    const limit =
+      typeof options?.limit === 'number' && options.limit > 0
+        ? Math.min(options.limit, maxAllowed)
+        : 100;
+    const entityType = (options?.entityType || 'all').trim().toLowerCase();
+    const sanitizedSearch = (options?.search || '')
+      .replace(/[,()*%\\]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const runRlsQuery = async (legacyMode: boolean) => {
+      const tsCol = legacyMode ? 'created_at' : 'timestamp';
+      const actorCol = legacyMode ? 'user_email' : 'actor_name';
+      const cols = legacyMode
+        ? 'id, user_id, user_email, action, entity_type, entity_id, details, created_at'
+        : 'id, actor_id, actor_name, actor_role, action, entity_type, entity_id, details, timestamp';
+
+      let q = supabase.from('audit_logs').select(cols);
+
+      if (entityType && entityType !== 'all') {
+        q = q.eq('entity_type', entityType);
+      }
+      if (options?.beforeTimestamp) {
+        q = q.lt(tsCol, options.beforeTimestamp);
+      }
+      if (options?.fromDate) {
+        const startIso = options.fromDate.includes('T')
+          ? options.fromDate
+          : `${options.fromDate}T00:00:00.000Z`;
+        if (Number.isFinite(Date.parse(startIso))) {
+          q = q.gte(tsCol, startIso);
+        }
+      }
+      if (options?.toDate) {
+        const endIso = options.toDate.includes('T')
+          ? options.toDate
+          : `${options.toDate}T23:59:59.999Z`;
+        if (Number.isFinite(Date.parse(endIso))) {
+          q = q.lte(tsCol, endIso);
+        }
+      }
+      if (sanitizedSearch) {
+        q = q.or(
+          `action.ilike.%${sanitizedSearch}%,${actorCol}.ilike.%${sanitizedSearch}%,entity_id.ilike.%${sanitizedSearch}%,details.ilike.%${sanitizedSearch}%`
+        );
+      }
+
+      return q
+        .order(tsCol, { ascending: false })
+        .order('id', { ascending: false })
+        .limit(limit + 1);
+    };
+
+    try {
+      let { data, error } = await runRlsQuery(false);
+      if (
+        error &&
+        (error.code === '42703' ||
+          error.code === 'PGRST204' ||
+          String(error.message || '').toLowerCase().includes('does not exist') ||
+          String(error.message || '').toLowerCase().includes('schema cache'))
+      ) {
+        const legacyRes = await runRlsQuery(true);
+        data = legacyRes.data;
+        error = legacyRes.error;
+      }
+
+      if (error) {
+        return {
+          logs: [],
+          hasMore: false,
+          nextCursor: null,
+          error: error.message || 'Failed to read audit logs from Supabase.',
+        };
+      }
+
+      const rows = Array.isArray(data) ? data : [];
+      const hasMore = rows.length > limit;
+      const sliced = hasMore ? rows.slice(0, limit) : rows;
+      const normalized = sliced
+        .map((row: any) => normalizeAuditLogRow(row))
+        .filter((item: AuditLog | null): item is AuditLog => Boolean(item));
+
+      if (!options?.skipCacheUpdate) {
+        const existing =
+          options?.append && Array.isArray(this.cache[STORAGE_KEYS.AUDIT_LOGS])
+            ? (this.cache[STORAGE_KEYS.AUDIT_LOGS] as AuditLog[])
+            : [];
+        this.cache[STORAGE_KEYS.AUDIT_LOGS] = mergeAuditLogs(existing, normalized, {
+          replace: !options?.append,
+          maxItems: options?.append ? 500 : 100,
+        });
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: STORAGE_KEYS.AUDIT_LOGS, count: normalized.length },
+          })
+        );
+      }
+
+      const nextCursor = normalized.length > 0 ? normalized[normalized.length - 1].timestamp : null;
+      return { logs: normalized, hasMore, nextCursor, error: null };
+    } catch (err: any) {
+      return {
+        logs: [],
+        hasMore: false,
+        nextCursor: null,
+        error: err?.message || 'Failed to read audit logs directly.',
+      };
+    }
+  }
+
+  public async fetchAuditLogsFromServer(options?: {
+    limit?: number;
+    entityType?: string;
+    search?: string;
+    fromDate?: string;
+    toDate?: string;
+    beforeTimestamp?: string;
+    append?: boolean;
+    format?: 'json' | 'csv';
+    skipCacheUpdate?: boolean;
+  }): Promise<{ logs: AuditLog[]; hasMore: boolean; nextCursor: string | null; error: string | null }> {
+    const currentUser = this.getCurrentUser();
+    if (!currentUser || currentUser.role !== 'admin') {
+      this.cache[STORAGE_KEYS.AUDIT_LOGS] = [];
+      return { logs: [], hasMore: false, nextCursor: null, error: 'Admin authorization required.' };
+    }
+
+    const params = new URLSearchParams();
+    params.set('limit', String(options?.limit || 100));
+    params.set('userId', currentUser.id);
+    if (options?.entityType && options.entityType !== 'all') params.set('entityType', options.entityType);
+    if (options?.search?.trim()) params.set('search', options.search.trim());
+    if (options?.fromDate) params.set('fromDate', options.fromDate);
+    if (options?.toDate) params.set('toDate', options.toDate);
+    if (options?.beforeTimestamp) params.set('beforeTimestamp', options.beforeTimestamp);
+    if (options?.format === 'csv') params.set('format', 'csv');
+
+    try {
+      let res = await fetch(`/api/audit-logs?${params.toString()}`, {
+        method: 'GET',
+        cache: 'no-store',
+        headers: await this.buildAuditAuthHeaders(false),
+      });
+
+      if (res.status === 401) {
+        res = await fetch(`/api/audit-logs?${params.toString()}`, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: await this.buildAuditAuthHeaders(true),
+        });
+      }
+
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      const isJson = contentType.includes('application/json');
+      const data = await res.json().catch(() => null);
+
+      if (res.ok && data?.success) {
+        const normalized = (Array.isArray(data.logs) ? data.logs : [])
+          .map((row: any) => normalizeAuditLogRow(row))
+          .filter((item: AuditLog | null): item is AuditLog => Boolean(item));
+
+        if (!options?.skipCacheUpdate) {
+          const existing =
+            options?.append && Array.isArray(this.cache[STORAGE_KEYS.AUDIT_LOGS])
+              ? (this.cache[STORAGE_KEYS.AUDIT_LOGS] as AuditLog[])
+              : [];
+          this.cache[STORAGE_KEYS.AUDIT_LOGS] = mergeAuditLogs(existing, normalized, {
+            replace: !options?.append,
+            maxItems: options?.append ? 500 : 100,
+          });
+          window.dispatchEvent(
+            new CustomEvent('aetherpay_state_changed', {
+              detail: { key: STORAGE_KEYS.AUDIT_LOGS, count: normalized.length },
+            })
+          );
+        }
+
+        return {
+          logs: normalized,
+          hasMore: Boolean(data.hasMore),
+          nextCursor: data.nextCursor || null,
+          error: null,
+        };
+      }
+
+      // Explicit backend JSON 403/401 must never be bypassed by client fallback
+      if ((res.status === 403 || res.status === 401) && isJson && data?.error) {
+        return {
+          logs: [],
+          hasMore: false,
+          nextCursor: null,
+          error: data.error,
+        };
+      }
+
+      // Upstream proxy block (non-JSON 403), 404, or 5xx: fall back to RLS-enforced direct Supabase query
+      const rlsResult = await this.fetchAuditLogsDirectViaRls(options);
+      if (!rlsResult.error) {
+        return rlsResult;
+      }
+
+      return {
+        logs: [],
+        hasMore: false,
+        nextCursor: null,
+        error: data?.error || rlsResult.error || `Failed to load audit logs (${res.status})`,
+      };
+    } catch (err: any) {
+      const rlsResult = await this.fetchAuditLogsDirectViaRls(options);
+      if (!rlsResult.error) {
+        return rlsResult;
+      }
+      return {
+        logs: [],
+        hasMore: false,
+        nextCursor: null,
+        error: err?.message || rlsResult.error || 'Network error fetching audit logs',
+      };
+    }
   }
 
   public logAudit(entry: Omit<AuditLog, 'id' | 'timestamp'>): void {
-    const list = this.load<AuditLog[]>(STORAGE_KEYS.AUDIT_LOGS, INITIAL_AUDIT_LOGS);
-    list.unshift({
+    const activeUser = this.getCurrentUser();
+    const optimistic: AuditLog = {
       ...entry,
       id: `aud_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       timestamp: new Date().toISOString(),
-    });
-    this.save(STORAGE_KEYS.AUDIT_LOGS, list);
+    };
+
+    if (activeUser?.role === 'admin') {
+      const existing = Array.isArray(this.cache[STORAGE_KEYS.AUDIT_LOGS])
+        ? (this.cache[STORAGE_KEYS.AUDIT_LOGS] as AuditLog[])
+        : [];
+      this.cache[STORAGE_KEYS.AUDIT_LOGS] = mergeAuditLogs(existing, [optimistic], { maxItems: 100 });
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.AUDIT_LOGS } }));
+    }
+
+    void this.persistAuditLogViaApi(entry, optimistic.id);
+  }
+
+  private async persistAuditLogViaApi(
+    entry: Omit<AuditLog, 'id' | 'timestamp'>,
+    optimisticId?: string
+  ): Promise<void> {
+    try {
+      let res = await fetch('/api/audit-logs', {
+        method: 'POST',
+        keepalive: true,
+        headers: await this.buildAuditAuthHeaders(false),
+        body: JSON.stringify(entry),
+      });
+      if (res.status === 401) {
+        res = await fetch('/api/audit-logs', {
+          method: 'POST',
+          keepalive: true,
+          headers: await this.buildAuditAuthHeaders(true),
+          body: JSON.stringify(entry),
+        });
+      }
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        console.warn('[DataService] Server audit log write failed:', errBody?.error || res.status);
+        return;
+      }
+      const data = await res.json().catch(() => null);
+      const saved = data?.log ? normalizeAuditLogRow(data.log) : null;
+      if (saved && this.getCurrentUser()?.role === 'admin') {
+        const existing = Array.isArray(this.cache[STORAGE_KEYS.AUDIT_LOGS])
+          ? (this.cache[STORAGE_KEYS.AUDIT_LOGS] as AuditLog[]).filter((x) => x.id !== optimisticId)
+          : [];
+        this.cache[STORAGE_KEYS.AUDIT_LOGS] = mergeAuditLogs(existing, [saved], { maxItems: 100 });
+        window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.AUDIT_LOGS } }));
+      }
+    } catch (err) {
+      console.warn('[DataService] Server audit log network notice:', err);
+    }
   }
 
   private recordTransaction(tx: Omit<WalletTransaction, 'id' | 'createdAt'>): void {
@@ -7448,9 +8144,7 @@ class DataService {
         details: `Loaded $${params.amount} non-cashable referral bonus directly into ${targetAccount.gameName}.`,
       });
 
-      // Trigger referral qualification check if player was referred
-      this.checkAndAwardReferral(params.customerId, params.amount);
-
+      // Promotional referral bonus loads must never qualify a referral reward
       return {
         success: true,
         message: `Successfully loaded $${params.amount.toFixed(2)} from referral bonus to ${targetAccount.gameName}!`,
@@ -7503,9 +8197,7 @@ class DataService {
         linkTab: 'game_accounts',
       });
 
-      // Trigger referral qualification check if player was referred and now satisfies playing milestone
-      this.checkAndAwardReferral(params.customerId, params.amount);
-
+      // Wallet-to-game transfers do not trigger referral payouts (only approved real deposits qualify)
       return {
         success: true,
         message: `Successfully loaded $${params.amount.toFixed(2)} from wallet to ${targetAccount.gameName}!`,

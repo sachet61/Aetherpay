@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, GameCatalogItem, GameLink } from '../../types';
 import { dataService } from '../../services/dataService';
+import { storageService } from '../../services/storageService';
+import { validateImageFile } from '../../utils/uploadUtils';
 import {
   DEFAULT_GAME_ICON,
   LOCAL_GAME_IMAGES,
@@ -56,42 +58,35 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
   const [description, setDescription] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const input = e.currentTarget;
+    const file = input.files?.[0];
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      alert('Please upload a valid image file (PNG, JPG, WebP).');
+    setUploadError(null);
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      setUploadError(validation.error || 'Please upload a valid image file (PNG, JPG, WebP).');
+      input.value = '';
       return;
     }
 
     setUploadingImage(true);
-    const reader = new FileReader();
-    reader.onload = async (evt) => {
-      const dataUrl = evt.target?.result as string;
-      try {
-        const res = await fetch('/api/upload-qr', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            dataUrl,
-            filename: file.name.replace(/\.[^/.]+$/, ''),
-          }),
-        });
-        const data = await res.json();
-        if (data.url) {
-          setIconUrl(data.url);
-        } else {
-          setIconUrl(dataUrl);
-        }
-      } catch {
-        setIconUrl(dataUrl);
-      } finally {
-        setUploadingImage(false);
+    try {
+      const res = await storageService.uploadCatalogOrQrImage(file, 'game_icon');
+      if (res.success && res.url) {
+        setIconUrl(res.url);
+      } else {
+        setUploadError(res.error || 'Failed to upload game icon image.');
       }
-    };
-    reader.readAsDataURL(file);
+    } catch (err: any) {
+      setUploadError(err?.message || 'Unable to upload game icon image.');
+    } finally {
+      setUploadingImage(false);
+      input.value = '';
+    }
   };
 
   // Multiple links for a specific game
@@ -121,6 +116,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
       { label: 'Download Link', url: 'http://start.firekirin.xyz:8580/index.html' },
     ]);
     setEnabled(true);
+    setUploadError(null);
   };
 
   const handleOpenEditGameModal = (game: GameCatalogItem) => {
@@ -140,6 +136,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
           ]
     );
     setEnabled(game.enabled);
+    setUploadError(null);
   };
 
   const handleAddLink = () => {
@@ -555,7 +552,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
                       <span>{uploadingImage ? 'Uploading...' : 'Upload File'}</span>
                       <input
                         type="file"
-                        accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                        accept="image/*,.png,.jpg,.jpeg,.webp,.svg"
                         className="hidden"
                         onChange={handleFileUpload}
                         disabled={uploadingImage}
@@ -563,6 +560,25 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
                     </label>
                   </div>
                 </div>
+
+                {uploadError && (
+                  <div
+                    role="alert"
+                    className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-rose-950/70 border border-rose-500/40 text-xs text-rose-200"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                      <span className="truncate">{uploadError}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setUploadError(null)}
+                      className="text-rose-200 hover:text-white font-semibold shrink-0"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
 
                 {/* Available Local Game Assets Selector */}
                 <div className="space-y-1.5 pt-1">

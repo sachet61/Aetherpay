@@ -16,6 +16,7 @@ import type {
 } from '../../types';
 import { dataService } from '../../services/dataService';
 import { storageService } from '../../services/storageService';
+import { validateImageFile } from '../../utils/uploadUtils';
 import { getDefaultBonusPercentageForMethod } from '../../services/walletActivityUtils';
 
 interface AdminChatTopUpModalProps {
@@ -154,6 +155,14 @@ export const AdminChatTopUpModal: React.FC<AdminChatTopUpModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     setErrorMessage(null);
+
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      setErrorMessage(validation.error || 'Unsupported screenshot file.');
+      if (proofInputRef.current) proofInputRef.current.value = '';
+      return;
+    }
+
     setReceiptName(file.name);
     setIsUploadingProof(true);
 
@@ -161,10 +170,9 @@ export const AdminChatTopUpModal: React.FC<AdminChatTopUpModalProps> = ({
       const res = await storageService.uploadPaymentProof(file, customerId);
       if (res.success && res.url) {
         setReceiptUrl(res.url);
+        setReceiptName(res.name || file.name);
       } else {
-        const reader = new FileReader();
-        reader.onload = () => setReceiptUrl(reader.result as string);
-        reader.readAsDataURL(file);
+        setErrorMessage(res.error || 'Failed to upload payment proof screenshot.');
       }
     } catch (err: any) {
       setErrorMessage(err?.message || 'Unable to upload payment proof image.');

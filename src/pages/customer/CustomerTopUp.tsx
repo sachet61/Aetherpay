@@ -1,8 +1,14 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { UserProfile, UserWallet, PaymentMethodType } from '../../types';
 import { dataService } from '../../services/dataService';
 import { telegramService } from '../../services/telegramService';
 import { storageService } from '../../services/storageService';
+import {
+  clearTopUpDraft,
+  loadTopUpDraft,
+  saveTopUpDraft,
+  validateImageFile,
+} from '../../utils/uploadUtils';
 import {
   ArrowDownToLine,
   CreditCard,
@@ -48,19 +54,40 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
   const gameAccounts = dataService.getGameAccounts(currentUser.id);
   const activeGameAccounts = gameAccounts.filter((g) => g.status === 'active');
 
-  const [fundingMode, setFundingMode] = useState<'gateway_payment' | 'referral_rewards'>('gateway_payment');
-  
+  const initialDraft = React.useMemo(
+    () =>
+      typeof window !== 'undefined'
+        ? loadTopUpDraft(window.sessionStorage, currentUser.id)
+        : null,
+    [currentUser.id]
+  );
+
+  const [fundingMode, setFundingMode] = useState<'gateway_payment' | 'referral_rewards'>(
+    () => initialDraft?.fundingMode || 'gateway_payment'
+  );
+
   // Game Choose: User selects game. Can select from registered game accounts or catalog
   const [selectedGameCatalogId, setSelectedGameCatalogId] = useState<string>(
-    preselectedGameCatalogId || activeGameAccounts[0]?.gameCatalogId || gameCatalog[0]?.id || ''
+    () =>
+      preselectedGameCatalogId ||
+      initialDraft?.selectedGameCatalogId ||
+      activeGameAccounts[0]?.gameCatalogId ||
+      gameCatalog[0]?.id ||
+      ''
   );
 
   // Exactly 4 supported methods
-  const [selectedMethodType, setSelectedMethodType] = useState<PaymentMethodType>('cashapp');
-  const [selectedCryptoCoin, setSelectedCryptoCoin] = useState<'BTC' | 'ETH' | 'USDT'>('USDT');
+  const [selectedMethodType, setSelectedMethodType] = useState<PaymentMethodType>(
+    () => initialDraft?.selectedMethodType || 'cashapp'
+  );
+  const [selectedCryptoCoin, setSelectedCryptoCoin] = useState<'BTC' | 'ETH' | 'USDT'>(
+    () => initialDraft?.selectedCryptoCoin || 'USDT'
+  );
   const [amount, setAmount] = useState<string>(prefilledAmount ? String(prefilledAmount) : '100');
   const [referralAmount, setReferralAmount] = useState<string>(
-    String(Math.min(wallet.referralBonusBalance || 0, 50) || 25)
+    () =>
+      initialDraft?.referralAmount ||
+      String(Math.min(wallet.referralBonusBalance || 0, 50) || 25)
   );
 
   // Form input states
@@ -71,13 +98,44 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   // Screenshot upload state for Admin verification
-  const [screenshotFile, setScreenshotFile] = useState<string | null>(null);
-  const [screenshotName, setScreenshotName] = useState<string>('');
+  const [screenshotFile, setScreenshotFile] = useState<string | null>(
+    () => initialDraft?.screenshotUrl || null
+  );
+  const [screenshotName, setScreenshotName] = useState<string>(
+    () => initialDraft?.screenshotName || ''
+  );
   const [isUploadingScreenshot, setIsUploadingScreenshot] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isDraggingScreenshot, setIsDraggingScreenshot] = useState(false);
+  const [previewLoadFailed, setPreviewLoadFailed] = useState(false);
+  const screenshotInputRef = useRef<HTMLInputElement>(null);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Persist Top-Up draft in sessionStorage so OS-level mobile tab discards/restores keep user inputs & proof URL
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    saveTopUpDraft(window.sessionStorage, currentUser.id, {
+      fundingMode,
+      selectedGameCatalogId,
+      selectedMethodType,
+      selectedCryptoCoin,
+      referralAmount,
+      screenshotUrl: screenshotFile,
+      screenshotName,
+    });
+  }, [
+    currentUser.id,
+    fundingMode,
+    selectedGameCatalogId,
+    selectedMethodType,
+    selectedCryptoCoin,
+    referralAmount,
+    screenshotFile,
+    screenshotName,
+  ]);
 
   // Find target game item - either active game account or catalog game
   const targetAccount = gameAccounts.find((g) => g.gameCatalogId === selectedGameCatalogId);
@@ -117,24 +175,65 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  const handleScreenshotChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setScreenshotName(file.name);
-      setIsUploadingScreenshot(true);
-      const res = await storageService.uploadPaymentProof(file, currentUser.id);
-      setIsUploadingScreenshot(false);
+  const processScreenshotFile = async (file: File) => {
+    setUploadError(null);
+    setErrorMessage(null);
+    setPreviewLoadFailed(false);
 
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      setUploadError(validation.error || 'Please select a valid image file (PNG, JPG, or WebP).');
+      return;
+    }
+
+    setScreenshotName(file.name);
+    setIsUploadingScreenshot(true);
+    try {
+      const res = await storageService.uploadPaymentProof(file, currentUser.id);
       if (res.success && res.url) {
         setScreenshotFile(res.url);
+        setScreenshotName(res.name || file.name);
       } else {
-        // Safe fallback if bucket upload returns notice
-        const reader = new FileReader();
-        reader.onload = () => {
-          setScreenshotFile(reader.result as string);
-        };
-        reader.readAsDataURL(file);
+        setUploadError(
+          res.error || 'Screenshot upload failed. Your form selections are preserved — please retry.'
+        );
       }
+    } catch (err: any) {
+      setUploadError(
+        err?.message || 'Unable to upload payment screenshot. Please check your connection and try again.'
+      );
+    } finally {
+      setIsUploadingScreenshot(false);
+      if (screenshotInputRef.current) {
+        screenshotInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleScreenshotChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await processScreenshotFile(file);
+  };
+
+  const handleScreenshotDrag = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setIsDraggingScreenshot(true);
+    } else if (e.type === 'dragleave') {
+      setIsDraggingScreenshot(false);
+    }
+  };
+
+  const handleScreenshotDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingScreenshot(false);
+    if (isUploadingScreenshot) return;
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      await processScreenshotFile(file);
     }
   };
 
@@ -292,6 +391,10 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
         );
         setScreenshotFile(null);
         setScreenshotName('');
+        setUploadError(null);
+        if (typeof window !== 'undefined') {
+          clearTopUpDraft(window.sessionStorage, currentUser.id);
+        }
       } catch (err: any) {
         setIsSubmitting(false);
         setErrorMessage(err.message || 'Error processing top-up proof.');
@@ -744,73 +847,133 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
 
                 {/* Screenshot Send Option to verify from admin */}
                 <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3 text-xs">
-                  <div className="flex items-center justify-between">
-                    <label className="font-semibold text-white flex items-center gap-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label htmlFor="topup-proof-input" className="font-semibold text-white flex items-center gap-1.5">
                       <ImageIcon className="w-4 h-4 text-indigo-400" />
                       <span>Send Payment Screenshot (Verify from Admin)</span>
                     </label>
-                    <span className="text-[10px] text-slate-400">Recommended</span>
+                    <span className="text-[10px] text-slate-400 shrink-0">Required</span>
                   </div>
 
+                  <input
+                    id="topup-proof-input"
+                    ref={screenshotInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleScreenshotChange}
+                    disabled={isUploadingScreenshot}
+                    className="hidden"
+                  />
+
+                  {uploadError && (
+                    <div
+                      role="alert"
+                      className="p-2.5 rounded-lg bg-rose-950/60 border border-rose-800 text-rose-200 text-[11px] flex items-center justify-between gap-2"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                        <span>{uploadError}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setUploadError(null)}
+                        className="text-rose-200 hover:text-white font-medium shrink-0"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  )}
+
                   {screenshotFile ? (
-                    <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
-                      <div className="flex items-center gap-3">
-                        <img
-                          src={screenshotFile}
-                          alt="Screenshot Preview"
-                          className="w-12 h-12 object-cover rounded-lg border border-slate-700"
-                        />
-                        <div>
+                    <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-slate-900 border border-slate-800">
+                      <div className="flex items-center gap-3 min-w-0">
+                        {!previewLoadFailed ? (
+                          <img
+                            src={screenshotFile}
+                            alt="Uploaded payment screenshot preview"
+                            referrerPolicy="no-referrer"
+                            onError={() => setPreviewLoadFailed(true)}
+                            className="w-12 h-12 object-cover rounded-lg border border-slate-700 shrink-0"
+                          />
+                        ) : (
+                          <div className="w-12 h-12 rounded-lg border border-slate-700 bg-slate-950 flex items-center justify-center shrink-0">
+                            <ImageIcon className="w-5 h-5 text-indigo-400" />
+                          </div>
+                        )}
+                        <div className="min-w-0">
                           <div className="text-xs font-semibold text-white truncate max-w-[200px]">
-                            {screenshotName}
+                            {screenshotName || 'payment_receipt.webp'}
                           </div>
                           <div className="text-[10px] text-emerald-400 flex items-center gap-1">
-                            <Check className="w-3 h-3" />
+                            <Check className="w-3 h-3 shrink-0" />
                             <span>Screenshot attached for admin review</span>
                           </div>
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setScreenshotFile(null);
-                          setScreenshotName('');
-                        }}
-                        className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => screenshotInputRef.current?.click()}
+                          disabled={isUploadingScreenshot}
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium whitespace-nowrap"
+                        >
+                          Replace
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Remove uploaded screenshot"
+                          onClick={() => {
+                            setScreenshotFile(null);
+                            setScreenshotName('');
+                            setUploadError(null);
+                            setPreviewLoadFailed(false);
+                          }}
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
                   ) : (
-                    <div className="border border-dashed border-slate-700 rounded-xl p-4 text-center bg-slate-900/40 hover:bg-slate-900/80 transition-colors cursor-pointer relative">
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={handleScreenshotChange}
+                    <div
+                      onDragEnter={handleScreenshotDrag}
+                      onDragOver={handleScreenshotDrag}
+                      onDragLeave={handleScreenshotDrag}
+                      onDrop={handleScreenshotDrop}
+                      className={`border border-dashed rounded-xl transition-colors ${
+                        isDraggingScreenshot
+                          ? 'border-amber-400 bg-slate-900'
+                          : 'border-slate-700 bg-slate-900/40 hover:bg-slate-900/80'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => screenshotInputRef.current?.click()}
                         disabled={isUploadingScreenshot}
-                        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full disabled:cursor-not-allowed"
-                      />
-                      {isUploadingScreenshot ? (
-                        <>
-                          <Loader2 className="w-6 h-6 mx-auto text-amber-400 mb-1 animate-spin" />
-                          <div className="text-xs font-semibold text-amber-300">
-                            Optimizing &amp; Uploading Screenshot to Storage...
-                          </div>
-                          <p className="text-[10px] text-slate-400 mt-0.5">
-                            Converting to high-speed WebP format
-                          </p>
-                        </>
-                      ) : (
-                        <>
-                          <Upload className="w-6 h-6 mx-auto text-indigo-400 mb-1" />
-                          <div className="text-xs font-semibold text-slate-200">
-                            Upload or Drag Payment Screenshot
-                          </div>
-                          <p className="text-[10px] text-slate-400 mt-0.5">
-                            PNG, JPG, or WebP screenshot from Cash App, Chime, Bank, or Crypto wallet
-                          </p>
-                        </>
-                      )}
+                        className="w-full min-h-[112px] p-4 text-center flex flex-col items-center justify-center rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        {isUploadingScreenshot ? (
+                          <>
+                            <Loader2 className="w-6 h-6 text-amber-400 mb-1.5 animate-spin" />
+                            <div className="text-xs font-semibold text-amber-300">
+                              Optimizing &amp; Uploading Screenshot...
+                            </div>
+                            <p className="text-[10px] text-slate-400 mt-0.5">
+                              Converting to WebP and saving securely
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <Upload className="w-6 h-6 text-indigo-400 mb-1.5" />
+                            <div className="text-xs font-semibold text-slate-200">
+                              Tap to Upload or Drag Payment Screenshot
+                            </div>
+                            <p className="text-[10px] text-slate-400 mt-0.5">
+                              PNG, JPG, or WebP screenshot from Cash App, Chime, Bank, or Crypto wallet
+                            </p>
+                          </>
+                        )}
+                      </button>
                     </div>
                   )}
                 </div>

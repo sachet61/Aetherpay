@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   shouldShowSessionHydrationGate,
+  shouldRunSilentBackgroundRefresh,
   resolveHydrationPhaseLabel,
   getPrefetchRouteKeysForRole,
 } from './sessionHydrationUtils';
@@ -167,4 +168,56 @@ test('getPrefetchRouteKeysForRole includes activeTab and role landing pages with
     'ops_requests',
     'ops_chat',
   ]);
+});
+
+test('shouldRunSilentBackgroundRefresh skips full-screen hydration gate when current user is already hydrated', () => {
+  assert.equal(
+    shouldRunSilentBackgroundRefresh({
+      targetUserId: 'user-1',
+      lastHydratedUserId: 'user-1',
+      lastHydrationError: null,
+      force: false,
+    }),
+    true
+  );
+
+  // Initial boot or user switch must still run full hydration
+  assert.equal(
+    shouldRunSilentBackgroundRefresh({
+      targetUserId: 'user-1',
+      lastHydratedUserId: null,
+      lastHydrationError: null,
+      force: false,
+    }),
+    false
+  );
+  assert.equal(
+    shouldRunSilentBackgroundRefresh({
+      targetUserId: 'user-2',
+      lastHydratedUserId: 'user-1',
+      lastHydrationError: null,
+      force: false,
+    }),
+    false
+  );
+
+  // Forced retry or prior hydration error must allow full hydration
+  assert.equal(
+    shouldRunSilentBackgroundRefresh({
+      targetUserId: 'user-1',
+      lastHydratedUserId: 'user-1',
+      lastHydrationError: null,
+      force: true,
+    }),
+    false
+  );
+  assert.equal(
+    shouldRunSilentBackgroundRefresh({
+      targetUserId: 'user-1',
+      lastHydratedUserId: 'user-1',
+      lastHydrationError: 'Timeout',
+      force: false,
+    }),
+    false
+  );
 });

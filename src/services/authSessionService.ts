@@ -355,7 +355,8 @@ class AuthSessionService {
     email: string,
     displayName: string,
     role: UserRole,
-    emailVerified?: boolean
+    emailVerified?: boolean,
+    options?: { authEvent?: 'login' | 'register' | 'none'; accessToken?: string }
   ): UserSession {
     const now = Date.now();
     const token = `tok_${sha256Hex(`${email}:${now}:${Math.random()}`)}`;
@@ -381,11 +382,22 @@ class AuthSessionService {
 
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
 
-    fetch('/api/auth/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, token, userId, role: assignedRole, displayName }),
-    }).catch(() => {});
+    const authEvent = options?.authEvent || 'none';
+    if (authEvent === 'login' || authEvent === 'register') {
+      const endpoint = authEvent === 'register' ? '/api/auth/register' : '/api/auth/login';
+      const reqHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-user-id': userId,
+      };
+      if (options?.accessToken) {
+        reqHeaders['x-supabase-token'] = options.accessToken;
+      }
+      fetch(endpoint, {
+        method: 'POST',
+        headers: reqHeaders,
+        body: JSON.stringify({ email, token, userId, role: assignedRole, displayName }),
+      }).catch(() => {});
+    }
 
     return session;
   }

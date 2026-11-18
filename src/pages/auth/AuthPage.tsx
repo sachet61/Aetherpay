@@ -55,7 +55,29 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
   const [signupEmail, setSignupEmail] = useState('');
   const [signupPassword, setSignupPassword] = useState('');
   const [signupPhone, setSignupPhone] = useState('');
-  const [signupReferral, setSignupReferral] = useState('SWIFT99');
+  const [signupReferral, setSignupReferral] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      const refFromUrl = (searchParams.get('ref') || '').trim().toUpperCase();
+      if (refFromUrl) {
+        sessionStorage.setItem('ss_pending_ref_code', refFromUrl);
+        return refFromUrl;
+      }
+      return (sessionStorage.getItem('ss_pending_ref_code') || '').trim().toUpperCase();
+    } catch {
+      return '';
+    }
+  });
+  const [invitedViaLink, setInvitedViaLink] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      return Boolean((searchParams.get('ref') || '').trim());
+    } catch {
+      return false;
+    }
+  });
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
@@ -86,11 +108,25 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
 
     window.addEventListener('supabase_password_recovery', handleRecovery);
 
-    // Also check window hash directly on mount
+    // Also check window hash and ?ref= query parameter directly on mount
     if (typeof window !== 'undefined') {
       const hash = window.location.hash || '';
       if (hash.includes('type=recovery') || hash.includes('access_token')) {
         handleRecovery();
+      } else {
+        try {
+          const searchParams = new URLSearchParams(window.location.search);
+          const refFromUrl = (searchParams.get('ref') || '').trim().toUpperCase();
+          if (refFromUrl || window.location.pathname.toLowerCase().includes('/signup')) {
+            if (refFromUrl) {
+              setSignupReferral(refFromUrl);
+              setInvitedViaLink(true);
+              sessionStorage.setItem('ss_pending_ref_code', refFromUrl);
+              setInfoMessage(`Invite code ${refFromUrl} applied. Create your account to link your referral.`);
+            }
+            setAuthMode('signup');
+          }
+        } catch {}
       }
     }
 
@@ -610,10 +646,23 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
                       <input
                         type="text"
                         value={signupReferral}
-                        onChange={(e) => setSignupReferral(e.target.value.toUpperCase())}
-                        placeholder="SWIFT99"
+                        onChange={(e) => {
+                          const val = e.target.value.toUpperCase();
+                          setSignupReferral(val);
+                          setInvitedViaLink(false);
+                          try {
+                            if (val.trim()) sessionStorage.setItem('ss_pending_ref_code', val.trim());
+                            else sessionStorage.removeItem('ss_pending_ref_code');
+                          } catch {}
+                        }}
+                        placeholder="Optional invite code"
                         className="w-full bg-[#0A0F1D] border border-slate-800 rounded-xl px-3 py-2 text-xs text-amber-300 font-mono focus:outline-none focus:border-amber-400 uppercase transition"
                       />
+                      {invitedViaLink && signupReferral && (
+                        <p className="text-[10px] text-emerald-400 font-mono">
+                          Invite link active ({signupReferral})
+                        </p>
+                      )}
                     </div>
                   </div>
 

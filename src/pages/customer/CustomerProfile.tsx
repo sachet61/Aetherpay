@@ -24,6 +24,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { storageService } from '../../services/storageService';
+import { validateImageFile } from '../../utils/uploadUtils';
 
 interface CustomerProfileProps {
   currentUser: UserProfile;
@@ -49,10 +50,19 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
   const [showIOSGuide, setShowIOSGuide] = useState<boolean>(false);
   const avatarInputRef = React.useRef<HTMLInputElement>(null);
   const [isUploadingAvatar, setIsUploadingAvatar] = useState<boolean>(false);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
 
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    setAvatarError(null);
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      setAvatarError(validation.error || 'Please choose a valid PNG, JPG, or WebP image.');
+      if (avatarInputRef.current) avatarInputRef.current.value = '';
+      return;
+    }
 
     try {
       setIsUploadingAvatar(true);
@@ -64,10 +74,10 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
         setSuccessNote('Profile picture uploaded, compressed to WebP, and saved to database!');
         setTimeout(() => setSuccessNote(null), 5000);
       } else {
-        alert(res.error || 'Failed to update profile picture.');
+        setAvatarError(res.error || 'Failed to update profile picture. Please try again.');
       }
     } catch (err: any) {
-      alert(err.message || 'Error uploading profile picture.');
+      setAvatarError(err?.message || 'Error uploading profile picture. Please try again.');
     } finally {
       setIsUploadingAvatar(false);
       if (avatarInputRef.current) avatarInputRef.current.value = '';
@@ -138,6 +148,25 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
         <div className="p-3 rounded-lg bg-emerald-950/60 border border-emerald-800 text-emerald-300 text-xs flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
           <span>{successNote}</span>
+        </div>
+      )}
+
+      {avatarError && (
+        <div
+          role="alert"
+          className="p-3 rounded-lg bg-rose-950/60 border border-rose-800 text-rose-200 text-xs flex items-center justify-between gap-2"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span>{avatarError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAvatarError(null)}
+            className="text-rose-200 hover:text-white font-medium shrink-0"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 

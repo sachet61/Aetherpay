@@ -20,6 +20,25 @@ export function shouldShowSessionHydrationGate(input: HydrationGateInput): boole
   return input.hydratedUserId !== input.currentUserId;
 }
 
+export interface SilentRefreshInput {
+  targetUserId?: string | null;
+  lastHydratedUserId?: string | null;
+  lastHydrationError?: string | null;
+  force?: boolean;
+}
+
+/**
+ * When the active user session is already hydrated with no prior error and not explicitly forced,
+ * resume/focus auth events must run as a silent delta refresh rather than triggering the blocking
+ * SessionHydrationScreen (which unmounts active forms like file uploaders on mobile resume).
+ */
+export function shouldRunSilentBackgroundRefresh(input: SilentRefreshInput): boolean {
+  if (!input.targetUserId) return false;
+  if (input.force) return false;
+  if (input.lastHydrationError) return false;
+  return Boolean(input.lastHydratedUserId && input.lastHydratedUserId === input.targetUserId);
+}
+
 export interface HydrationPhaseLabelInput {
   role?: UserRole;
   elapsedMs: number;

@@ -34,9 +34,14 @@ import {
   Loader2,
   Copy,
   Check,
+  Gift,
+  ShieldAlert,
 } from 'lucide-react';
 import { TelegramBotConfigCard } from '../../components/admin/TelegramBotConfigCard';
 import { PolicyAndPartnerCmsCard } from '../../components/admin/PolicyAndPartnerCmsCard';
+import { normalizeReferralConfig } from '../../utils/referralUtils';
+import { storageService } from '../../services/storageService';
+import { validateImageFile } from '../../utils/uploadUtils';
 
 interface QrCodeUploadBoxProps {
   label: string;
@@ -63,102 +68,43 @@ const QrCodeUploadBox: React.FC<QrCodeUploadBoxProps> = ({
   const [statusMsg, setStatusMsg] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [showManualInput, setShowManualInput] = useState(false);
 
-  const processAndUploadFile = (file: File) => {
-    if (!file.type.startsWith('image/')) {
-      setStatusMsg({ text: 'Please select an image file (PNG, JPG, WEBP).', type: 'error' });
+  const processAndUploadFile = async (file: File) => {
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      setStatusMsg({
+        text: validation.error || 'Please select an image file (PNG, JPG, WEBP).',
+        type: 'error',
+      });
+      if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
 
     setIsUploading(true);
-    setStatusMsg({ text: 'Reading image from device...', type: 'info' });
+    setStatusMsg({ text: 'Compressing and uploading QR image...', type: 'info' });
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const rawDataUrl = e.target?.result as string;
-      if (!rawDataUrl) {
-        setIsUploading(false);
-        setStatusMsg({ text: 'Failed to read image file.', type: 'error' });
-        return;
-      }
-
-      // Resize/optimize image if larger than 1200px
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const maxDim = 1200;
-          let { width, height } = img;
-          if (width > maxDim || height > maxDim) {
-            if (width > height) {
-              height = Math.round((height * maxDim) / width);
-              width = maxDim;
-            } else {
-              width = Math.round((width * maxDim) / height);
-              height = maxDim;
-            }
-          }
-          const canvas = document.createElement('canvas');
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(img, 0, 0, width, height);
-            const optimized = canvas.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.92);
-            uploadData(optimized);
-          } else {
-            uploadData(rawDataUrl);
-          }
-        } catch {
-          uploadData(rawDataUrl);
-        }
-      };
-      img.onerror = () => {
-        uploadData(rawDataUrl);
-      };
-      img.src = rawDataUrl;
-    };
-    reader.onerror = () => {
-      setIsUploading(false);
-      setStatusMsg({ text: 'Error reading file.', type: 'error' });
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const uploadData = async (dataUrl: string) => {
-    setStatusMsg({ text: 'Saving to server storage & Supabase database...', type: 'info' });
     try {
-      const res = await fetch('/api/upload-qr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dataUrl, filename: filePrefix }),
-      });
-
-      if (res.ok) {
-        const json = await res.json();
-        const serverUrl = json.url;
-        onChange(serverUrl);
+      const res = await storageService.uploadCatalogOrQrImage(file, filePrefix);
+      if (res.success && res.url) {
+        onChange(res.url);
         if (onDirectSave) onDirectSave();
         setStatusMsg({
-          text: `QR image uploaded! Saved to server storage (${serverUrl}) and Supabase database.`,
+          text: 'QR image uploaded and saved to Supabase configuration.',
           type: 'success',
         });
       } else {
-        onChange(dataUrl);
-        if (onDirectSave) onDirectSave();
         setStatusMsg({
-          text: 'Saved directly to database storage.',
-          type: 'success',
+          text: res.error || 'Failed to upload QR image. Please try again.',
+          type: 'error',
         });
       }
-    } catch {
-      onChange(dataUrl);
-      if (onDirectSave) onDirectSave();
+    } catch (err: any) {
       setStatusMsg({
-        text: 'Saved directly to database storage.',
-        type: 'success',
+        text: err?.message || 'Unable to upload QR image.',
+        type: 'error',
       });
     } finally {
       setIsUploading(false);
-      setTimeout(() => setStatusMsg(null), 6000);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -231,6 +177,7 @@ const QrCodeUploadBox: React.FC<QrCodeUploadBoxProps> = ({
             <img
               src={value}
               alt="QR Code"
+              referrerPolicy="no-referrer"
               className="w-24 h-24 object-contain rounded-lg bg-white p-1.5 border border-slate-700 shadow-sm"
             />
           </div>
@@ -404,6 +351,45 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
   const [newPlayerName, setNewPlayerName] = useState('');
   const [newProbableAmt, setNewProbableAmt] = useState('');
 
+  // Referral settings save status
+  const [isSavingReferral, setIsSavingReferral] = useState(false);
+  const [referralNotice, setReferralNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const referralCfg = normalizeReferralConfig(config.referralProgram);
+
+  const handleUpdateReferralField = <K extends keyof typeof referralCfg>(
+    field: K,
+    value: (typeof referralCfg)[K]
+  ) => {
+    setConfig((prev) => ({
+      ...prev,
+      referralProgram: {
+        ...normalizeReferralConfig(prev.referralProgram),
+        [field]: value,
+      },
+    }));
+  };
+
+  const handleSaveReferralSettings = async () => {
+    setIsSavingReferral(true);
+    setReferralNotice(null);
+    const res = await dataService.saveReferralProgramSettings(referralCfg);
+    setIsSavingReferral(false);
+    if (res.success && res.referralProgram) {
+      setConfig((prev) => ({ ...prev, referralProgram: res.referralProgram! }));
+      setReferralNotice({
+        type: 'success',
+        text: 'Referral reward rules, budget caps, and anti-fraud guards saved to database.',
+      });
+      setTimeout(() => setReferralNotice(null), 4000);
+    } else {
+      setReferralNotice({
+        type: 'error',
+        text: res.error || 'Failed to save referral program settings.',
+      });
+    }
+  };
+
   const handleTogglePaymentMethod = (id: string) => {
     const updated = {
       ...config,
@@ -424,11 +410,15 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
     setConfig(updated);
   };
 
-  const handleSaveConfig = (e?: React.FormEvent) => {
+  const handleSaveConfig = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     dataService.updateAppConfig(config, currentUser.id, currentUser.displayName);
-    setSuccessNote('Dynamic payment methods, bonus percentages, and platform settings saved successfully!');
-    setTimeout(() => setSuccessNote(null), 3000);
+    const refSave = await dataService.saveReferralProgramSettings(referralCfg);
+    if (!refSave.success && refSave.error) {
+      setReferralNotice({ type: 'error', text: refSave.error });
+    }
+    setSuccessNote('Dynamic payment methods, referral rules, bonus percentages, and platform settings saved successfully!');
+    setTimeout(() => setSuccessNote(null), 3500);
   };
 
   // Find methods
@@ -1216,6 +1206,227 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
           >
             <Save className="w-4 h-4" />
             <span>Save Live Cashout Configuration</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Referral Program & Anti-Fraud Settings */}
+      <div className="p-6 rounded-2xl border border-slate-800 bg-slate-900 shadow-md space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-950/60 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
+              <Gift className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-base font-bold text-white">Referral Program &amp; Anti-Fraud Rules</h2>
+                <span className="text-[10px] font-mono text-amber-300 bg-amber-950/70 px-2 py-0.5 rounded border border-amber-500/30">
+                  TWO-SIDED · REAL DEPOSIT ONLY
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Configure automatic flat or % rewards, payout destination, daily budget caps, and fraud holds.
+              </p>
+            </div>
+          </div>
+
+          <label className="text-xs text-slate-200 font-medium cursor-pointer flex items-center gap-2 whitespace-nowrap shrink-0">
+            <input
+              type="checkbox"
+              checked={referralCfg.enabled}
+              onChange={(e) => handleUpdateReferralField('enabled', e.target.checked)}
+              className="w-4 h-4 rounded bg-slate-950 border-slate-700 text-amber-500 focus:ring-0"
+            />
+            <span>Program Active</span>
+          </label>
+        </div>
+
+        {referralNotice && (
+          <div
+            className={`p-3 rounded-lg text-xs flex items-center gap-2 border ${
+              referralNotice.type === 'success'
+                ? 'bg-emerald-950/70 border-emerald-800 text-emerald-300'
+                : 'bg-rose-950/70 border-rose-800 text-rose-300'
+            }`}
+          >
+            {referralNotice.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+            ) : (
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            )}
+            <span>{referralNotice.text}</span>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
+          <div className="space-y-1">
+            <label className="text-slate-400 text-[11px] font-semibold">Reward Calculation Mode</label>
+            <select
+              value={referralCfg.rewardMode}
+              onChange={(e) =>
+                handleUpdateReferralField('rewardMode', e.target.value === 'percent' ? 'percent' : 'flat')
+              }
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-medium focus:outline-none focus:border-amber-400"
+            >
+              <option value="flat">Flat Dollar Amount ($ USD)</option>
+              <option value="percent">% of Qualifying Real Deposit</option>
+            </select>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-slate-400 text-[11px] font-semibold">
+              Referrer Reward ({referralCfg.rewardMode === 'percent' ? '% of Deposit' : '$ USD'})
+            </label>
+            <input
+              type="number"
+              min="0"
+              max={referralCfg.rewardMode === 'percent' ? 100 : undefined}
+              step="0.5"
+              value={referralCfg.referrerRewardValue}
+              onChange={(e) =>
+                handleUpdateReferralField('referrerRewardValue', Math.max(0, parseFloat(e.target.value) || 0))
+              }
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono tabular-nums text-emerald-400 font-bold"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-slate-400 text-[11px] font-semibold">
+              Friend Welcome Bonus ({referralCfg.rewardMode === 'percent' ? '% of Deposit' : '$ USD'})
+            </label>
+            <input
+              type="number"
+              min="0"
+              max={referralCfg.rewardMode === 'percent' ? 100 : undefined}
+              step="0.5"
+              value={referralCfg.refereeRewardValue}
+              onChange={(e) =>
+                handleUpdateReferralField('refereeRewardValue', Math.max(0, parseFloat(e.target.value) || 0))
+              }
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono tabular-nums text-amber-300 font-bold"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-slate-400 text-[11px] font-semibold">
+              Min Approved Real Cash Deposit ($ USD)
+            </label>
+            <input
+              type="number"
+              min="0"
+              step="5"
+              value={referralCfg.qualificationDepositMin}
+              onChange={(e) =>
+                handleUpdateReferralField('qualificationDepositMin', Math.max(0, parseFloat(e.target.value) || 0))
+              }
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono tabular-nums text-white font-bold"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-slate-400 text-[11px] font-semibold">Reward Credit Destination</label>
+            <select
+              value={referralCfg.payoutTarget}
+              onChange={(e) =>
+                handleUpdateReferralField(
+                  'payoutTarget',
+                  e.target.value === 'available_balance' ? 'available_balance' : 'referral_bonus'
+                )
+              }
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-medium focus:outline-none focus:border-amber-400"
+            >
+              <option value="referral_bonus">Game Load Only (Non-Cashable Bonus)</option>
+              <option value="available_balance">Cashable Wallet Balance</option>
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1">
+              <label className="text-slate-400 text-[11px] font-semibold">Max Refs / User</label>
+              <input
+                type="number"
+                min="0"
+                value={referralCfg.maxReferralsPerUser}
+                onChange={(e) =>
+                  handleUpdateReferralField('maxReferralsPerUser', Math.max(0, parseInt(e.target.value, 10) || 0))
+                }
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono tabular-nums text-white"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-slate-400 text-[11px] font-semibold">Daily Cap ($ USD)</label>
+              <input
+                type="number"
+                min="0"
+                step="25"
+                value={referralCfg.dailyPayoutCap}
+                onChange={(e) =>
+                  handleUpdateReferralField('dailyPayoutCap', Math.max(0, parseFloat(e.target.value) || 0))
+                }
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono tabular-nums text-white"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Anti-Fraud & Qualification Guards */}
+        <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5 text-xs">
+          <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+            <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+            <span>Qualification &amp; Anti-Fraud Controls</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+            <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={referralCfg.requireEmailVerified}
+                onChange={(e) => handleUpdateReferralField('requireEmailVerified', e.target.checked)}
+                className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-amber-500"
+              />
+              <span>Require verified email + approved real deposit</span>
+            </label>
+            <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={referralCfg.blockSelfReferral}
+                onChange={(e) => handleUpdateReferralField('blockSelfReferral', e.target.checked)}
+                className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-amber-500"
+              />
+              <span>Block self-referral &amp; same-account linking</span>
+            </label>
+            <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={referralCfg.blockDuplicateContact}
+                onChange={(e) => handleUpdateReferralField('blockDuplicateContact', e.target.checked)}
+                className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-amber-500"
+              />
+              <span>Block duplicate email or phone numbers</span>
+            </label>
+            <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={referralCfg.flagSharedNetworkOrDevice && referralCfg.holdFlaggedForReview}
+                onChange={(e) => {
+                  handleUpdateReferralField('flagSharedNetworkOrDevice', e.target.checked);
+                  handleUpdateReferralField('holdFlaggedForReview', e.target.checked);
+                }}
+                className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-amber-500"
+              />
+              <span>Flag shared IP / device &amp; hold for Admin review</span>
+            </label>
+          </div>
+        </div>
+
+        <div className="flex justify-end">
+          <button
+            type="button"
+            disabled={isSavingReferral}
+            onClick={handleSaveReferralSettings}
+            className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs flex items-center gap-1.5 whitespace-nowrap shrink-0 shadow-md shadow-amber-500/20"
+          >
+            {isSavingReferral ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            <span>{isSavingReferral ? 'Saving Referral Rules...' : 'Save Referral Settings'}</span>
           </button>
         </div>
       </div>

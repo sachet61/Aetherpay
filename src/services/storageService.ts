@@ -1,5 +1,6 @@
 import { supabase } from './supabaseClient';
 import { compressImageToWebP } from '../utils/imageCompressor';
+import { validateImageFile } from '../utils/uploadUtils';
 import { buildProxyStorageUrl, toProxyStorageUrl } from './storageUrlUtils';
 
 export interface StorageUploadResult {
@@ -105,6 +106,13 @@ class StorageService {
           ? toProxyStorageUrl(data.proxyUrl || data.url) || buildProxyStorageUrl(bucket, data.path || filePath)
           : data.url || data.publicUrl;
 
+      if (!resolvedUrl) {
+        return {
+          success: false,
+          error: 'Upload succeeded on server but no file URL was returned.',
+        };
+      }
+
       return {
         success: true,
         url: resolvedUrl,
@@ -124,6 +132,11 @@ class StorageService {
    */
   public async uploadChatAttachment(file: File, conversationId: string): Promise<StorageUploadResult> {
     try {
+      const validation = validateImageFile(file);
+      if (!validation.valid) {
+        return { success: false, error: validation.error };
+      }
+
       // Pre-compress to WebP (max 1200px)
       let compressed = await compressImageToWebP(file, {
         maxWidth: 1200,
@@ -201,6 +214,11 @@ class StorageService {
    */
   public async uploadPaymentProof(file: File, customerId: string): Promise<StorageUploadResult> {
     try {
+      const validation = validateImageFile(file);
+      if (!validation.valid) {
+        return { success: false, error: validation.error };
+      }
+
       let compressed = await compressImageToWebP(file, {
         maxWidth: 1400,
         maxHeight: 1400,
@@ -271,6 +289,11 @@ class StorageService {
    */
   public async uploadAvatar(file: File, userId: string): Promise<StorageUploadResult> {
     try {
+      const validation = validateImageFile(file);
+      if (!validation.valid) {
+        return { success: false, error: validation.error };
+      }
+
       // Pre-compress to square WebP (400x400)
       const compressed = await compressImageToWebP(file, {
         maxWidth: 400,
@@ -330,6 +353,88 @@ class StorageService {
     } catch (err: any) {
       console.error('[StorageService] Avatar upload error:', err);
       return { success: false, error: err?.message || 'Avatar upload failed' };
+    }
+  }
+
+  /**
+   * Uploads Admin catalog icons or payment QR images with validation, WebP compression,
+   * and resilient server-side service-role fallback.
+   */
+  public async uploadCatalogOrQrImage(file: File, prefix: string = 'asset'): Promise<StorageUploadResult> {
+    try {
+      const validation = validateImageFile(file);
+      if (!validation.valid) {
+        return { success: false, error: validation.error };
+      }
+
+      let compressed = await compressImageToWebP(file, {
+        maxWidth: 1200,
+        maxHeight: 1200,
+        quality: 0.9,
+      });
+
+      if (compressed.file.size > MAX_SERVER_FALLBACK_BYTES) {
+        compressed = await compressImageToWebP(compressed.file, {
+          maxWidth: 960,
+          maxHeight: 960,
+          quality: 0.76,
+        });
+      }
+
+      const cleanPrefix = prefix.replace(/[^a-zA-Z0-9_-]/g, '_') || 'asset';
+      const ext = compressed.file.type === 'image/svg+xml' ? 'svg' : 'webp';
+      const contentType = compressed.file.type || 'image/webp';
+      const fileName = `qr/${cleanPrefix}_${Date.now()}.${ext}`;
+
+      await this.ensureBucket('chat_attachments', true);
+
+      const { data, error } = await supabase.storage
+        .from('chat_attachments')
+        .upload(fileName, compressed.file, {
+          cacheControl: '604800',
+          upsert: true,
+          contentType,
+        });
+
+      if (!error && data?.path) {
+        const { data: urlData } = supabase.storage
+          .from('chat_attachments')
+          .getPublicUrl(data.path);
+        return {
+          success: true,
+          url: urlData.publicUrl || buildProxyStorageUrl('chat_attachments', data.path),
+          name: file.name,
+          originalSize: compressed.originalSize,
+          compressedSize: compressed.compressedSize,
+        };
+      }
+
+      const fallbackResult = await this.uploadViaServerFallback(
+        compressed.file,
+        'chat_attachments',
+        fileName,
+        contentType
+      );
+
+      if (fallbackResult.success && fallbackResult.url) {
+        return {
+          success: true,
+          url: fallbackResult.url,
+          name: file.name,
+          originalSize: compressed.originalSize,
+          compressedSize: compressed.compressedSize,
+        };
+      }
+
+      return {
+        success: false,
+        error: fallbackResult.error || error?.message || 'Image upload failed',
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Image upload failed',
+      };
     }
   }
 }

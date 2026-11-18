@@ -57,6 +57,7 @@ import {
 } from 'lucide-react';
 import { notificationSoundService } from '../../services/notificationSoundService';
 import { storageService } from '../../services/storageService';
+import { validateImageFile } from '../../utils/uploadUtils';
 import { toProxyStorageUrl, toDirectSupabaseStorageUrl } from '../../services/storageUrlUtils';
 import { supabaseUrl } from '../../services/supabaseClient';
 
@@ -671,6 +672,15 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     if (!file || !activeConv) return;
 
     setUploadError(null);
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      setUploadError(validation.error || 'Unsupported image file.');
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      return;
+    }
+
     setIsUploadingAttachment(true);
     try {
       const result = await storageService.uploadChatAttachment(file, activeConv.id);
@@ -1712,6 +1722,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                       <img
                         src={attachmentUrl}
                         alt={attachmentName}
+                        referrerPolicy="no-referrer"
                         className="w-7 h-7 rounded-lg object-cover border border-slate-700 shrink-0"
                       />
                     ) : (

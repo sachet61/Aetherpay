@@ -27,6 +27,7 @@ export interface PasswordResetResponse {
 
 class SupabaseAuthService {
   private isRecoveryMode = false;
+  private lastOAuthAuditKey: string | null = null;
 
   constructor() {
     this.initAuthListener();
@@ -127,6 +128,23 @@ class SupabaseAuthService {
             };
             if (!dbUser) {
               await this.syncProfileAndWallet(userProfile);
+              let pendingRefCode: string | undefined;
+              try {
+                pendingRefCode = (sessionStorage.getItem('ss_pending_ref_code') || '').trim().toUpperCase() || undefined;
+              } catch {}
+              void dataService
+                .attributeSignupReferral({
+                  refereeId: userProfile.id,
+                  referralCode: pendingRefCode,
+                  accessToken: session.access_token,
+                })
+                .then((res) => {
+                  if (res?.success) {
+                    try {
+                      sessionStorage.removeItem('ss_pending_ref_code');
+                    } catch {}
+                  }
+                });
             } else {
               dataService.registerUser(userProfile);
             }
@@ -159,6 +177,25 @@ class SupabaseAuthService {
             userProfile.role,
             userProfile.emailVerified
           );
+          if (
+            event === 'SIGNED_IN' &&
+            session.user?.app_metadata?.provider &&
+            session.user.app_metadata.provider !== 'email'
+          ) {
+            const dedupeKey = `${userProfile.id}:${session.access_token?.slice(-12) || ''}`;
+            if (this.lastOAuthAuditKey !== dedupeKey) {
+              this.lastOAuthAuditKey = dedupeKey;
+              fetch('/api/auth/login', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...(session.access_token ? { 'x-supabase-token': session.access_token } : {}),
+                  'x-user-id': userProfile.id,
+                },
+                body: JSON.stringify({ userId: userProfile.id, token: session.access_token }),
+              }).catch(() => {});
+            }
+          }
           void dataService.hydrateForSession(userProfile);
         }
       });
@@ -352,13 +389,30 @@ class SupabaseAuthService {
       // Sync profile and wallet in dataService / database
       await this.syncProfileAndWallet(newProfile);
 
+      // Server-side referral attribution & telemetry capture
+      const normalizedRefCode = params.referralCode?.trim().toUpperCase() || undefined;
+      void dataService
+        .attributeSignupReferral({
+          refereeId: newProfile.id,
+          referralCode: normalizedRefCode,
+          accessToken: data.session?.access_token,
+        })
+        .then((attrRes) => {
+          if (attrRes?.success) {
+            try {
+              sessionStorage.removeItem('ss_pending_ref_code');
+            } catch {}
+          }
+        });
+
       // Issue active session
       authSessionService.createSessionForUser(
         newProfile.id,
         newProfile.email,
         newProfile.displayName,
         newProfile.role,
-        newProfile.emailVerified
+        newProfile.emailVerified,
+        { authEvent: 'register', accessToken: data.session?.access_token }
       );
 
       const requiresConfirmation = data.user && !isConfirmed && !data.session;
@@ -494,7 +548,8 @@ class SupabaseAuthService {
         userProfile.email,
         userProfile.displayName,
         userProfile.role,
-        userProfile.emailVerified
+        userProfile.emailVerified,
+        { authEvent: 'login', accessToken: data.session?.access_token }
       );
       void dataService.hydrateForSession(userProfile, { force: true });
 
@@ -635,6 +690,27 @@ class SupabaseAuthService {
         authSessionService.updatePassword(user.email, newPassword);
       }
 
+      try {
+        const { data: sessData } = await supabase.auth.getSession();
+        const token = sessData?.session?.access_token;
+        await fetch('/api/audit-logs', {
+          method: 'POST',
+          keepalive: true,
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'x-supabase-token': token } : {}),
+            ...(user?.id ? { 'x-user-id': user.id } : {}),
+          },
+          body: JSON.stringify({
+            actorId: user?.id,
+            action: 'PASSWORD_RESET_COMPLETED',
+            entityType: 'auth',
+            entityId: user?.id || user?.email || 'self',
+            details: `Password updated via recovery/account session for ${user?.email || 'user'}.`,
+          }),
+        });
+      } catch {}
+
       this.clearRecoveryMode();
       return { success: true, message: 'Password successfully updated! You can now sign in.' };
     } catch (err: any) {
@@ -764,11 +840,11 @@ class SupabaseAuthService {
       );
       void dataService.hydrateForSession(userProfile, { force: true });
 
-      // Check referral qualification on email verification
+      // Check server referral qualification on email verification
       try {
-        dataService.checkAndAwardReferral(userProfile.id, 0);
+        void dataService.triggerServerReferralEvaluation(userProfile.id);
       } catch (refErr) {
-        console.warn('Referral check notice:', refErr);
+        console.warn('Referral evaluation notice:', refErr);
       }
 
       return {

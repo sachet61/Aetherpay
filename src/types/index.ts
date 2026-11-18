@@ -288,15 +288,88 @@ export interface AppNotification {
   createdAt: string;
 }
 
+export type ReferralRewardMode = 'flat' | 'percent';
+export type ReferralPayoutTarget = 'referral_bonus' | 'available_balance';
+export type ReferralAwardStatus =
+  | 'registered'
+  | 'pending_deposit'
+  | 'held_for_review'
+  | 'rewarded'
+  | 'rejected'
+  | 'capped';
+
+export interface ReferralProgramConfig {
+  enabled: boolean;
+  rewardMode: ReferralRewardMode;
+  referrerRewardValue: number;
+  refereeRewardValue: number;
+  rewardPerReferral: number;
+  qualificationDepositMin: number;
+  requireEmailVerified: boolean;
+  payoutTarget: ReferralPayoutTarget;
+  maxReferralsPerUser: number;
+  dailyPayoutCap: number;
+  blockSelfReferral: boolean;
+  blockDuplicateContact: boolean;
+  flagSharedNetworkOrDevice: boolean;
+  holdFlaggedForReview: boolean;
+}
+
+export interface ReferralLedgerEntry {
+  id: string;
+  referrerId: string;
+  referrerName?: string;
+  referrerEmail?: string;
+  referrerCode?: string;
+  refereeId: string;
+  refereeName?: string;
+  refereeEmail?: string;
+  referralCodeUsed: string;
+  source: 'signup_link' | 'manual_link' | 'manual_link_and_reward' | 'admin_reassign' | string;
+  rewardMode: ReferralRewardMode;
+  payoutTarget: ReferralPayoutTarget;
+  referrerRewardAmount: number;
+  refereeRewardAmount: number;
+  qualifyingDepositId?: string;
+  qualifyingDepositAmount: number;
+  status: ReferralAwardStatus;
+  fraudFlags: string[];
+  staffReason?: string;
+  assignedBy?: string;
+  assignedByName?: string;
+  reviewedBy?: string;
+  reviewedByName?: string;
+  reviewNotes?: string;
+  rewardedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TopReferrerEntry {
+  referrerId: string;
+  displayName: string;
+  email?: string;
+  referralCode: string;
+  totalReferred: number;
+  qualifiedCount: number;
+  heldCount: number;
+  totalReferrerPaid: number;
+  totalFriendPaid: number;
+}
+
 export interface ReferredUser {
   id: string;
   displayName: string;
   joinedAt: string;
-  status: 'registered' | 'qualified' | 'rewarded';
+  status: ReferralAwardStatus | 'qualified' | string;
   depositTotal: number;
   rewardEarned: number;
+  refereeRewardEarned?: number;
   emailVerified?: boolean;
-  hasLoadedGame?: boolean;
+  hasRealDepositMet?: boolean;
+  fraudFlags?: string[];
+  reviewNotes?: string;
+  source?: string;
 }
 
 export interface ReferralSummary {
@@ -306,8 +379,15 @@ export interface ReferralSummary {
   activeReferred: number;
   totalRewardsEarned: number;
   pendingRewards: number;
+  heldRewardsCount?: number;
+  rewardMode?: ReferralRewardMode;
+  referrerRewardValue?: number;
+  refereeRewardValue?: number;
   rewardPerReferral: number;
   qualifyingDepositMin: number;
+  payoutTarget?: ReferralPayoutTarget;
+  maxReferralsPerUser?: number;
+  programEnabled?: boolean;
   referredUsers: ReferredUser[];
 }
 
@@ -369,11 +449,7 @@ export interface AppConfig {
   withdrawalMethods: WithdrawalMethodConfig[];
   gatewaySimulator: GatewaySimulatorConfig;
   cashoutFeed: CashoutFeedConfig;
-  referralProgram: {
-    enabled: boolean;
-    rewardPerReferral: number;
-    qualificationDepositMin: number;
-  };
+  referralProgram: ReferralProgramConfig;
   platformRules: {
     depositTerms: string;
     bonusWageringTerms: string;
@@ -389,7 +465,7 @@ export interface AuditLog {
   actorName: string;
   actorRole: UserRole;
   action: string;
-  entityType: 'topup' | 'withdrawal' | 'wallet' | 'game_account' | 'settings' | 'user' | 'chat';
+  entityType: 'topup' | 'withdrawal' | 'wallet' | 'game_account' | 'settings' | 'user' | 'chat' | 'auth';
   entityId: string;
   details: string;
   timestamp: string;

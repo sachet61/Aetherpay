@@ -41,6 +41,7 @@ import {
 } from 'lucide-react';
 import { notificationSoundService } from '../../services/notificationSoundService';
 import { storageService } from '../../services/storageService';
+import { validateImageFile } from '../../utils/uploadUtils';
 import { toProxyStorageUrl, toDirectSupabaseStorageUrl } from '../../services/storageUrlUtils';
 import { supabaseUrl } from '../../services/supabaseClient';
 import {
@@ -401,6 +402,15 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     if (!file || !conversation) return;
 
     setUploadError(null);
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      setUploadError(validation.error || 'Unsupported image file.');
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      return;
+    }
+
     setIsUploadingAttachment(true);
     try {
       const result = await storageService.uploadChatAttachment(file, conversation.id);
@@ -1038,6 +1048,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                   <img
                     src={attachmentUrl}
                     alt={attachmentName}
+                    referrerPolicy="no-referrer"
                     className="w-7 h-7 rounded-lg object-cover border border-[#1E2942] shrink-0"
                   />
                 ) : (
