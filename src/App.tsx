@@ -168,6 +168,29 @@ export default function App() {
     }
   }, [currentUser?.id, currentUser?.role, activeTab]);
 
+  const isCustomerChatOpen = Boolean(currentUser?.role === 'customer' && activeTab === 'chat');
+  const isStaffOpsChatTab = Boolean(currentUser && currentUser.role !== 'customer' && activeTab === 'ops_chat');
+  const isStaffMobileFullscreenChat = Boolean(isStaffOpsChatTab && isMobileChatActive);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (!isCustomerChatOpen && !isStaffMobileFullscreenChat) return;
+    window.scrollTo(0, 0);
+    const html = document.documentElement;
+    const body = document.body;
+    const prevHtmlOverflow = html.style.overflow;
+    const prevBodyOverflow = body.style.overflow;
+    const prevBodyMinHeight = body.style.minHeight;
+    html.style.overflow = 'hidden';
+    body.style.overflow = 'hidden';
+    body.style.minHeight = '0px';
+    return () => {
+      html.style.overflow = prevHtmlOverflow;
+      body.style.overflow = prevBodyOverflow;
+      body.style.minHeight = prevBodyMinHeight;
+    };
+  }, [isCustomerChatOpen, isStaffMobileFullscreenChat]);
+
   const catalogIconUrls = React.useMemo(
     () =>
       dataService
@@ -315,7 +338,11 @@ export default function App() {
       }
     }
 
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (targetTab === 'chat' || targetTab === 'ops_chat') {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    } else {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   };
 
   // Safe back navigation handler: pops previous app state or returns to role home
@@ -328,8 +355,6 @@ export default function App() {
     }
   };
 
-  const isCustomerChatOpen = Boolean(isCustomer && activeTab === 'chat');
-
   return (
     <>
       {/* Branded Startup Loading Screen tracking required assets for active workspace */}
@@ -341,11 +366,13 @@ export default function App() {
       <div
         className={`text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950 ${
           isCustomerChatOpen
-            ? 'h-[100dvh] bg-[#080E1D] overflow-hidden pb-0'
+            ? 'h-viewport-dynamic bg-[#080E1D] overflow-hidden pb-0'
             : isCustomer
             ? 'min-h-screen bg-[#0A0F1D] pb-32 sm:pb-28'
-            : isMobileChatActive
-            ? 'min-h-screen bg-[#0A0F1D] pb-0'
+            : isStaffOpsChatTab
+            ? isMobileChatActive
+              ? 'h-viewport-dynamic bg-[#070D20] overflow-hidden pb-0'
+              : 'h-viewport-dynamic bg-[#0A0F1D] overflow-hidden pb-[74px] md:pb-0'
             : 'min-h-screen bg-[#0A0F1D] pb-24 md:pb-12'
         }`}
       >
@@ -383,6 +410,8 @@ export default function App() {
           className={
             isCustomerChatOpen
               ? 'flex-1 min-h-0 w-full h-full flex flex-col overflow-hidden p-0 m-0'
+              : isStaffOpsChatTab
+              ? 'flex-1 min-h-0 w-full max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 py-2 sm:py-4 flex flex-col overflow-hidden'
               : 'flex-1 px-4 sm:px-6 lg:px-8 py-6 w-full max-w-7xl mx-auto'
           }
         >

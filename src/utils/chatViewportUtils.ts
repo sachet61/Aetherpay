@@ -54,6 +54,19 @@ export function computeVisualViewportState(
   };
 }
 
+export function resolveFullscreenViewportStyle(
+  state: ComputedChatViewportState
+): { height: string; top: string; bottom: string } | undefined {
+  if (state.isKeyboardOpen && state.containerHeightPx && state.containerHeightPx > 0) {
+    return {
+      height: `${state.containerHeightPx}px`,
+      top: `${state.offsetTopPx}px`,
+      bottom: 'auto',
+    };
+  }
+  return undefined;
+}
+
 export function shouldSubmitOnTextareaKeyDown(params: {
   key: string;
   shiftKey: boolean;

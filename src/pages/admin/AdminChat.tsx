@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import {
   UserProfile,
   SupportConversation,
@@ -60,6 +60,22 @@ import { storageService } from '../../services/storageService';
 import { validateImageFile } from '../../utils/uploadUtils';
 import { toProxyStorageUrl, toDirectSupabaseStorageUrl } from '../../services/storageUrlUtils';
 import { supabaseUrl } from '../../services/supabaseClient';
+import {
+  computeVisualViewportState,
+  resolveFullscreenViewportStyle,
+  shouldSubmitOnTextareaKeyDown,
+  type ComputedChatViewportState,
+} from '../../utils/chatViewportUtils';
+import {
+  buildScrollSnapshotKey,
+  computeDistanceFromBottom,
+  computePrependScrollTop,
+  computeRestoredScrollTop,
+  decideMessageUpdateScrollAction,
+  isScrolledNearBottom,
+  loadConversationScrollSnapshot,
+  saveConversationScrollSnapshot,
+} from '../../utils/chatScrollUtils';
 
 interface AdminChatProps {
   currentUser: UserProfile;
@@ -145,12 +161,86 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   const [feedbackToast, setFeedbackToast] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [requestsVersion, setRequestsVersion] = useState(0);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const initialDesktopMountRef = useRef(false);
   const selectedConvIdRef = useRef(selectedConvId);
   useEffect(() => {
     selectedConvIdRef.current = selectedConvId;
   }, [selectedConvId]);
+
+  const prevMessagesRef = useRef<ChatMessage[]>([]);
+  const hasAnchoredInitialRef = useRef(false);
+  const userHasScrolledRef = useRef(false);
+  const wasNearBottomRef = useRef(true);
+  const justSentByMeRef = useRef(false);
+  const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const programmaticScrollRef = useRef(false);
+  const smoothScrollingToBottomUntilRef = useRef(0);
+
+  const [newMessagesBelowCount, setNewMessagesBelowCount] = useState(0);
+  const [isScrolledFarUp, setIsScrolledFarUp] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 768 : true
+  );
+  const [viewportState, setViewportState] = useState<ComputedChatViewportState>({
+    isKeyboardOpen: false,
+    containerHeightPx: null,
+    offsetTopPx: 0,
+  });
+
+  const applyProgrammaticScrollTop = useCallback((el: HTMLDivElement, targetTop: number) => {
+    programmaticScrollRef.current = true;
+    el.scrollTop = targetTop;
+    requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+    });
+  }, []);
+
+  const clearSmoothScrollLock = useCallback(() => {
+    smoothScrollingToBottomUntilRef.current = 0;
+  }, []);
+
+  const handleJumpToLatest = useCallback(() => {
+    const el = messagesContainerRef.current;
+    const convId = selectedConvIdRef.current;
+    if (!el || !convId) return;
+    setNewMessagesBelowCount(0);
+    setIsScrolledFarUp(false);
+    wasNearBottomRef.current = true;
+    userHasScrolledRef.current = true;
+    smoothScrollingToBottomUntilRef.current = Date.now() + 600;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    saveConversationScrollSnapshot(buildScrollSnapshotKey(currentUser.id, convId), {
+      scrollTop: Math.max(0, el.scrollHeight - el.clientHeight),
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    });
+  }, [currentUser.id]);
+
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesContainerRef.current;
+    const convId = selectedConvIdRef.current;
+    if (!el || !convId) return;
+    if (programmaticScrollRef.current) return;
+
+    const nearBottom = isScrolledNearBottom(el);
+    if (Date.now() < smoothScrollingToBottomUntilRef.current) {
+      if (nearBottom) {
+        smoothScrollingToBottomUntilRef.current = 0;
+      } else {
+        return;
+      }
+    }
+
+    userHasScrolledRef.current = true;
+    wasNearBottomRef.current = nearBottom;
+    if (nearBottom) {
+      setNewMessagesBelowCount(0);
+    }
+    const distance = computeDistanceFromBottom(el);
+    setIsScrolledFarUp(distance > 280);
+    saveConversationScrollSnapshot(buildScrollSnapshotKey(currentUser.id, convId), el);
+  }, [currentUser.id]);
 
   const allUsers = dataService.getUsers().filter((u) => u.role === 'customer');
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
@@ -253,15 +343,89 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMoreOlder, setHasMoreOlder] = useState(true);
 
+  // Track mobile breakpoint and visualViewport for soft-keyboard safe resizing
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let prevKeyboardOpen = false;
+    const updateViewport = () => {
+      const mobile = window.innerWidth < 768;
+      setIsMobileViewport((prev) => (prev === mobile ? prev : mobile));
+      const vv = window.visualViewport;
+      const next = computeVisualViewportState({
+        innerHeight: window.innerHeight,
+        visualHeight: vv?.height ?? null,
+        visualOffsetTop: vv?.offsetTop ?? 0,
+      });
+      setViewportState((prev) => {
+        if (
+          prev.isKeyboardOpen === next.isKeyboardOpen &&
+          prev.containerHeightPx === next.containerHeightPx &&
+          prev.offsetTopPx === next.offsetTopPx
+        ) {
+          return prev;
+        }
+        return next;
+      });
+      if (mobile && next.isKeyboardOpen && !prevKeyboardOpen && wasNearBottomRef.current) {
+        requestAnimationFrame(() => {
+          const el = messagesContainerRef.current;
+          if (el && wasNearBottomRef.current) {
+            applyProgrammaticScrollTop(el, el.scrollHeight);
+          }
+        });
+      }
+      prevKeyboardOpen = next.isKeyboardOpen;
+    };
+
+    updateViewport();
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', updateViewport);
+    vv?.addEventListener('scroll', updateViewport);
+    window.addEventListener('resize', updateViewport);
+
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && messagesContainerRef.current) {
+      resizeObserver = new ResizeObserver(() => {
+        const el = messagesContainerRef.current;
+        if (el && hasAnchoredInitialRef.current && wasNearBottomRef.current) {
+          applyProgrammaticScrollTop(el, el.scrollHeight);
+        }
+      });
+      resizeObserver.observe(messagesContainerRef.current);
+    }
+
+    return () => {
+      vv?.removeEventListener('resize', updateViewport);
+      vv?.removeEventListener('scroll', updateViewport);
+      window.removeEventListener('resize', updateViewport);
+      resizeObserver?.disconnect();
+    };
+  }, [applyProgrammaticScrollTop, selectedConvId]);
+
   const handleLoadOlderMessages = async () => {
     if (!selectedConvId || loadingOlder || messages.length === 0) return;
+    const el = messagesContainerRef.current;
+    if (el) {
+      prependAnchorRef.current = {
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+      };
+    }
     setLoadingOlder(true);
-    const oldestTimestamp = messages[0].createdAt;
-    const oldestId = messages[0].id;
-    const res = await dataService.fetchOlderMessages(selectedConvId, oldestTimestamp, 50, oldestId);
-    setLoadingOlder(false);
-    if (!res.hasMore) {
-      setHasMoreOlder(false);
+    try {
+      const oldestTimestamp = messages[0].createdAt;
+      const oldestId = messages[0].id;
+      const res = await dataService.fetchOlderMessages(selectedConvId, oldestTimestamp, 50, oldestId);
+      if (!res.hasMore) {
+        setHasMoreOlder(false);
+      }
+      if (res.newCount === 0) {
+        prependAnchorRef.current = null;
+      }
+    } catch {
+      prependAnchorRef.current = null;
+    } finally {
+      setLoadingOlder(false);
     }
   };
 
@@ -273,11 +437,22 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   }, []);
 
   useEffect(() => {
+    hasAnchoredInitialRef.current = false;
+    userHasScrolledRef.current = false;
+    wasNearBottomRef.current = true;
+    justSentByMeRef.current = false;
+    prependAnchorRef.current = null;
+    prevMessagesRef.current = [];
+    smoothScrollingToBottomUntilRef.current = 0;
+    setNewMessagesBelowCount(0);
+    setIsScrolledFarUp(false);
     setHasMoreOlder(true);
     syncFromMemory();
 
+    let isUnmounted = false;
     if (selectedConvId) {
       dataService.fetchMessagesForConversation(selectedConvId, { limit: 50 }).then((fresh) => {
+        if (isUnmounted || selectedConvIdRef.current !== selectedConvId) return;
         setMessages(fresh || []);
       });
       const conv = dataService.getConversations().find((c) => c.id === selectedConvId);
@@ -302,6 +477,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       if (now - lastCatchUpTime < 800) return;
       lastCatchUpTime = now;
       dataService.fetchMessagesForConversation(selectedConvId, { limit: 50 }).then((fresh) => {
+        if (isUnmounted || selectedConvIdRef.current !== selectedConvId) return;
         setMessages(fresh || []);
       });
       const conv = dataService.getConversations().find((c) => c.id === selectedConvId);
@@ -315,18 +491,35 @@ export const AdminChat: React.FC<AdminChatProps> = ({
         performCatchUp();
       }
     };
+    const handlePageHide = () => {
+      if (selectedConvId && messagesContainerRef.current) {
+        saveConversationScrollSnapshot(
+          buildScrollSnapshotKey(currentUser.id, selectedConvId),
+          messagesContainerRef.current
+        );
+      }
+    };
 
     window.addEventListener('aetherpay_state_changed', handleSync);
     window.addEventListener('storage', handleSync);
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('focus', performCatchUp);
+    window.addEventListener('pagehide', handlePageHide);
     return () => {
+      isUnmounted = true;
+      if (selectedConvId && messagesContainerRef.current) {
+        saveConversationScrollSnapshot(
+          buildScrollSnapshotKey(currentUser.id, selectedConvId),
+          messagesContainerRef.current
+        );
+      }
       window.removeEventListener('aetherpay_state_changed', handleSync);
       window.removeEventListener('storage', handleSync);
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', performCatchUp);
+      window.removeEventListener('pagehide', handlePageHide);
     };
-  }, [selectedConvId]);
+  }, [selectedConvId, currentUser.id]);
 
   const [soundEnabled, setSoundEnabled] = useState(() => notificationSoundService.isSoundEnabled());
   const [desktopEnabled, setDesktopEnabled] = useState(() => notificationSoundService.isDesktopEnabled());
@@ -495,9 +688,92 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     };
   }, []);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, selectedConvId]);
+  // Intentional scroll & restoration handler (no forced scrollIntoView on re-renders or catch-up)
+  useLayoutEffect(() => {
+    if (!selectedConvId) return;
+    const el = messagesContainerRef.current;
+    const prevList = prevMessagesRef.current;
+    prevMessagesRef.current = messages;
+    if (!el) return;
+
+    const snapshotKey = buildScrollSnapshotKey(currentUser.id, selectedConvId);
+    const savedSnapshot = hasAnchoredInitialRef.current
+      ? null
+      : loadConversationScrollSnapshot(snapshotKey);
+
+    const decision = decideMessageUpdateScrollAction({
+      prevMessages: prevList,
+      nextMessages: messages,
+      hasAnchoredInitial: hasAnchoredInitialRef.current,
+      userHasScrolled: userHasScrolledRef.current,
+      wasNearBottom: wasNearBottomRef.current,
+      justSentByMe: justSentByMeRef.current,
+      isPrependingOlder: Boolean(prependAnchorRef.current),
+      savedSnapshot,
+    });
+
+    if (decision.type === 'preserve-prepend') {
+      const anchor = prependAnchorRef.current;
+      prependAnchorRef.current = null;
+      if (anchor) {
+        const nextTop = computePrependScrollTop({
+          prevScrollTop: anchor.scrollTop,
+          prevScrollHeight: anchor.scrollHeight,
+          newScrollHeight: el.scrollHeight,
+        });
+        applyProgrammaticScrollTop(el, nextTop);
+      }
+      wasNearBottomRef.current = isScrolledNearBottom(el);
+      setIsScrolledFarUp(computeDistanceFromBottom(el) > 280);
+      return;
+    }
+
+    if (decision.type === 'restore-saved') {
+      hasAnchoredInitialRef.current = true;
+      const nextTop = computeRestoredScrollTop({
+        snapshot: decision.snapshot,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      });
+      applyProgrammaticScrollTop(el, nextTop);
+      wasNearBottomRef.current = isScrolledNearBottom(el);
+      setIsScrolledFarUp(computeDistanceFromBottom(el) > 280);
+      return;
+    }
+
+    if (decision.type === 'scroll-bottom-instant') {
+      hasAnchoredInitialRef.current = true;
+      applyProgrammaticScrollTop(el, el.scrollHeight);
+      wasNearBottomRef.current = true;
+      setNewMessagesBelowCount(0);
+      setIsScrolledFarUp(false);
+      return;
+    }
+
+    if (decision.type === 'scroll-bottom-smooth') {
+      justSentByMeRef.current = false;
+      wasNearBottomRef.current = true;
+      setNewMessagesBelowCount(0);
+      setIsScrolledFarUp(false);
+      smoothScrollingToBottomUntilRef.current = Date.now() + 600;
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+      saveConversationScrollSnapshot(snapshotKey, {
+        scrollTop: Math.max(0, el.scrollHeight - el.clientHeight),
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      });
+      return;
+    }
+
+    if (decision.type === 'show-new-indicator') {
+      setNewMessagesBelowCount((prev) => prev + decision.newlyAddedCount);
+      setIsScrolledFarUp(computeDistanceFromBottom(el) > 280);
+      return;
+    }
+
+    justSentByMeRef.current = false;
+    prependAnchorRef.current = null;
+  }, [messages, selectedConvId, currentUser.id, applyProgrammaticScrollTop]);
 
   const activeConv = conversations.find((c) => c.id === selectedConvId);
   const customerProfile = activeConv
@@ -590,6 +866,12 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   );
 
   const handleSelectConversation = (convId: string) => {
+    if (selectedConvId && messagesContainerRef.current) {
+      saveConversationScrollSnapshot(
+        buildScrollSnapshotKey(currentUser.id, selectedConvId),
+        messagesContainerRef.current
+      );
+    }
     const canonicalId = dataService.resolveCanonicalConvId(convId);
     setSelectedConvId(canonicalId);
     setSendError(null);
@@ -601,7 +883,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     setMessages(dataService.getMessages(canonicalId));
     dataService.markConversationRead(canonicalId, 'staff');
     dataService.fetchMessagesForConversation(canonicalId, { limit: 50 }).then((fresh) => {
-      if (fresh && fresh.length > 0) {
+      if (fresh && fresh.length > 0 && selectedConvIdRef.current === canonicalId) {
         setMessages(fresh);
       }
     });
@@ -612,6 +894,12 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   };
 
   const handleBackToCustomerList = () => {
+    if (selectedConvId && messagesContainerRef.current) {
+      saveConversationScrollSnapshot(
+        buildScrollSnapshotKey(currentUser.id, selectedConvId),
+        messagesContainerRef.current
+      );
+    }
     initialDesktopMountRef.current = true;
     setSelectedConvId('');
     setShowStatusMenu(false);
@@ -619,6 +907,12 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   };
 
   const handleExitChat = () => {
+    if (selectedConvId && messagesContainerRef.current) {
+      saveConversationScrollSnapshot(
+        buildScrollSnapshotKey(currentUser.id, selectedConvId),
+        messagesContainerRef.current
+      );
+    }
     if (onGoBack) {
       onGoBack();
     } else if (onNavigateTab) {
@@ -697,6 +991,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     setIsSending(true);
     setSendError(null);
     setShowEmojiPicker(false);
+    justSentByMeRef.current = true;
 
     try {
       let confirmed: ChatMessage | null = null;
@@ -719,6 +1014,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
       setMessages((prev) => sortAndDeduplicateMessages([...prev, confirmed!], true));
 
       if (confirmed.deliveryStatus === 'failed') {
+        justSentByMeRef.current = false;
         setFailedPendingMsgId(confirmed.id);
         setSendError(confirmed.deliveryError || 'Message failed to save. Your draft is preserved.');
       } else {
@@ -729,6 +1025,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
         setFailedPendingMsgId(null);
       }
     } catch (err: any) {
+      justSentByMeRef.current = false;
       setSendError(err?.message || 'Failed to send message. Your draft is preserved.');
     } finally {
       setIsSending(false);
@@ -736,7 +1033,13 @@ export const AdminChat: React.FC<AdminChatProps> = ({
   };
 
   const handleTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (
+      shouldSubmitOnTextareaKeyDown({
+        key: e.key,
+        shiftKey: e.shiftKey,
+        isComposing: e.nativeEvent.isComposing,
+      })
+    ) {
       e.preventDefault();
       void handleSendMessage();
     }
@@ -837,12 +1140,17 @@ export const AdminChat: React.FC<AdminChatProps> = ({
     handleSelectConversation(conv.id);
   };
 
+  const mobileChatShellStyle =
+    selectedConvId && isMobileViewport ? resolveFullscreenViewportStyle(viewportState) : undefined;
+
   return (
     <div
+      data-testid="admin-fullscreen-chat"
+      style={mobileChatShellStyle}
       className={
         selectedConvId
-          ? 'fixed inset-0 z-50 bg-[#070D20] flex flex-col md:static md:z-auto md:max-w-7xl md:mx-auto md:pb-6 md:h-[calc(100dvh-130px)] md:min-h-[560px]'
-          : 'max-w-7xl mx-auto pb-4 md:pb-6 h-[calc(100dvh-12rem)] md:h-[calc(100dvh-130px)] min-h-[480px] flex flex-col'
+          ? 'fixed inset-0 z-40 bg-[#070D20] flex flex-col overflow-hidden md:static md:z-auto md:flex-1 md:min-h-0 md:h-full md:w-full'
+          : 'flex-1 min-h-0 h-full w-full flex flex-col overflow-hidden'
       }
     >
       {/* Toast Feedback */}
@@ -1068,8 +1376,8 @@ export const AdminChat: React.FC<AdminChatProps> = ({
           {activeConv ? (
             <>
               {/* CONVERSATION HEADER */}
-              <header className="bg-[#10182D] border-b border-slate-800/80 pt-safe shrink-0 z-20">
-                <div className="px-3 sm:px-5 py-3 flex items-center justify-between gap-2">
+              <header className="bg-[#10182D] border-b border-slate-800/80 chat-pt-safe shrink-0 z-20">
+                <div className="px-3 sm:px-5 py-2 sm:py-3 flex items-center justify-between gap-2">
                   {/* Left: Back, Customer Avatar, Full Name, Sync/Ticket Tag */}
                   <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
                     <button
@@ -1349,7 +1657,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                 </div>
 
                 {/* Mobile Sub-Header Status Selector (Cleanly avoids name truncation below 640px) */}
-                <div className="sm:hidden px-3 pb-2.5 flex items-center justify-between gap-2 border-t border-slate-800/50 pt-2">
+                <div className="sm:hidden px-3 pb-2 flex items-center justify-between gap-2 border-t border-slate-800/50 pt-1.5">
                   <span className="text-[11px] font-mono text-[#77839F]">
                     Ticket {formatTicketTag(activeConv)}
                   </span>
@@ -1428,7 +1736,15 @@ export const AdminChat: React.FC<AdminChatProps> = ({
               )}
 
               {/* MESSAGES FEED AREA */}
-              <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y touch-scroll px-3 sm:px-5 py-4 bg-[#070D20]">
+              <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden bg-[#070D20]">
+                <div
+                  ref={messagesContainerRef}
+                  data-testid="admin-chat-messages"
+                  onScroll={handleMessagesScroll}
+                  onWheel={clearSmoothScrollLock}
+                  onTouchStart={clearSmoothScrollLock}
+                  className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain touch-pan-y touch-scroll px-3 sm:px-5 py-4 bg-[#070D20]"
+                >
                 {messages.length >= 25 && hasMoreOlder && (
                   <div className="flex justify-center pb-4">
                     <button
@@ -1494,7 +1810,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                               </div>
 
                               {msg.text && (
-                                <p className="text-[13px] text-amber-100 leading-relaxed whitespace-pre-wrap break-words pl-8">
+                                <p className="text-[13px] text-amber-100 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] pl-8">
                                   {msg.text}
                                 </p>
                               )}
@@ -1519,7 +1835,8 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                             </div>
                           ) : (
                             <div
-                              className={`flex flex-col ${
+                              data-message-id={msg.id}
+                              className={`flex flex-col min-w-0 ${
                                 isStaff ? 'items-end' : isSystem ? 'items-center' : 'items-start'
                               } ${isFirstInGroup ? 'mt-3' : 'mt-1'}`}
                             >
@@ -1532,7 +1849,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                               )}
 
                               <div
-                                className={`max-w-[90%] sm:max-w-[78%] px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words shadow-sm ${
+                                className={`max-w-[90%] sm:max-w-[78%] min-w-0 px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] shadow-sm ${
                                   isStaff
                                     ? `bg-[#5036F5] text-[#F8FAFC] ${
                                         isFirstInGroup ? 'rounded-2xl rounded-tr-md' : 'rounded-2xl'
@@ -1544,7 +1861,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                                       }`
                                 }`}
                               >
-                                {msg.text && <p>{msg.text}</p>}
+                                {msg.text && <p className="break-words [overflow-wrap:anywhere]">{msg.text}</p>}
 
                                 {/* Forwarded Transaction Card with Direct Approval Actions */}
                                 {msg.transactionData && msg.transactionData.transactionType && (
@@ -1675,7 +1992,30 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                     })}
                   </div>
                 )}
-                <div ref={messagesEndRef} />
+                </div>
+
+                {(newMessagesBelowCount > 0 || isScrolledFarUp) && (
+                  <div className="pointer-events-none absolute bottom-3 right-3 sm:right-6 z-20 flex justify-end">
+                    <button
+                      type="button"
+                      data-testid="admin-chat-jump-latest"
+                      onClick={handleJumpToLatest}
+                      className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full bg-[#5036F5] hover:bg-[#5538F8] text-white text-xs font-semibold px-3.5 py-2 shadow-xl border border-indigo-400/40 transition-all active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300"
+                      aria-label={
+                        newMessagesBelowCount > 0
+                          ? `Jump to ${newMessagesBelowCount} new messages`
+                          : 'Jump to latest messages'
+                      }
+                    >
+                      <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {newMessagesBelowCount > 0
+                          ? `${newMessagesBelowCount} new message${newMessagesBelowCount > 1 ? 's' : ''}`
+                          : 'Jump to latest'}
+                      </span>
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Upload or Send Error Banner */}
@@ -1730,8 +2070,11 @@ export const AdminChat: React.FC<AdminChatProps> = ({
 
               {/* COMPOSER BAR WITH EXPLICIT MODE TABS */}
               <form
+                data-testid="admin-chat-composer"
                 onSubmit={handleSendMessage}
-                className="bg-[#10182D] border-t border-slate-800/80 shrink-0 pb-safe"
+                className={`bg-[#10182D] border-t border-slate-800/80 shrink-0 ${
+                  viewportState.isKeyboardOpen && isMobileViewport ? 'pb-1' : 'chat-pb-safe'
+                }`}
               >
                 {/* Mode Selector Tabs: Reply to customer vs Internal note */}
                 <div className="px-3 sm:px-4 pt-2 flex items-center justify-between gap-2 border-b border-slate-800/60">
@@ -1780,7 +2123,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                   </div>
                 )}
 
-                <div className="px-3 sm:px-4 py-3 flex items-end gap-2">
+                <div className="px-3 sm:px-4 py-2 sm:py-2.5 flex items-end gap-2">
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -1814,6 +2157,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                     <textarea
                       ref={textareaRef}
                       rows={1}
+                      enterKeyHint="send"
                       value={inputText}
                       onChange={(e) => {
                         setInputText(e.target.value);
@@ -1827,7 +2171,8 @@ export const AdminChat: React.FC<AdminChatProps> = ({
                           ? 'Write an internal note for your team...'
                           : 'Type a message...'
                       }
-                      className={`flex-1 min-w-0 bg-transparent border-0 py-2 px-1 text-xs sm:text-[13px] resize-none max-h-[120px] focus:outline-none leading-relaxed ${
+                      aria-label={isInternalNote ? 'Internal note' : 'Type a message'}
+                      className={`flex-1 min-w-0 bg-transparent border-0 py-2 px-1 text-[14px] sm:text-[13px] resize-none max-h-[120px] overflow-y-auto focus:outline-none leading-relaxed ${
                         isInternalNote
                           ? 'text-amber-100 placeholder-amber-300/45'
                           : 'text-[#F8FAFC] placeholder-[#77839F]'
@@ -2273,7 +2618,7 @@ export const AdminChat: React.FC<AdminChatProps> = ({
 
       {/* LIGHTBOX MODAL: Full Resolution Image Viewer */}
       {lightboxImage && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150">
           <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center">
             <button
               type="button"

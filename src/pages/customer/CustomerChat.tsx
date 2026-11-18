@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { UserProfile, ChatMessage, SupportConversation } from '../../types';
 import { dataService } from '../../services/dataService';
 import { realtimeChatHub } from '../../services/chatRealtime';
@@ -22,6 +22,7 @@ import {
   Sparkles,
   ArrowRight,
   ChevronLeft,
+  ChevronDown,
   ChevronUp,
   RefreshCw,
   LogOut,
@@ -46,9 +47,20 @@ import { toProxyStorageUrl, toDirectSupabaseStorageUrl } from '../../services/st
 import { supabaseUrl } from '../../services/supabaseClient';
 import {
   computeVisualViewportState,
+  resolveFullscreenViewportStyle,
   shouldSubmitOnTextareaKeyDown,
   type ComputedChatViewportState,
 } from '../../utils/chatViewportUtils';
+import {
+  buildScrollSnapshotKey,
+  computeDistanceFromBottom,
+  computePrependScrollTop,
+  computeRestoredScrollTop,
+  decideMessageUpdateScrollAction,
+  isScrolledNearBottom,
+  loadConversationScrollSnapshot,
+  saveConversationScrollSnapshot,
+} from '../../utils/chatScrollUtils';
 
 interface CustomerChatProps {
   currentUser: UserProfile;
@@ -82,11 +94,25 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
   const [syncHealth, setSyncHealth] = useState(() => dataService.getSyncHealth());
   const [realtimeStatus, setRealtimeStatus] = useState<string>('SUBSCRIBING');
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const canonicalConvId = `conv_${currentUser.id}`;
+  const scrollSnapshotKey = buildScrollSnapshotKey(currentUser.id, canonicalConvId);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const emojiContainerRef = useRef<HTMLDivElement>(null);
   const menuContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const prevMessagesRef = useRef<ChatMessage[]>([]);
+  const hasAnchoredInitialRef = useRef(false);
+  const userHasScrolledRef = useRef(false);
+  const wasNearBottomRef = useRef(true);
+  const justSentByMeRef = useRef(false);
+  const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const programmaticScrollRef = useRef(false);
+  const smoothScrollingToBottomUntilRef = useRef(0);
+
+  const [newMessagesBelowCount, setNewMessagesBelowCount] = useState(0);
+  const [isScrolledFarUp, setIsScrolledFarUp] = useState(false);
 
   const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -105,15 +131,82 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
   const [desktopEnabled, setDesktopEnabled] = useState(() => notificationSoundService.isDesktopEnabled());
   const [notifPermission, setNotifPermission] = useState(() => notificationSoundService.getPermissionStatus());
 
+  const applyProgrammaticScrollTop = useCallback((el: HTMLDivElement, targetTop: number) => {
+    programmaticScrollRef.current = true;
+    el.scrollTop = targetTop;
+    requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+    });
+  }, []);
+
+  const clearSmoothScrollLock = useCallback(() => {
+    smoothScrollingToBottomUntilRef.current = 0;
+  }, []);
+
+  const handleJumpToLatest = useCallback(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    setNewMessagesBelowCount(0);
+    setIsScrolledFarUp(false);
+    wasNearBottomRef.current = true;
+    userHasScrolledRef.current = true;
+    smoothScrollingToBottomUntilRef.current = Date.now() + 600;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    saveConversationScrollSnapshot(scrollSnapshotKey, {
+      scrollTop: Math.max(0, el.scrollHeight - el.clientHeight),
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    });
+  }, [scrollSnapshotKey]);
+
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    if (programmaticScrollRef.current) return;
+
+    const nearBottom = isScrolledNearBottom(el);
+    if (Date.now() < smoothScrollingToBottomUntilRef.current) {
+      if (nearBottom) {
+        smoothScrollingToBottomUntilRef.current = 0;
+      } else {
+        return;
+      }
+    }
+
+    userHasScrolledRef.current = true;
+    wasNearBottomRef.current = nearBottom;
+    if (nearBottom) {
+      setNewMessagesBelowCount(0);
+    }
+    const distance = computeDistanceFromBottom(el);
+    setIsScrolledFarUp(distance > 280);
+    saveConversationScrollSnapshot(scrollSnapshotKey, el);
+  }, [scrollSnapshotKey]);
+
   const handleLoadOlderMessages = async () => {
     if (!conversation?.id || loadingOlder || messages.length === 0) return;
+    const el = messagesContainerRef.current;
+    if (el) {
+      prependAnchorRef.current = {
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+      };
+    }
     setLoadingOlder(true);
-    const oldestTimestamp = messages[0].createdAt;
-    const oldestId = messages[0].id;
-    const res = await dataService.fetchOlderMessages(conversation.id, oldestTimestamp, 50, oldestId);
-    setLoadingOlder(false);
-    if (!res.hasMore) {
-      setHasMoreOlder(false);
+    try {
+      const oldestTimestamp = messages[0].createdAt;
+      const oldestId = messages[0].id;
+      const res = await dataService.fetchOlderMessages(conversation.id, oldestTimestamp, 50, oldestId);
+      if (!res.hasMore) {
+        setHasMoreOlder(false);
+      }
+      if (res.newCount === 0) {
+        prependAnchorRef.current = null;
+      }
+    } catch {
+      prependAnchorRef.current = null;
+    } finally {
+      setLoadingOlder(false);
     }
   };
 
@@ -170,6 +263,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
   // Track visualViewport for soft-keyboard safe resizing on mobile browsers
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    let prevKeyboardOpen = false;
     const updateViewport = () => {
       const vv = window.visualViewport;
       const next = computeVisualViewportState({
@@ -187,11 +281,15 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
         }
         return next;
       });
-      if (next.isKeyboardOpen) {
+      if (next.isKeyboardOpen && !prevKeyboardOpen && wasNearBottomRef.current) {
         requestAnimationFrame(() => {
-          messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+          const el = messagesContainerRef.current;
+          if (el && wasNearBottomRef.current) {
+            applyProgrammaticScrollTop(el, el.scrollHeight);
+          }
         });
       }
+      prevKeyboardOpen = next.isKeyboardOpen;
     };
 
     updateViewport();
@@ -199,12 +297,25 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     vv?.addEventListener('resize', updateViewport);
     vv?.addEventListener('scroll', updateViewport);
     window.addEventListener('resize', updateViewport);
+
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && messagesContainerRef.current) {
+      resizeObserver = new ResizeObserver(() => {
+        const el = messagesContainerRef.current;
+        if (el && hasAnchoredInitialRef.current && wasNearBottomRef.current) {
+          applyProgrammaticScrollTop(el, el.scrollHeight);
+        }
+      });
+      resizeObserver.observe(messagesContainerRef.current);
+    }
+
     return () => {
       vv?.removeEventListener('resize', updateViewport);
       vv?.removeEventListener('scroll', updateViewport);
       window.removeEventListener('resize', updateViewport);
+      resizeObserver?.disconnect();
     };
-  }, []);
+  }, [applyProgrammaticScrollTop]);
 
   // Track genuine browser + sync health
   useEffect(() => {
@@ -226,23 +337,34 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
   // Initialize or load conversation
   useEffect(() => {
-    const canonicalConvId = `conv_${currentUser.id}`;
-    const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
-    conv.id = canonicalConvId;
-    setConversation(conv);
-    setMessages(filterVisibleMessagesForRole(dataService.getMessages(canonicalConvId), 'customer'));
-    dataService.markConversationRead(canonicalConvId, 'customer');
+    const convId = `conv_${currentUser.id}`;
+    hasAnchoredInitialRef.current = false;
+    userHasScrolledRef.current = false;
+    wasNearBottomRef.current = true;
+    justSentByMeRef.current = false;
+    prependAnchorRef.current = null;
+    prevMessagesRef.current = [];
+    setNewMessagesBelowCount(0);
+    setIsScrolledFarUp(false);
 
-    dataService.fetchMessagesForConversation(canonicalConvId, { limit: 50 }).then((freshMsgs) => {
+    const conv = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
+    conv.id = convId;
+    setConversation(conv);
+    setMessages(filterVisibleMessagesForRole(dataService.getMessages(convId), 'customer'));
+    dataService.markConversationRead(convId, 'customer');
+
+    let isUnmounted = false;
+    dataService.fetchMessagesForConversation(convId, { limit: 50 }).then((freshMsgs) => {
+      if (isUnmounted) return;
       setMessages(filterVisibleMessagesForRole(freshMsgs || [], 'customer'));
     });
 
     const handleSync = () => {
       const updated = dataService.getOrCreateConversationForCustomer(currentUser.id, currentUser.displayName);
       if (updated) {
-        updated.id = canonicalConvId;
+        updated.id = convId;
         setConversation(updated);
-        setMessages(filterVisibleMessagesForRole(dataService.getMessages(canonicalConvId), 'customer'));
+        setMessages(filterVisibleMessagesForRole(dataService.getMessages(convId), 'customer'));
       }
     };
 
@@ -250,13 +372,13 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     window.addEventListener('storage', handleSync);
 
     const unsubRoom = realtimeChatHub.subscribeChatRoom(
-      `chat_${canonicalConvId}`,
+      `chat_${convId}`,
       {
         postgresFilter: {
           event: 'INSERT',
           schema: 'public',
           table: 'messages',
-          filter: `conversation_id=eq.${canonicalConvId}`,
+          filter: `conversation_id=eq.${convId}`,
         },
       },
       {
@@ -272,7 +394,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
         onPostgresChange: (payload) => {
           const row: any = payload?.new;
           if (!row || !row.id) return;
-          const incoming = mapDbMessageRowToChatMessage(row, canonicalConvId);
+          const incoming = mapDbMessageRowToChatMessage(row, convId);
           if (isMessageInternalNote(incoming)) return;
           dataService.appendIncomingMessage(incoming);
           setMessages((prev) =>
@@ -288,7 +410,8 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       const now = Date.now();
       if (now - lastCatchUpTime < 800) return;
       lastCatchUpTime = now;
-      dataService.fetchMessagesForConversation(canonicalConvId, { limit: 50 }).then((fresh) => {
+      dataService.fetchMessagesForConversation(convId, { limit: 50 }).then((fresh) => {
+        if (isUnmounted) return;
         if (fresh && fresh.length > 0) {
           setMessages(filterVisibleMessagesForRole(fresh, 'customer'));
         }
@@ -301,22 +424,29 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       }
     };
     const handleFocus = () => performCatchUp();
+    const handlePageHide = () => {
+      if (messagesContainerRef.current) {
+        saveConversationScrollSnapshot(scrollSnapshotKey, messagesContainerRef.current);
+      }
+    };
 
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('focus', handleFocus);
+    window.addEventListener('pagehide', handlePageHide);
 
     return () => {
+      isUnmounted = true;
+      if (messagesContainerRef.current) {
+        saveConversationScrollSnapshot(scrollSnapshotKey, messagesContainerRef.current);
+      }
       window.removeEventListener('aetherpay_state_changed', handleSync);
       window.removeEventListener('storage', handleSync);
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('pagehide', handlePageHide);
       unsubRoom();
     };
-  }, [currentUser.id, currentUser.displayName]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length]);
+  }, [currentUser.id, currentUser.displayName, scrollSnapshotKey]);
 
   const handleSendMessage = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -331,6 +461,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     setIsSending(true);
     setSendError(null);
     setShowEmojiPicker(false);
+    justSentByMeRef.current = true;
 
     try {
       let confirmed: ChatMessage | null = null;
@@ -355,6 +486,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       );
 
       if (confirmed.deliveryStatus === 'failed') {
+        justSentByMeRef.current = false;
         setFailedPendingMsgId(confirmed.id);
         setSendError(confirmed.deliveryError || 'Message failed to send. Your draft is preserved.');
       } else {
@@ -365,6 +497,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
         setFailedPendingMsgId(null);
       }
     } catch (err: any) {
+      justSentByMeRef.current = false;
       setSendError(err?.message || 'Unable to send message. Your draft is preserved.');
     } finally {
       setIsSending(false);
@@ -442,6 +575,91 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     [visibleMessages]
   );
 
+  // Intentional scroll & restoration handler (no forced scrollIntoView on re-renders or catch-up fetches)
+  useLayoutEffect(() => {
+    const el = messagesContainerRef.current;
+    const prevList = prevMessagesRef.current;
+    prevMessagesRef.current = visibleMessages;
+    if (!el) return;
+
+    const savedSnapshot = hasAnchoredInitialRef.current
+      ? null
+      : loadConversationScrollSnapshot(scrollSnapshotKey);
+
+    const decision = decideMessageUpdateScrollAction({
+      prevMessages: prevList,
+      nextMessages: visibleMessages,
+      hasAnchoredInitial: hasAnchoredInitialRef.current,
+      userHasScrolled: userHasScrolledRef.current,
+      wasNearBottom: wasNearBottomRef.current,
+      justSentByMe: justSentByMeRef.current,
+      isPrependingOlder: Boolean(prependAnchorRef.current),
+      savedSnapshot,
+    });
+
+    if (decision.type === 'preserve-prepend') {
+      const anchor = prependAnchorRef.current;
+      prependAnchorRef.current = null;
+      if (anchor) {
+        const nextTop = computePrependScrollTop({
+          prevScrollTop: anchor.scrollTop,
+          prevScrollHeight: anchor.scrollHeight,
+          newScrollHeight: el.scrollHeight,
+        });
+        applyProgrammaticScrollTop(el, nextTop);
+      }
+      wasNearBottomRef.current = isScrolledNearBottom(el);
+      setIsScrolledFarUp(computeDistanceFromBottom(el) > 280);
+      return;
+    }
+
+    if (decision.type === 'restore-saved') {
+      hasAnchoredInitialRef.current = true;
+      const nextTop = computeRestoredScrollTop({
+        snapshot: decision.snapshot,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      });
+      applyProgrammaticScrollTop(el, nextTop);
+      wasNearBottomRef.current = isScrolledNearBottom(el);
+      setIsScrolledFarUp(computeDistanceFromBottom(el) > 280);
+      return;
+    }
+
+    if (decision.type === 'scroll-bottom-instant') {
+      hasAnchoredInitialRef.current = true;
+      applyProgrammaticScrollTop(el, el.scrollHeight);
+      wasNearBottomRef.current = true;
+      setNewMessagesBelowCount(0);
+      setIsScrolledFarUp(false);
+      return;
+    }
+
+    if (decision.type === 'scroll-bottom-smooth') {
+      justSentByMeRef.current = false;
+      wasNearBottomRef.current = true;
+      setNewMessagesBelowCount(0);
+      setIsScrolledFarUp(false);
+      smoothScrollingToBottomUntilRef.current = Date.now() + 600;
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+      saveConversationScrollSnapshot(scrollSnapshotKey, {
+        scrollTop: Math.max(0, el.scrollHeight - el.clientHeight),
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      });
+      return;
+    }
+
+    if (decision.type === 'show-new-indicator') {
+      setNewMessagesBelowCount((prev) => prev + decision.newlyAddedCount);
+      setIsScrolledFarUp(computeDistanceFromBottom(el) > 280);
+      return;
+    }
+
+    justSentByMeRef.current = false;
+    prependAnchorRef.current = null;
+  }, [visibleMessages, scrollSnapshotKey, applyProgrammaticScrollTop]);
+
   const connectionStatus = useMemo(
     () =>
       deriveTruthfulConnectionStatus({
@@ -455,6 +673,9 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
   const userInitials = useMemo(() => getInitials(currentUser.displayName), [currentUser.displayName]);
 
   const handleExit = () => {
+    if (messagesContainerRef.current) {
+      saveConversationScrollSnapshot(scrollSnapshotKey, messagesContainerRef.current);
+    }
     if (onGoBack) {
       onGoBack();
     } else {
@@ -462,27 +683,17 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
     }
   };
 
-  const shellInlineStyle =
-    viewportState.isKeyboardOpen && viewportState.containerHeightPx
-      ? {
-          height: `${viewportState.containerHeightPx}px`,
-          top: `${viewportState.offsetTopPx}px`,
-        }
-      : undefined;
+  const shellInlineStyle = resolveFullscreenViewportStyle(viewportState);
 
   return (
     <div
       data-testid="customer-fullscreen-chat"
       style={shellInlineStyle}
-      className={
-        viewportState.isKeyboardOpen && viewportState.containerHeightPx
-          ? 'fixed inset-x-0 z-50 w-full flex flex-col overflow-hidden bg-[#080E1D]'
-          : 'flex-1 min-h-0 h-[100dvh] w-full flex flex-col overflow-hidden bg-[#080E1D]'
-      }
+      className="fixed inset-0 z-40 w-full flex flex-col overflow-hidden bg-[#080E1D]"
     >
       {/* COMPACT FULL-WIDTH CHAT HEADER */}
-      <header className="w-full bg-[#101A30] border-b border-[#1E2942] pt-safe shrink-0 z-20">
-        <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between gap-2 sm:gap-3">
+      <header className="w-full bg-[#101A30] border-b border-[#1E2942] chat-pt-safe shrink-0 z-20">
+        <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-2 sm:py-2.5 flex items-center justify-between gap-2 sm:gap-3">
           <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
             <button
               type="button"
@@ -694,124 +905,130 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
       </div>
 
       {/* MESSAGES SCROLL REGION (Independently scrollable, fills all remaining vertical space) */}
-      <div
-        data-testid="customer-chat-messages"
-        className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y touch-scroll bg-[#080E1D]"
-      >
-        <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-4 min-h-full flex flex-col">
-          {visibleMessages.length >= 25 && hasMoreOlder && (
-            <div className="flex justify-center pb-4 shrink-0">
-              <button
-                type="button"
-                onClick={handleLoadOlderMessages}
-                disabled={loadingOlder}
-                className="px-3.5 py-1.5 rounded-full bg-[#101A30] hover:bg-[#172442] border border-[#1E2942] text-[#8B99B8] hover:text-white text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-50"
-              >
-                {loadingOlder ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#5035F5]" />
-                    <span>Loading older messages...</span>
-                  </>
-                ) : (
-                  <>
-                    <ChevronUp className="w-3.5 h-3.5 text-[#5035F5]" />
-                    <span>Load Older Messages</span>
-                  </>
-                )}
-              </button>
-            </div>
-          )}
-
-          {groupedMessages.length === 0 ? (
-            <div className="my-auto py-8 flex flex-col items-center justify-center text-center px-4">
-              <div className="w-14 h-14 rounded-full bg-[#5035F5]/15 border border-[#5035F5]/40 text-indigo-300 flex items-center justify-center mb-3.5">
-                <Headphones className="w-7 h-7" />
+      <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden bg-[#080E1D]">
+        <div
+          ref={messagesContainerRef}
+          data-testid="customer-chat-messages"
+          onScroll={handleMessagesScroll}
+          onWheel={clearSmoothScrollLock}
+          onTouchStart={clearSmoothScrollLock}
+          className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain touch-pan-y touch-scroll bg-[#080E1D]"
+        >
+          <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-4 min-h-full flex flex-col min-w-0">
+            {visibleMessages.length >= 25 && hasMoreOlder && (
+              <div className="flex justify-center pb-4 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleLoadOlderMessages}
+                  disabled={loadingOlder}
+                  className="px-3.5 py-1.5 rounded-full bg-[#101A30] hover:bg-[#172442] border border-[#1E2942] text-[#8B99B8] hover:text-white text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {loadingOlder ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#5035F5]" />
+                      <span>Loading older messages...</span>
+                    </>
+                  ) : (
+                    <>
+                      <ChevronUp className="w-3.5 h-3.5 text-[#5035F5]" />
+                      <span>Load Older Messages</span>
+                    </>
+                  )}
+                </button>
               </div>
-              <h2 className="text-base font-bold text-white">Welcome to Swift Sweeps Support</h2>
-              <p className="text-xs sm:text-sm text-[#8B99B8] max-w-sm mt-1.5 leading-relaxed">
-                Send a message below or choose a quick action above to connect directly with our customer care team.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-1">
-              {groupedMessages.map(({ message: msg, showDateDivider, dateLabel, isFirstInGroup, isLastInGroup }) => {
-                const isMe = msg.senderRole === 'customer';
-                const timeStr = formatChatTime(msg.createdAt);
+            )}
 
-                return (
-                  <React.Fragment key={msg.id}>
-                    {showDateDivider && (
-                      <div className="flex items-center gap-3 py-3">
-                        <div className="flex-1 h-px bg-[#1E2942]" />
-                        <span className="px-3 py-1 rounded-full bg-[#101A30] border border-[#1E2942] text-[11px] font-medium text-[#8B99B8]">
-                          {dateLabel}
-                        </span>
-                        <div className="flex-1 h-px bg-[#1E2942]" />
-                      </div>
-                    )}
+            {groupedMessages.length === 0 ? (
+              <div className="my-auto py-8 flex flex-col items-center justify-center text-center px-4">
+                <div className="w-14 h-14 rounded-full bg-[#5035F5]/15 border border-[#5035F5]/40 text-indigo-300 flex items-center justify-center mb-3.5">
+                  <Headphones className="w-7 h-7" />
+                </div>
+                <h2 className="text-base font-bold text-white">Welcome to Swift Sweeps Support</h2>
+                <p className="text-xs sm:text-sm text-[#8B99B8] max-w-sm mt-1.5 leading-relaxed">
+                  Send a message below or choose a quick action above to connect directly with our customer care team.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1 min-w-0">
+                {groupedMessages.map(({ message: msg, showDateDivider, dateLabel, isFirstInGroup, isLastInGroup }) => {
+                  const isMe = msg.senderRole === 'customer';
+                  const timeStr = formatChatTime(msg.createdAt);
 
-                    <div
-                      className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} ${
-                        isFirstInGroup ? 'mt-3' : 'mt-1'
-                      }`}
-                    >
-                      {isFirstInGroup && (
-                        <div
-                          className={`flex items-center gap-1.5 text-[11px] text-[#8B99B8] mb-1 ${
-                            isMe ? 'pr-9 sm:pr-10' : 'pl-9 sm:pl-10'
-                          }`}
-                        >
-                          <span className="font-medium text-slate-300">
-                            {isMe ? 'You' : msg.senderName || 'Support Team'}
+                  return (
+                    <React.Fragment key={msg.id}>
+                      {showDateDivider && (
+                        <div className="flex items-center gap-3 py-3">
+                          <div className="flex-1 h-px bg-[#1E2942]" />
+                          <span className="px-3 py-1 rounded-full bg-[#101A30] border border-[#1E2942] text-[11px] font-medium text-[#8B99B8]">
+                            {dateLabel}
                           </span>
-                          <span aria-hidden="true">·</span>
-                          <span className="tabular-nums">{timeStr}</span>
+                          <div className="flex-1 h-px bg-[#1E2942]" />
                         </div>
                       )}
 
                       <div
-                        className={`flex items-end gap-2 max-w-[90%] sm:max-w-[78%] ${
-                          isMe ? 'flex-row-reverse' : 'flex-row'
+                        data-message-id={msg.id}
+                        className={`flex flex-col min-w-0 ${isMe ? 'items-end' : 'items-start'} ${
+                          isFirstInGroup ? 'mt-3' : 'mt-1'
                         }`}
                       >
-                        {/* Avatar column (Support Team on left, Customer avatar/initials on right) */}
-                        <div className="w-7 h-7 sm:w-8 sm:h-8 shrink-0 flex items-center justify-center self-start mt-0.5">
-                          {isFirstInGroup ? (
-                            isMe ? (
-                              currentUser.avatarUrl && !avatarLoadFailed ? (
-                                <img
-                                  src={currentUser.avatarUrl}
-                                  alt={currentUser.displayName}
-                                  className="w-7 h-7 sm:w-8 sm:h-8 rounded-full object-cover border border-[#1E2942]"
-                                  referrerPolicy="no-referrer"
-                                  onError={() => setAvatarLoadFailed(true)}
-                                />
-                              ) : (
-                                <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-[#1A2444] border border-[#2A3960] text-indigo-200 text-[10px] sm:text-[11px] font-bold flex items-center justify-center">
-                                  {userInitials}
-                                </div>
-                              )
-                            ) : (
-                              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-[#5035F5] text-white flex items-center justify-center shadow-sm">
-                                <Headphones className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                              </div>
-                            )
-                          ) : null}
-                        </div>
+                        {isFirstInGroup && (
+                          <div
+                            className={`flex items-center gap-1.5 text-[11px] text-[#8B99B8] mb-1 ${
+                              isMe ? 'pr-9 sm:pr-10' : 'pl-9 sm:pl-10'
+                            }`}
+                          >
+                            <span className="font-medium text-slate-300">
+                              {isMe ? 'You' : msg.senderName || 'Support Team'}
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span className="tabular-nums">{timeStr}</span>
+                          </div>
+                        )}
 
-                        {/* Message Bubble */}
                         <div
-                          className={`px-3.5 py-2.5 text-[13.5px] sm:text-sm leading-relaxed whitespace-pre-wrap break-words shadow-sm ${
-                            isMe
-                              ? `bg-[#5035F5] text-white ${
-                                  isFirstInGroup ? 'rounded-2xl rounded-tr-md' : 'rounded-2xl'
-                                }`
-                              : `bg-[#121E33] border border-[#1E2942] text-white ${
-                                  isFirstInGroup ? 'rounded-2xl rounded-tl-md' : 'rounded-2xl'
-                                }`
+                          className={`flex items-end gap-2 max-w-[90%] sm:max-w-[78%] min-w-0 ${
+                            isMe ? 'flex-row-reverse' : 'flex-row'
                           }`}
                         >
-                          {msg.text && <p>{msg.text}</p>}
+                          {/* Avatar column (Support Team on left, Customer avatar/initials on right) */}
+                          <div className="w-7 h-7 sm:w-8 sm:h-8 shrink-0 flex items-center justify-center self-start mt-0.5">
+                            {isFirstInGroup ? (
+                              isMe ? (
+                                currentUser.avatarUrl && !avatarLoadFailed ? (
+                                  <img
+                                    src={currentUser.avatarUrl}
+                                    alt={currentUser.displayName}
+                                    className="w-7 h-7 sm:w-8 sm:h-8 rounded-full object-cover border border-[#1E2942]"
+                                    referrerPolicy="no-referrer"
+                                    onError={() => setAvatarLoadFailed(true)}
+                                  />
+                                ) : (
+                                  <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-[#1A2444] border border-[#2A3960] text-indigo-200 text-[10px] sm:text-[11px] font-bold flex items-center justify-center">
+                                    {userInitials}
+                                  </div>
+                                )
+                              ) : (
+                                <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-[#5035F5] text-white flex items-center justify-center shadow-sm">
+                                  <Headphones className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                                </div>
+                              )
+                            ) : null}
+                          </div>
+
+                          {/* Message Bubble */}
+                          <div
+                            className={`min-w-0 max-w-full px-3.5 py-2.5 text-[13.5px] sm:text-sm leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] shadow-sm ${
+                              isMe
+                                ? `bg-[#5035F5] text-white ${
+                                    isFirstInGroup ? 'rounded-2xl rounded-tr-md' : 'rounded-2xl'
+                                  }`
+                                : `bg-[#121E33] border border-[#1E2942] text-white ${
+                                    isFirstInGroup ? 'rounded-2xl rounded-tl-md' : 'rounded-2xl'
+                                  }`
+                            }`}
+                          >
+                            {msg.text && <p className="break-words [overflow-wrap:anywhere]">{msg.text}</p>}
 
                           {/* Forwarded Transaction Card */}
                           {msg.transactionData && msg.transactionData.transactionType && (
@@ -994,14 +1211,38 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
               })}
             </div>
           )}
-          <div ref={messagesEndRef} />
+          </div>
         </div>
+
+        {(newMessagesBelowCount > 0 || isScrolledFarUp) && (
+          <div className="pointer-events-none absolute bottom-3 right-3 sm:right-6 z-20 flex justify-end">
+            <button
+              type="button"
+              data-testid="customer-chat-jump-latest"
+              onClick={handleJumpToLatest}
+              className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full bg-[#5035F5] hover:bg-[#5E45FF] text-white text-xs font-semibold px-3.5 py-2 shadow-xl border border-indigo-400/40 transition-all active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300"
+              aria-label={
+                newMessagesBelowCount > 0
+                  ? `Jump to ${newMessagesBelowCount} new messages`
+                  : 'Jump to latest messages'
+              }
+            >
+              <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                {newMessagesBelowCount > 0
+                  ? `${newMessagesBelowCount} new message${newMessagesBelowCount > 1 ? 's' : ''}`
+                  : 'Jump to latest'}
+              </span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* FIXED BOTTOM COMPOSER SHELL (Safe area aware; adjusts when mobile keyboard opens) */}
       <div
+        data-testid="customer-chat-composer"
         className={`w-full bg-[#101A30] border-t border-[#1E2942] shrink-0 z-20 ${
-          viewportState.isKeyboardOpen ? 'pb-1' : 'pb-safe'
+          viewportState.isKeyboardOpen ? 'pb-1' : 'chat-pb-safe'
         }`}
       >
         {/* Upload or Send Error Banner */}
@@ -1061,7 +1302,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
         {/* COMPOSER FORM */}
         <form
           onSubmit={handleSendMessage}
-          className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-2.5 sm:py-3"
+          className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-2 sm:py-2.5"
         >
           <input
             ref={fileInputRef}
@@ -1105,7 +1346,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                 onKeyDown={handleTextareaKeyDown}
                 placeholder="Type a message..."
                 aria-label="Type a message"
-                className="flex-1 min-w-0 bg-transparent border-0 py-2 px-1 text-[15px] sm:text-sm text-white placeholder-[#77839F] resize-none max-h-[120px] focus:outline-none leading-relaxed"
+                className="flex-1 min-w-0 bg-transparent border-0 py-2 px-1 text-[15px] sm:text-sm text-white placeholder-[#77839F] resize-none max-h-[120px] overflow-y-auto focus:outline-none leading-relaxed"
               />
 
               <button
@@ -1157,7 +1398,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
       {/* MODAL: Request Game ID from inside chat */}
       {showGameRequestModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
           <div
             className="fixed inset-0 bg-black/70 backdrop-blur-sm"
             onClick={() => setShowGameRequestModal(false)}
@@ -1227,7 +1468,7 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
 
       {/* LIGHTBOX MODAL: Full Resolution Image Viewer */}
       {lightboxImage && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150">
           <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center">
             <button
               type="button"

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   computeVisualViewportState,
+  resolveFullscreenViewportStyle,
   shouldSubmitOnTextareaKeyDown,
 } from './chatViewportUtils';
 
@@ -32,6 +33,17 @@ test('computeVisualViewportState detects open mobile keyboard and clamps offsetT
   assert.deepEqual(
     computeVisualViewportState({ innerHeight: 844, visualHeight: 490.4, visualOffsetTop: -4 }),
     { isKeyboardOpen: true, containerHeightPx: 490, offsetTopPx: 0 }
+  );
+});
+
+test('resolveFullscreenViewportStyle returns explicit height/top/bottom override only when keyboard is open', () => {
+  assert.equal(
+    resolveFullscreenViewportStyle({ isKeyboardOpen: false, containerHeightPx: null, offsetTopPx: 0 }),
+    undefined
+  );
+  assert.deepEqual(
+    resolveFullscreenViewportStyle({ isKeyboardOpen: true, containerHeightPx: 500, offsetTopPx: 24 }),
+    { height: '500px', top: '24px', bottom: 'auto' }
   );
 });
 
