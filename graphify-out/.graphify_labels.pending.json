@@ -1,12 +1,14 @@
 {
   "0": "DataService",
-  "1": "AdminChat.tsx",
+  "1": "types.ts",
   "2": "package.json",
   "3": "App.tsx",
   "4": "walletActivityUtils.ts",
   "5": "types/index.ts",
+  "6": "AuthSessionService",
   "7": "api/index.ts",
   "8": "steps",
+  "9": "NotificationSoundService",
   "10": "supabaseClient.ts",
   "12": "compilerOptions",
   "15": "useVerificationResolution.ts",
@@ -14,5 +16,5 @@
   "17": "WebPushClient",
   "21": "vercel.json",
   "22": "sw.js",
-  "26": "dataService.ts"
+  "26": "UserProfile"
 }
