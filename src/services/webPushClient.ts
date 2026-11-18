@@ -2,6 +2,10 @@
 import { UserProfile } from '../types';
 import { notificationSoundService } from './notificationSoundService';
 import { DEFAULT_NOTIFICATION_ICON_URL, NOTIFICATION_BADGE_URL } from '../utils/pwaAssets';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { authSessionService } from './authSessionService';
+
+const LAST_ENDPOINT_STORAGE_KEY = 'swiftsweeps_push_endpoint';
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -29,6 +33,51 @@ export type DevicePlatform = 'android' | 'ios' | 'desktop';
 class WebPushClient {
   private swRegistration: ServiceWorkerRegistration | null = null;
   private isSubscribing = false;
+  private lastSyncedBindingKey: string | null = null;
+
+  public getCachedEndpoint(): string | null {
+    if (typeof window === 'undefined') return null;
+    try {
+      const val = localStorage.getItem(LAST_ENDPOINT_STORAGE_KEY);
+      return val && val.startsWith('https://') ? val : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private setCachedEndpoint(endpoint: string | null): void {
+    if (typeof window === 'undefined') return;
+    try {
+      if (endpoint && endpoint.startsWith('https://')) {
+        localStorage.setItem(LAST_ENDPOINT_STORAGE_KEY, endpoint);
+      } else {
+        localStorage.removeItem(LAST_ENDPOINT_STORAGE_KEY);
+      }
+    } catch {}
+  }
+
+  private async buildPushAuthHeaders(
+    explicitUser?: Pick<UserProfile, 'id' | 'role'> | null
+  ): Promise<Record<string, string>> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const session = authSessionService.getActiveSession();
+    const uid = explicitUser?.id || session?.userId;
+    const role = explicitUser?.role || session?.role;
+    if (uid) headers['x-user-id'] = uid;
+    if (role) headers['x-user-role'] = role;
+
+    if (supabase && isSupabaseConfigured()) {
+      try {
+        const { data } = await supabase.auth.getSession();
+        const token = data?.session?.access_token;
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+          headers['x-supabase-token'] = token;
+        }
+      } catch {}
+    }
+    return headers;
+  }
 
   public getDevicePlatform(): DevicePlatform {
     if (typeof window === 'undefined') return 'desktop';
@@ -258,13 +307,13 @@ class WebPushClient {
 
       // 5. Explicitly format subscription with base64 keys
       const normalizedSubscription = this.formatSubscriptionPayload(subscription);
+      this.setCachedEndpoint(normalizedSubscription.endpoint);
 
-      // 6. Send subscription to backend API to store in Supabase
+      // 6. Send subscription to backend API with verified auth headers
+      const authHeaders = await this.buildPushAuthHeaders(currentUser);
       const subResponse = await fetch('/api/push/subscribe', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: authHeaders,
         body: JSON.stringify({
           subscription: normalizedSubscription,
           userId: currentUser.id,
@@ -275,6 +324,9 @@ class WebPushClient {
         }),
       });
 
+      if (subResponse.ok) {
+        this.lastSyncedBindingKey = `${currentUser.id}:${currentUser.role}:${normalizedSubscription.endpoint}`;
+      }
       this.isSubscribing = false;
       return { success: subResponse.ok };
     } catch (err: any) {
@@ -284,34 +336,109 @@ class WebPushClient {
     }
   }
 
-  // Auto-sync existing subscription to server when permission is granted
+  // Auto-sync (or silently re-subscribe if granted after prior logout) and strictly rebind to currentUser
   public async autoSyncIfGranted(currentUser: UserProfile): Promise<boolean> {
-    if (typeof window === 'undefined' || !this.isPushSupported()) return false;
+    if (typeof window === 'undefined' || !currentUser?.id || !this.isPushSupported()) return false;
     if (Notification.permission !== 'granted') return false;
+    if (this.isIOS() && !this.isStandalone()) return false;
 
     try {
       const reg = await this.getRegistration();
       if (!reg) return false;
-      const sub = await reg.pushManager.getSubscription();
-      if (sub) {
-        const normalized = this.formatSubscriptionPayload(sub);
-        const res = await fetch('/api/push/subscribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            subscription: normalized,
-            userId: currentUser.id,
-            userRole: currentUser.role,
-            userEmail: currentUser.email,
-            platform: this.getDevicePlatform(),
-            browser: this.getBrowserName(),
-          }),
-        });
-        return res.ok;
+      let sub = await reg.pushManager.getSubscription();
+
+      // If browser permission is already granted but subscription was cleared on previous logout,
+      // silently establish a fresh PushSubscription for the newly logged-in user.
+      if (!sub) {
+        try {
+          const vapidRes = await fetch('/api/push/vapid-public-key');
+          if (vapidRes.ok) {
+            const { publicKey } = await vapidRes.json();
+            if (publicKey) {
+              sub = await reg.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(publicKey) as any,
+              });
+            }
+          }
+        } catch {
+          return false;
+        }
       }
-      return false;
+
+      if (!sub) return false;
+      const normalized = this.formatSubscriptionPayload(sub);
+      this.setCachedEndpoint(normalized.endpoint);
+
+      const bindingKey = `${currentUser.id}:${currentUser.role}:${normalized.endpoint}`;
+      if (this.lastSyncedBindingKey === bindingKey) {
+        return true;
+      }
+
+      const authHeaders = await this.buildPushAuthHeaders(currentUser);
+      const res = await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          subscription: normalized,
+          userId: currentUser.id,
+          userRole: currentUser.role,
+          userEmail: currentUser.email,
+          platform: this.getDevicePlatform(),
+          browser: this.getBrowserName(),
+        }),
+      });
+      if (res.ok) {
+        this.lastSyncedBindingKey = bindingKey;
+      }
+      return res.ok;
     } catch {
       return false;
+    }
+  }
+
+  // Immediately revoke server binding & close local browser PushSubscription on logout
+  public async unsubscribeFromPushNotifications(prevUser?: UserProfile | null): Promise<void> {
+    if (typeof window === 'undefined') return;
+    this.lastSyncedBindingKey = null;
+    const cachedEndpoint = this.getCachedEndpoint();
+    this.setCachedEndpoint(null);
+
+    const authHeaders = await this.buildPushAuthHeaders(prevUser);
+
+    let liveEndpoint = cachedEndpoint;
+    let activeSub: PushSubscription | null = null;
+    if (this.isPushSupported()) {
+      try {
+        const reg = this.swRegistration || (await navigator.serviceWorker.getRegistration());
+        if (reg?.pushManager) {
+          activeSub = await reg.pushManager.getSubscription();
+          if (activeSub?.endpoint) {
+            liveEndpoint = activeSub.endpoint;
+          }
+        }
+      } catch {}
+    }
+
+    if (liveEndpoint || prevUser?.id) {
+      try {
+        await fetch('/api/push/unsubscribe', {
+          method: 'POST',
+          keepalive: true,
+          headers: authHeaders,
+          body: JSON.stringify({
+            endpoint: liveEndpoint || undefined,
+            userId: prevUser?.id,
+            revokeAllForUser: !liveEndpoint,
+          }),
+        });
+      } catch {}
+    }
+
+    if (activeSub) {
+      try {
+        await activeSub.unsubscribe();
+      } catch {}
     }
   }
 
@@ -319,6 +446,7 @@ class WebPushClient {
   public async dispatchPushAlert(params: {
     recipientId: string;
     recipientRole?: string;
+    senderId?: string;
     title: string;
     body: string;
     url?: string;
@@ -327,12 +455,18 @@ class WebPushClient {
     actionType?: 'chat' | 'payout' | 'deposit' | 'game';
   }): Promise<void> {
     try {
+      const session = authSessionService.getActiveSession();
+      const effectiveSenderId = params.senderId || session?.userId;
+      if (!effectiveSenderId) return;
+
+      const authHeaders = await this.buildPushAuthHeaders();
       await fetch('/api/push/notify', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           recipientId: params.recipientId,
           recipientRole: params.recipientRole,
+          senderId: effectiveSenderId,
           title: params.title,
           body: params.body.slice(0, 160),
           url: params.url || '/#chat',
@@ -350,16 +484,19 @@ class WebPushClient {
   public async notifyRecipientViaPush(params: {
     recipientId: string;
     recipientRole?: string;
+    senderId?: string;
     senderName: string;
     messageText: string;
     conversationId: string;
   }): Promise<void> {
+    const isToStaff = params.recipientRole === 'agent' || params.recipientRole === 'admin' || params.recipientId === 'staff';
     return this.dispatchPushAlert({
       recipientId: params.recipientId,
       recipientRole: params.recipientRole,
+      senderId: params.senderId,
       title: `Swift Sweeps: ${params.senderName}`,
       body: params.messageText,
-      url: `/#chat`,
+      url: isToStaff ? '/#ops_chat' : '/#chat',
       tag: `chat_${params.conversationId}`,
       conversationId: params.conversationId,
       actionType: 'chat',
@@ -379,17 +516,18 @@ class WebPushClient {
         };
       }
 
+      const authHeaders = await this.buildPushAuthHeaders(currentUser);
+
       // Pre-flight self-healing: re-sync local PushSubscription to backend before dispatching
-      let hasActiveSub = false;
       if (reg) {
         try {
           const localSub = await reg.pushManager.getSubscription();
           if (localSub) {
-            hasActiveSub = true;
             const normalized = this.formatSubscriptionPayload(localSub);
+            this.setCachedEndpoint(normalized.endpoint);
             await fetch('/api/push/subscribe', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: authHeaders,
               body: JSON.stringify({
                 subscription: normalized,
                 userId: currentUser.id,
@@ -406,13 +544,14 @@ class WebPushClient {
       // Dispatch backend push
       const res = await fetch('/api/push/notify', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           recipientId: currentUser.id,
           recipientRole: currentUser.role,
+          senderId: currentUser.id,
           title: 'Swift Sweeps Support',
           body: 'Test alert: Background notification received with sound & vibration!',
-          url: '/#chat',
+          url: currentUser.role === 'customer' ? '/#chat' : '/#ops_chat',
           tag: `test_${Date.now()}`,
         }),
       });

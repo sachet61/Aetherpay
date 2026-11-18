@@ -6,6 +6,11 @@ import handler, {
   handleUpdateConversationStatus,
   handleStorageUpload,
   handleStorageFileProxy,
+  handlePushSubscribe,
+  handlePushUnsubscribe,
+  handlePushStatus,
+  handlePushNotify,
+  sendVercelPushNotification,
 } from './index';
 
 function createMockRes() {
@@ -47,6 +52,7 @@ function createFakeAdminClient(options?: {
   initialUsers?: any[];
   initialConversations?: any[];
   initialMessages?: any[];
+  initialAppConfig?: any[];
   failConvUpsert?: boolean;
   simulateMissingAttachmentColumns?: boolean;
 }) {
@@ -54,6 +60,7 @@ function createFakeAdminClient(options?: {
     users: [...(options?.initialUsers || [])],
     conversations: [...(options?.initialConversations || [])],
     messages: [...(options?.initialMessages || [])],
+    app_config: [...(options?.initialAppConfig || [])],
   };
 
   const opLog: string[] = [];
@@ -671,4 +678,234 @@ test('handleUpdateConversationStatus enforces staff authorization and persists v
   assert.equal(okRes.state.body.conversation.status, 'pending');
   assert.equal(fake.tables.conversations[0].status, 'pending');
 });
+
+test('Push targeting NEVER broadcasts customer notifications across other customer devices', async () => {
+  const endpointCustA = 'https://fcm.googleapis.com/fcm/send/cust-a-device';
+  const endpointCustB = 'https://fcm.googleapis.com/fcm/send/cust-b-device';
+  const endpointStaff = 'https://fcm.googleapis.com/fcm/send/staff-device';
+
+  const fake = createFakeAdminClient({
+    initialUsers: [
+      { id: 'u1', email: 'a@test.com', role: 'customer', display_name: 'Customer A' },
+      { id: 'u2', email: 'b@test.com', role: 'customer', display_name: 'Customer B' },
+      { id: 'a1', email: 'agent@test.com', role: 'agent', display_name: 'Support Agent' },
+    ],
+  });
+
+  // Subscribe Customer A, Customer B, and Agent
+  for (const [uid, ep, roleAttempt] of [
+    ['u1', endpointCustA, 'admin'], // even if customer tries spoofing 'admin', DB role must win
+    ['u2', endpointCustB, 'customer'],
+    ['a1', endpointStaff, 'agent'],
+  ] as const) {
+    const subRes = createMockRes();
+    await handlePushSubscribe(
+      fake.client,
+      {
+        userId: uid,
+        userRole: roleAttempt,
+        subscription: { endpoint: ep, keys: { p256dh: 'key_p256', auth: 'key_auth' } },
+      },
+      subRes.res,
+      { headers: { 'x-user-id': uid } }
+    );
+    assert.equal(subRes.state.statusCode, 200);
+    assert.equal(subRes.state.body.success, true);
+  }
+
+  // Verify spoofed role for u1 was overwritten by authoritative DB role 'customer'
+  const subsRow = fake.tables.app_config.find((r) => r.id === 'push_subscriptions');
+  assert.equal(subsRow.data.find((s: any) => s.userId === 'u1')?.userRole, 'customer');
+
+  const deliveredTo: Array<{ endpoint: string; body: any }> = [];
+  const mockWebPush = {
+    async sendNotification(sub: any, payloadStr: string) {
+      deliveredTo.push({ endpoint: sub.endpoint, body: JSON.parse(payloadStr) });
+    },
+  };
+
+  // Staff notifies Customer A (even with recipientRole: 'customer'): ONLY Customer A's endpoint is reached!
+  const notifyCustA = createMockRes();
+  await handlePushNotify(
+    fake.client,
+    {
+      recipientId: 'u1',
+      recipientRole: 'customer',
+      senderId: 'a1',
+      title: 'Private Support Reply',
+      body: 'Hello Customer A only',
+      conversationId: 'conv_u1',
+    },
+    notifyCustA.res,
+    { headers: { 'x-user-id': 'a1' } },
+    mockWebPush
+  );
+  assert.equal(notifyCustA.state.statusCode, 200);
+  assert.equal(notifyCustA.state.body.sent, 1);
+  assert.deepEqual(
+    deliveredTo.map((d) => d.endpoint),
+    [endpointCustA]
+  );
+
+  // Customer A cannot send a push notification targeting Customer B
+  const maliciousPush = createMockRes();
+  await handlePushNotify(
+    fake.client,
+    {
+      recipientId: 'u2',
+      recipientRole: 'customer',
+      senderId: 'u1',
+      title: 'Spoofed',
+      body: 'Leak attempt',
+    },
+    maliciousPush.res,
+    { headers: { 'x-user-id': 'u1' } },
+    mockWebPush
+  );
+  assert.equal(maliciousPush.state.statusCode, 403);
+
+  // Customer A notifies staff: ONLY active staff endpoint receives notification
+  deliveredTo.length = 0;
+  const notifyStaff = createMockRes();
+  await handlePushNotify(
+    fake.client,
+    {
+      recipientId: 'staff',
+      recipientRole: 'agent',
+      senderId: 'u1',
+      title: 'New Player Message',
+      body: 'Need help',
+      conversationId: 'conv_u1',
+    },
+    notifyStaff.res,
+    { headers: { 'x-user-id': 'u1' } },
+    mockWebPush
+  );
+  assert.equal(notifyStaff.state.statusCode, 200);
+  assert.deepEqual(
+    deliveredTo.map((d) => d.endpoint),
+    [endpointStaff]
+  );
+});
+
+test('Push subscription rebinds 1:1 on account switch and stops immediately on logout/unsubscribe', async () => {
+  const sharedDeviceEndpoint = 'https://fcm.googleapis.com/fcm/send/shared-phone';
+  const agentPhoneEndpoint = 'https://fcm.googleapis.com/fcm/send/agent-phone';
+
+  const fake = createFakeAdminClient({
+    initialUsers: [
+      { id: 'u1', email: 'a@test.com', role: 'customer', display_name: 'Customer A' },
+      { id: 'a1', email: 'agent@test.com', role: 'agent', display_name: 'Agent 1' },
+    ],
+  });
+
+  // 1. Agent logs in on Desktop (sharedDeviceEndpoint) and Phone (agentPhoneEndpoint)
+  for (const ep of [sharedDeviceEndpoint, agentPhoneEndpoint]) {
+    const res = createMockRes();
+    await handlePushSubscribe(
+      fake.client,
+      { userId: 'a1', subscription: { endpoint: ep, keys: { p256dh: 'p', auth: 'a' } } },
+      res.res,
+      { headers: { 'x-user-id': 'a1' } }
+    );
+    assert.equal(res.state.statusCode, 200);
+  }
+
+  // 2. Customer u1 logs into that SAME desktop browser (sharedDeviceEndpoint) -> must evict a1 from sharedDeviceEndpoint
+  const rebindRes = createMockRes();
+  await handlePushSubscribe(
+    fake.client,
+    { userId: 'u1', subscription: { endpoint: sharedDeviceEndpoint, keys: { p256dh: 'p', auth: 'a' } } },
+    rebindRes.res,
+    { headers: { 'x-user-id': 'u1' } }
+  );
+  assert.equal(rebindRes.state.statusCode, 200);
+
+  const delivered: string[] = [];
+  const mockWp = {
+    async sendNotification(sub: any) {
+      delivered.push(sub.endpoint);
+    },
+  };
+
+  // Staff alert MUST NOT hit sharedDeviceEndpoint anymore (only agentPhoneEndpoint!)
+  await sendVercelPushNotification('staff', 'agent', { title: 'Hi', body: 'Msg', senderId: 'u1' }, fake.client, mockWp);
+  assert.deepEqual(delivered, [agentPhoneEndpoint]);
+
+  // 3. Customer logs out on sharedDeviceEndpoint -> endpoint removed immediately; customer alert hits 0 devices!
+  const unsubRes = createMockRes();
+  await handlePushUnsubscribe(
+    fake.client,
+    { endpoint: sharedDeviceEndpoint, userId: 'u1' },
+    unsubRes.res,
+    { headers: { 'x-user-id': 'u1' } }
+  );
+  assert.equal(unsubRes.state.statusCode, 200);
+  assert.equal(unsubRes.state.body.removedCount, 1);
+
+  delivered.length = 0;
+  await sendVercelPushNotification('u1', 'customer', { title: 'Hi', body: 'After logout' }, fake.client, mockWp);
+  assert.deepEqual(delivered, []);
+
+  // Agent's separate phone endpoint remains intact after desktop logout, then also stops if revoked
+  const agentStatus = createMockRes();
+  await handlePushStatus(
+    fake.client,
+    new URL(`https://localhost/api/push/status?userId=a1&endpoint=${encodeURIComponent(agentPhoneEndpoint)}`),
+    agentStatus.res,
+    { headers: { 'x-user-id': 'a1' } }
+  );
+  assert.equal(agentStatus.state.body.boundToCurrentUser, true);
+});
+
+test('sendVercelPushNotification prunes 410 Gone endpoints automatically', async () => {
+  const goneEndpoint = 'https://fcm.googleapis.com/fcm/send/expired-endpoint';
+  const liveEndpoint = 'https://fcm.googleapis.com/fcm/send/live-endpoint';
+
+  const fake = createFakeAdminClient({
+    initialAppConfig: [
+      {
+        id: 'push_subscriptions',
+        data: [
+          {
+            id: 'push_1',
+            userId: 'u1',
+            userRole: 'customer',
+            active: true,
+            subscription: { endpoint: goneEndpoint, keys: { p256dh: 'p', auth: 'a' } },
+          },
+          {
+            id: 'push_2',
+            userId: 'u1',
+            userRole: 'customer',
+            active: true,
+            subscription: { endpoint: liveEndpoint, keys: { p256dh: 'p', auth: 'a' } },
+          },
+        ],
+      },
+    ],
+  });
+
+  const mockWp = {
+    async sendNotification(sub: any) {
+      if (sub.endpoint === goneEndpoint) {
+        const err: any = new Error('Gone');
+        err.statusCode = 410;
+        throw err;
+      }
+    },
+  };
+
+  const result = await sendVercelPushNotification('u1', 'customer', { title: 'Hi', body: 'Test' }, fake.client, mockWp);
+  assert.equal(result.sent, 1);
+  assert.equal(result.failed, 1);
+  assert.equal(result.pruned, 1);
+
+  const row = fake.tables.app_config.find((r) => r.id === 'push_subscriptions');
+  assert.deepEqual(
+    row.data.map((s: any) => s.subscription.endpoint),
+    [liveEndpoint]
+  );
+});
+
 

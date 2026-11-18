@@ -6,6 +6,7 @@ import { isSupabaseConfigured } from '../../services/supabaseClient';
 import { realtimeChatHub } from '../../services/chatRealtime';
 import { mapDbMessageRowToChatMessage } from '../../services/chatOrderUtils';
 import { isMessageInternalNote } from '../../utils/chatPresentationUtils';
+import { shouldAcceptIncomingChatMessage } from '../../services/notificationScoping';
 import { Headphones, MessageSquare, X, ArrowRight, Bell } from 'lucide-react';
 
 interface GlobalChatNotificationManagerProps {
@@ -48,11 +49,16 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
   // Handle new incoming chat message
   const handleIncomingMessage = (msg: ChatMessage) => {
     if (!msg || !msg.id) return;
-    if (msg.senderId === currentUser.id) return;
+    const activeUser = dataService.getCurrentUser();
+    if (!activeUser || activeUser.id !== currentUser?.id) return;
 
-    // Check if relevant for this user
-    if (isCustomer && (msg.senderRole === 'customer' || msg.isInternalNote)) return;
-    if (!isCustomer && msg.senderRole !== 'customer') return;
+    const normalizedMsg: ChatMessage = {
+      ...msg,
+      isInternalNote: isMessageInternalNote(msg),
+    };
+    if (!shouldAcceptIncomingChatMessage(normalizedMsg, activeUser, { forNotificationAlert: true })) {
+      return;
+    }
 
     // 1. Play real-time synthesized Web Audio API notification chime
     notificationSoundService.playIncomingMessageSound();
@@ -191,6 +197,7 @@ export const GlobalChatNotificationManager: React.FC<GlobalChatNotificationManag
       window.removeEventListener('aetherpay_state_changed', handleLocalState);
       for (const unsub of unsubs) unsub();
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+      setActiveToast(null);
     };
   }, [currentUser.id, currentUser.role, activeTab]);
 

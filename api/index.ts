@@ -10,6 +10,13 @@ import {
   handlePostReviewReferral,
   type ReferralHandlerDeps,
 } from './referralHandlers';
+import {
+  deactivatePushSubscriptionsInList,
+  isStaffRole,
+  pruneExpiredPushSubscriptions,
+  rebindPushSubscriptionList,
+  selectPushTargets,
+} from './pushUtils';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://fsykihwprqdptrqapxxg.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY =
@@ -160,44 +167,14 @@ async function ensureStorageBuckets(adminClient: any) {
   }
 }
 
-async function saveVercelPushSubscription(
+export async function saveVercelPushSubscription(
   sub: any,
   userId: string,
   userRole: string,
   supabase: any,
-  userEmail?: string
+  userEmail?: string,
+  meta?: { platform?: string; browser?: string }
 ): Promise<boolean> {
-  const endpoint = sub?.endpoint;
-  const p256dh = sub?.keys?.p256dh || sub?.p256dh;
-  const auth = sub?.keys?.auth || sub?.auth;
-  if (!endpoint || !p256dh || !auth) {
-    console.warn('[Vercel WebPush] Incomplete push subscription received:', {
-      hasEndpoint: !!endpoint,
-      hasP256dh: !!p256dh,
-      hasAuth: !!auth,
-    });
-    return false;
-  }
-
-  const normalizedSub = {
-    endpoint,
-    expirationTime: sub.expirationTime || null,
-    keys: {
-      p256dh: String(p256dh).trim(),
-      auth: String(auth).trim(),
-    },
-  };
-
-  const now = new Date().toISOString();
-  const record = {
-    id: `push_${userId}_${endpoint.slice(-32)}`,
-    userId,
-    userEmail: userEmail || undefined,
-    userRole: userRole || 'customer',
-    subscription: normalizedSub,
-    createdAt: now,
-    updatedAt: now,
-  };
   try {
     const { data: existing } = await supabase
       .from('app_config')
@@ -205,16 +182,29 @@ async function saveVercelPushSubscription(
       .eq('id', 'push_subscriptions')
       .maybeSingle();
 
-    const list = Array.isArray(existing?.data)
-      ? existing.data.filter((x: any) => x.subscription?.endpoint !== endpoint)
-      : [];
-    list.push(record);
+    const rebound = rebindPushSubscriptionList(existing?.data, {
+      subscription: sub,
+      userId,
+      userRole,
+      userEmail,
+      platform: meta?.platform,
+      browser: meta?.browser,
+    });
+    if (!rebound) {
+      console.warn('[Vercel WebPush] Invalid or anonymous push subscription rejected');
+      return false;
+    }
 
-    await supabase.from('app_config').upsert({
+    const now = new Date().toISOString();
+    const { error } = await supabase.from('app_config').upsert({
       id: 'push_subscriptions',
-      data: list.slice(-100),
+      data: rebound.list,
       updated_at: now,
     });
+    if (error) {
+      console.warn('[Vercel Push Save Warning]:', error.message);
+      return false;
+    }
     return true;
   } catch (e) {
     console.warn('[Vercel Push Save Notice]:', e);
@@ -222,14 +212,56 @@ async function saveVercelPushSubscription(
   }
 }
 
-async function sendVercelPushNotification(
+export async function deactivateVercelPushSubscription(
+  supabase: any,
+  params: { endpoint?: string; userId?: string; revokeAllForUser?: boolean }
+): Promise<{ success: boolean; removedCount: number }> {
+  try {
+    const endpoint = typeof params.endpoint === 'string' ? params.endpoint.trim() : '';
+    const userId = typeof params.userId === 'string' ? params.userId.trim() : '';
+    if (!endpoint && !(params.revokeAllForUser && userId)) {
+      return { success: true, removedCount: 0 };
+    }
+
+    const { data: existing } = await supabase
+      .from('app_config')
+      .select('data')
+      .eq('id', 'push_subscriptions')
+      .maybeSingle();
+
+    const { list, removedCount } = deactivatePushSubscriptionsInList(existing?.data, {
+      endpoint,
+      userId,
+      revokeAllForUser: params.revokeAllForUser,
+    });
+
+    if (removedCount > 0) {
+      const { error } = await supabase.from('app_config').upsert({
+        id: 'push_subscriptions',
+        data: list,
+        updated_at: new Date().toISOString(),
+      });
+      if (error) {
+        console.warn('[Vercel Push Unsubscribe Warning]:', error.message);
+        return { success: false, removedCount: 0 };
+      }
+    }
+    return { success: true, removedCount };
+  } catch (e) {
+    console.warn('[Vercel Push Unsubscribe Notice]:', e);
+    return { success: false, removedCount: 0 };
+  }
+}
+
+export async function sendVercelPushNotification(
   targetUserId: string,
   targetRole: string | undefined,
   payload: any,
-  supabase: any
-): Promise<{ sent: number; failed: number }> {
+  supabase: any,
+  wpOverride?: any
+): Promise<{ sent: number; failed: number; pruned?: number }> {
   try {
-    const wp = await getWebPushClient();
+    const wp = wpOverride || (await getWebPushClient());
     if (!wp) return { sent: 0, failed: 0 };
 
     const { data: configRow } = await supabase
@@ -239,18 +271,20 @@ async function sendVercelPushNotification(
       .maybeSingle();
 
     const subs: any[] = Array.isArray(configRow?.data) ? configRow.data : [];
-    const isStaff = targetUserId === 'staff' || targetRole === 'agent' || targetRole === 'admin' || targetUserId === 'agent' || targetUserId === 'admin';
-    const targetEmail = payload.targetEmail;
-    const targets = subs.filter((s: any) => {
-      if (!s || !s.subscription?.endpoint) return false;
-      if (isStaff && (s.userRole === 'agent' || s.userRole === 'admin')) return true;
-      if (targetUserId && s.userId === targetUserId) return true;
-      if (targetEmail && s.userEmail && s.userEmail.toLowerCase() === targetEmail.toLowerCase()) return true;
-      if (targetRole && s.userRole === targetRole) return true;
-      return false;
+    const targets = selectPushTargets(subs, {
+      targetUserId,
+      targetRole,
+      targetEmail: payload?.targetEmail,
+      senderId: payload?.senderId,
     });
 
-    if (targets.length === 0) return { sent: 0, failed: 0 };
+    if (targets.length === 0) return { sent: 0, failed: 0, pruned: 0 };
+
+    const isStaffTarget =
+      targetUserId === 'staff' ||
+      targetRole === 'agent' ||
+      targetRole === 'admin' ||
+      targetRole === 'staff';
 
     const pushPayload = JSON.stringify({
       title: payload.title || 'Swift Sweeps Support',
@@ -258,11 +292,18 @@ async function sendVercelPushNotification(
       icon: payload.icon || '/pwa-192x192-v2.png',
       badge: payload.badge || '/notification-badge-v2.png',
       tag: payload.tag || `chat_${Date.now()}`,
-      data: payload.data || {},
+      data: {
+        ...(payload.data || {}),
+        url: payload.url || (isStaffTarget ? '/#ops_chat' : '/#chat'),
+        targetUserId: isStaffTarget ? 'staff' : targetUserId,
+        targetRole: isStaffTarget ? 'staff' : 'customer',
+      },
     });
 
     let sent = 0;
     let failed = 0;
+    const goneEndpoints = new Set<string>();
+
     await Promise.all(
       targets.map(async (t) => {
         try {
@@ -272,15 +313,259 @@ async function sendVercelPushNotification(
             headers: { Urgency: 'high' },
           });
           sent++;
-        } catch {
+        } catch (err: any) {
           failed++;
+          const status = Number(err?.statusCode || err?.status || 0);
+          if (status === 404 || status === 410) {
+            goneEndpoints.add(t.subscription.endpoint);
+          }
         }
       })
     );
-    return { sent, failed };
+
+    let prunedCount = 0;
+    if (goneEndpoints.size > 0) {
+      const pruned = pruneExpiredPushSubscriptions(subs, goneEndpoints);
+      prunedCount = pruned.prunedCount;
+      if (prunedCount > 0) {
+        try {
+          await supabase
+            .from('app_config')
+            .upsert({
+              id: 'push_subscriptions',
+              data: pruned.list,
+              updated_at: new Date().toISOString(),
+            });
+        } catch {}
+      }
+    }
+
+    return { sent, failed, pruned: prunedCount };
   } catch (e) {
     console.warn('[Vercel Push Send Notice]:', e);
     return { sent: 0, failed: 0 };
+  }
+}
+
+export async function handlePushSubscribe(
+  adminClient: any,
+  body: any,
+  res: any,
+  req?: { headers?: Record<string, any> }
+) {
+  try {
+    const { subscription, userId, platform, browser } = body || {};
+    if (!subscription || !subscription.endpoint) {
+      return res.status(400).json({ error: 'Subscription data required' });
+    }
+
+    const caller = await resolveVerifiedCallerProfile(adminClient, {
+      headers: req?.headers,
+      viewerUserId: userId ? String(userId).trim() : undefined,
+    });
+
+    if (caller.jwtRejected || caller.role === 'anonymous' || !caller.id) {
+      return res.status(401).json({ error: 'Authentication required to bind push notifications.' });
+    }
+
+    const requestedUserId = userId ? String(userId).trim() : '';
+    if (requestedUserId && requestedUserId !== caller.id) {
+      return res.status(403).json({ error: 'Forbidden: cannot bind push subscription for another user.' });
+    }
+
+    const success = await saveVercelPushSubscription(
+      subscription,
+      caller.id,
+      caller.role,
+      adminClient,
+      caller.email,
+      { platform, browser }
+    );
+    return res.status(200).json({ success, boundUserId: caller.id, boundRole: caller.role });
+  } catch (e: any) {
+    return res.status(500).json({ error: e?.message || 'Failed to save subscription' });
+  }
+}
+
+export async function handlePushUnsubscribe(
+  adminClient: any,
+  body: any,
+  res: any,
+  req?: { headers?: Record<string, any> }
+) {
+  try {
+    const endpoint = typeof body?.endpoint === 'string' ? body.endpoint.trim() : '';
+    const revokeAllForUser = Boolean(body?.revokeAllForUser);
+    const requestedUserId = typeof body?.userId === 'string' ? body.userId.trim() : '';
+
+    const caller = await resolveVerifiedCallerProfile(adminClient, {
+      headers: req?.headers,
+      viewerUserId: requestedUserId || undefined,
+    });
+
+    if (endpoint && !endpoint.startsWith('https://')) {
+      return res.status(400).json({ error: 'Invalid push endpoint.' });
+    }
+
+    if (!endpoint) {
+      if (caller.jwtRejected || caller.role === 'anonymous' || !caller.id) {
+        return res.status(401).json({ error: 'Authentication or endpoint required to unsubscribe.' });
+      }
+      if (requestedUserId && requestedUserId !== caller.id) {
+        return res.status(403).json({ error: 'Forbidden: cannot revoke subscriptions for another user.' });
+      }
+      const result = await deactivateVercelPushSubscription(adminClient, {
+        userId: caller.id,
+        revokeAllForUser: true,
+      });
+      return res.status(200).json(result);
+    }
+
+    const result = await deactivateVercelPushSubscription(adminClient, {
+      endpoint,
+      userId: caller.id || undefined,
+      revokeAllForUser: revokeAllForUser && Boolean(caller.id),
+    });
+    return res.status(200).json(result);
+  } catch (e: any) {
+    return res.status(500).json({ error: e?.message || 'Failed to unsubscribe device' });
+  }
+}
+
+export async function handlePushStatus(
+  adminClient: any,
+  parsedUrl: URL,
+  res: any,
+  req?: { headers?: Record<string, any> }
+) {
+  try {
+    const queryUserId = parsedUrl.searchParams.get('userId') || undefined;
+    const endpoint = parsedUrl.searchParams.get('endpoint') || undefined;
+    const caller = await resolveVerifiedCallerProfile(adminClient, {
+      headers: req?.headers,
+      viewerUserId: queryUserId,
+    });
+
+    if (caller.jwtRejected || caller.role === 'anonymous' || !caller.id) {
+      return res.status(200).json({ linked: false, count: 0, boundToCurrentUser: false });
+    }
+
+    const { data: configRow } = await adminClient
+      .from('app_config')
+      .select('data')
+      .eq('id', 'push_subscriptions')
+      .maybeSingle();
+
+    const subs: any[] = Array.isArray(configRow?.data) ? configRow.data : [];
+    const targets = selectPushTargets(subs, {
+      targetUserId: caller.id,
+    });
+    const boundToCurrentUser = endpoint
+      ? subs.some((s: any) => s?.active !== false && s?.userId === caller.id && s?.subscription?.endpoint === endpoint)
+      : targets.length > 0;
+
+    return res.status(200).json({
+      linked: targets.length > 0,
+      count: targets.length,
+      boundToCurrentUser,
+    });
+  } catch {
+    return res.status(200).json({ linked: false, count: 0, boundToCurrentUser: false });
+  }
+}
+
+export async function handlePushNotify(
+  adminClient: any,
+  body: any,
+  res: any,
+  req?: { headers?: Record<string, any> },
+  wpOverride?: any
+) {
+  try {
+    const {
+      recipientId,
+      recipientRole,
+      userEmail,
+      title,
+      body: msgBody,
+      url: targetUrl,
+      tag,
+      conversationId,
+      isInternalNote,
+      senderId,
+    } = body || {};
+
+    if (isInternalNote) {
+      return res.status(200).json({ success: true, skipped: true, sent: 0, failed: 0 });
+    }
+
+    const caller = await resolveVerifiedCallerProfile(adminClient, {
+      headers: req?.headers,
+      viewerUserId: senderId ? String(senderId).trim() : undefined,
+    });
+
+    if (caller.jwtRejected || caller.role === 'anonymous' || !caller.id) {
+      return res.status(401).json({ error: 'Authentication required to send push notifications.' });
+    }
+
+    const requestedTargetId = String(recipientId || '').trim();
+    const requestedRole = String(recipientRole || '').trim().toLowerCase();
+    const wantsStaff =
+      requestedTargetId === 'staff' ||
+      requestedRole === 'agent' ||
+      requestedRole === 'admin' ||
+      requestedRole === 'staff';
+
+    let authoritativeTargetId = requestedTargetId;
+    let authoritativeTargetRole: string | undefined;
+
+    if (caller.role === 'customer') {
+      // Customers may notify active staff OR trigger a self-test alert to their own userId only.
+      if (wantsStaff) {
+        authoritativeTargetId = 'staff';
+        authoritativeTargetRole = 'staff';
+      } else if (requestedTargetId === caller.id) {
+        authoritativeTargetId = caller.id;
+        authoritativeTargetRole = undefined;
+      } else {
+        return res.status(403).json({
+          error: 'Forbidden: customers cannot send push notifications to other customers.',
+        });
+      }
+    } else if (isStaffRole(caller.role)) {
+      if (wantsStaff) {
+        authoritativeTargetId = requestedTargetId || 'staff';
+        authoritativeTargetRole = 'staff';
+      } else {
+        if (!requestedTargetId || requestedTargetId === 'customer' || requestedTargetId === 'anonymous') {
+          return res.status(400).json({ error: 'Explicit recipientId is required to notify a customer.' });
+        }
+        authoritativeTargetId = requestedTargetId;
+        authoritativeTargetRole = undefined;
+      }
+    } else {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const isSelfTest = authoritativeTargetId === caller.id;
+    const result = await sendVercelPushNotification(
+      authoritativeTargetId,
+      authoritativeTargetRole,
+      {
+        title: title || 'New Message',
+        body: msgBody || 'You have received a new message.',
+        url: targetUrl || (authoritativeTargetRole === 'staff' ? '/#ops_chat' : '/#chat'),
+        tag: tag || `chat_${conversationId || Date.now()}`,
+        data: { conversationId },
+        targetEmail: !authoritativeTargetId ? userEmail : undefined,
+        senderId: isSelfTest ? undefined : caller.id,
+      },
+      adminClient,
+      wpOverride
+    );
+    return res.status(200).json({ success: true, ...result });
+  } catch (e: any) {
+    return res.status(500).json({ error: e?.message || 'Failed to dispatch push' });
   }
 }
 
@@ -1945,6 +2230,13 @@ export default async function handler(req: any, res: any) {
       headers: req?.headers,
       viewerUserId: body?.userId ? String(body.userId).trim() : undefined,
     });
+    const endpoint = typeof body?.endpoint === 'string' ? body.endpoint.trim() : '';
+    if (endpoint && endpoint.startsWith('https://')) {
+      await deactivateVercelPushSubscription(supabaseAdmin, {
+        endpoint,
+        userId: caller.id || undefined,
+      });
+    }
     if (caller.role !== 'anonymous' && caller.id) {
       await writeServerAuditLog(supabaseAdmin, {
         actorId: caller.id,
@@ -2088,80 +2380,19 @@ export default async function handler(req: any, res: any) {
   }
 
   if (url.includes('/api/push/subscribe') && req.method === 'POST') {
-    try {
-      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      const { subscription, userId, userRole, userEmail } = body || {};
-      if (!subscription || !subscription.endpoint) {
-        return res.status(400).json({ error: 'Subscription data required' });
-      }
-      const success = await saveVercelPushSubscription(
-        subscription,
-        userId || 'anonymous',
-        userRole || 'customer',
-        supabaseAdmin,
-        userEmail
-      );
-      return res.status(200).json({ success });
-    } catch (e: any) {
-      return res.status(500).json({ error: e?.message || 'Failed to save subscription' });
-    }
+    return handlePushSubscribe(supabaseAdmin, getBody(req), res, req);
+  }
+
+  if (url.includes('/api/push/unsubscribe') && req.method === 'POST') {
+    return handlePushUnsubscribe(supabaseAdmin, getBody(req), res, req);
   }
 
   if (url.includes('/api/push/status') && req.method === 'GET') {
-    try {
-      const userId = parsedUrl.searchParams.get('userId');
-      const email = parsedUrl.searchParams.get('email');
-      const role = parsedUrl.searchParams.get('role');
-
-      const { data: configRow } = await supabaseAdmin
-        .from('app_config')
-        .select('data')
-        .eq('id', 'push_subscriptions')
-        .maybeSingle();
-
-      const subs: any[] = Array.isArray(configRow?.data) ? configRow.data : [];
-      const isStaff = userId === 'staff' || role === 'agent' || role === 'admin' || userId === 'agent' || userId === 'admin';
-      const targets = subs.filter((s: any) => {
-        if (!s || !s.subscription?.endpoint) return false;
-        if (isStaff && (s.userRole === 'agent' || s.userRole === 'admin')) return true;
-        if (userId && s.userId === userId) return true;
-        if (email && s.userEmail && s.userEmail.toLowerCase() === email.toLowerCase()) return true;
-        return false;
-      });
-
-      return res.status(200).json({
-        linked: targets.length > 0,
-        count: targets.length,
-      });
-    } catch (e: any) {
-      return res.status(200).json({ linked: false, count: 0 });
-    }
+    return handlePushStatus(supabaseAdmin, parsedUrl, res, req);
   }
 
   if (url.includes('/api/push/notify') && req.method === 'POST') {
-    try {
-      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      const { recipientId, recipientRole, userEmail, title, body: msgBody, url: targetUrl, tag, conversationId, isInternalNote } = body || {};
-      if (isInternalNote) {
-        return res.status(200).json({ success: true, skipped: true, sent: 0, failed: 0 });
-      }
-      const result = await sendVercelPushNotification(
-        recipientId,
-        recipientRole,
-        {
-          title: title || 'New Message',
-          body: msgBody || 'You have received a new message.',
-          url: targetUrl || '/#chat',
-          tag: tag || `chat_${conversationId || Date.now()}`,
-          data: { conversationId },
-          targetEmail: userEmail,
-        },
-        supabaseAdmin
-      );
-      return res.status(200).json({ success: true, ...result });
-    } catch (e: any) {
-      return res.status(500).json({ error: e?.message || 'Failed to dispatch push' });
-    }
+    return handlePushNotify(supabaseAdmin, getBody(req), res, req);
   }
 
   // 6. Game Accounts Retrieval & Direct Provisioning for Live Supabase

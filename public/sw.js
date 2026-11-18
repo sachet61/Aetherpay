@@ -92,7 +92,8 @@ self.addEventListener('push', (event) => {
   }
 
   const title = data.title || 'Swift Sweeps Support';
-  const targetUrl = data.data?.url || data.url || '/#chat';
+  const defaultTargetUrl = data.data?.targetRole === 'staff' ? '/#ops_chat' : '/#chat';
+  const targetUrl = data.data?.url || data.url || defaultTargetUrl;
 
   const DEFAULT_ICON = '/pwa-192x192-v2.png';
   const DEFAULT_BADGE = '/notification-badge-v2.png';
@@ -113,6 +114,8 @@ self.addEventListener('push', (event) => {
     data: {
       url: targetUrl,
       conversationId: data.data?.conversationId || data.conversationId,
+      targetUserId: data.data?.targetUserId,
+      targetRole: data.data?.targetRole,
       dateOfArrival: Date.now(),
       primaryKey: Date.now(),
     },

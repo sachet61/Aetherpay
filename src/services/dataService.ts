@@ -46,6 +46,10 @@ import { supabaseAuthService } from './supabaseAuthService';
 import { webPushClient } from './webPushClient';
 import { realtimeChatHub } from './chatRealtime';
 import {
+  filterRealtimeRowsForUser,
+  shouldAcceptIncomingChatMessage,
+} from './notificationScoping';
+import {
   normalizeAuditLogRow,
   mergeAuditLogs,
 } from '../utils/auditLogUtils';
@@ -367,12 +371,13 @@ class DataService {
 
   private initPersistence(): void {
     if (isSupabaseConfigured() && supabase) {
-      console.log('[SwiftSweeps] Supabase PostgreSQL mode active. Initializing Realtime stream.');
-      this.initSupabaseRealtimeSync();
       const activeUser = this.getCurrentUser();
       if (activeUser) {
+        console.log('[SwiftSweeps] Supabase PostgreSQL mode active. Initializing Realtime stream.');
+        this.initSupabaseRealtimeSync();
         void this.hydrateForSession(activeUser, { force: true });
       } else {
+        this.clearUserScopedCache();
         void this.initialCompactLoad();
       }
     } else {
@@ -380,8 +385,27 @@ class DataService {
     }
   }
 
+  private teardownRealtimeSync(): void {
+    if (this.mutationDebounceTimer !== null) {
+      window.clearTimeout(this.mutationDebounceTimer);
+      this.mutationDebounceTimer = null;
+    }
+    this.mutationQueue = [];
+    if (this.realtimeChannel && supabase) {
+      try {
+        supabase.removeChannel(this.realtimeChannel);
+      } catch {}
+    }
+    this.realtimeChannel = null;
+    this.syncStatus = 'disconnected';
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('aetherpay_sync_state_changed', { detail: this.getSyncHealth() }));
+    }
+  }
+
   private initSupabaseRealtimeSync(): void {
     if (!supabase || !isSupabaseConfigured()) return;
+    if (!this.getCurrentUser()) return;
     if (this.realtimeChannel) {
       try {
         supabase.removeChannel(this.realtimeChannel);
@@ -467,26 +491,26 @@ class DataService {
     }
 
     const activeUser = this.getCurrentUser();
-    const scopeCustomerId =
-      activeUser && activeUser.role === 'customer' ? activeUser.id : null;
-    const filterCustomerRows = (rows?: any[]) => {
-      if (!rows || rows.length === 0) return [];
-      if (!scopeCustomerId) return rows;
-      return rows.filter((r) => !r.customer_id || r.customer_id === scopeCustomerId);
-    };
 
-    const topupRows = filterCustomerRows(rowsByTable['topups']);
-    const withdrawalRows = filterCustomerRows(rowsByTable['withdrawals']);
-    const transactionRows = filterCustomerRows(rowsByTable['transactions']);
-    const walletRows = filterCustomerRows(rowsByTable['wallets']);
-    const gameAccountRows = filterCustomerRows(rowsByTable['game_accounts']);
+    const messageRows = filterRealtimeRowsForUser('messages', rowsByTable['messages'], activeUser);
+    const conversationRows = filterRealtimeRowsForUser('conversations', rowsByTable['conversations'], activeUser);
+    const topupRows = filterRealtimeRowsForUser('topups', rowsByTable['topups'], activeUser);
+    const withdrawalRows = filterRealtimeRowsForUser('withdrawals', rowsByTable['withdrawals'], activeUser);
+    const transactionRows = filterRealtimeRowsForUser('transactions', rowsByTable['transactions'], activeUser);
+    const walletRows = filterRealtimeRowsForUser('wallets', rowsByTable['wallets'], activeUser);
+    const gameAccountRows = filterRealtimeRowsForUser('game_accounts', rowsByTable['game_accounts'], activeUser);
+    const userRows = filterRealtimeRowsForUser('users', rowsByTable['users'], activeUser);
+    const cashoutRows = filterRealtimeRowsForUser('faked_cashouts', rowsByTable['faked_cashouts'], activeUser);
+    const appConfigRows = filterRealtimeRowsForUser('app_config', rowsByTable['app_config'], activeUser);
+    const auditLogRows = filterRealtimeRowsForUser('audit_logs', rowsByTable['audit_logs'], activeUser);
+    const referralAwardRows = filterRealtimeRowsForUser('referral_awards', rowsByTable['referral_awards'], activeUser);
 
-    if (rowsByTable['messages']?.length) {
-      this.applyMessageRows(rowsByTable['messages']);
+    if (messageRows.length) {
+      this.applyMessageRows(messageRows);
       tablesModified.add('messages');
     }
-    if (rowsByTable['conversations']?.length) {
-      this.applyConversationRows(rowsByTable['conversations'], false);
+    if (conversationRows.length) {
+      this.applyConversationRows(conversationRows, false);
       tablesModified.add('conversations');
     }
     if (topupRows.length) {
@@ -509,23 +533,23 @@ class DataService {
       this.applyGameAccountRows(gameAccountRows, false);
       tablesModified.add('game_accounts');
     }
-    if (rowsByTable['users']?.length) {
-      this.applyUserRows(rowsByTable['users']);
+    if (userRows.length) {
+      this.applyUserRows(userRows);
       tablesModified.add('users');
     }
-    if (rowsByTable['faked_cashouts']?.length) {
-      this.applyCashoutRows(rowsByTable['faked_cashouts'], false);
+    if (cashoutRows.length) {
+      this.applyCashoutRows(cashoutRows, false);
       tablesModified.add('faked_cashouts');
     }
-    if (rowsByTable['app_config']?.length) {
-      const latest = rowsByTable['app_config'][rowsByTable['app_config'].length - 1];
+    if (appConfigRows.length) {
+      const latest = appConfigRows[appConfigRows.length - 1];
       if (latest?.data) {
         this.applyAppConfig(latest.data);
         tablesModified.add('app_config');
       }
     }
-    if (rowsByTable['audit_logs']?.length && activeUser?.role === 'admin') {
-      const normalizedLogs = rowsByTable['audit_logs']
+    if (auditLogRows.length && activeUser?.role === 'admin') {
+      const normalizedLogs = auditLogRows
         .map((row) => normalizeAuditLogRow(row))
         .filter((item): item is AuditLog => Boolean(item));
       if (normalizedLogs.length > 0) {
@@ -536,7 +560,7 @@ class DataService {
         tablesModified.add('audit_logs');
       }
     }
-    if (rowsByTable['referral_awards']?.length) {
+    if (referralAwardRows.length) {
       tablesModified.add('referral_awards');
     }
 
@@ -2475,6 +2499,7 @@ class DataService {
 
   public logout(): void {
     const prevUser = this.getCurrentUser();
+    const cachedEndpoint = webPushClient.getCachedEndpoint();
     const dispatchServerLogout = async () => {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (prevUser?.id) headers['x-user-id'] = prevUser.id;
@@ -2482,21 +2507,27 @@ class DataService {
         try {
           const { data } = await supabase.auth.getSession();
           if (data?.session?.access_token) {
+            headers['Authorization'] = `Bearer ${data.session.access_token}`;
             headers['x-supabase-token'] = data.session.access_token;
           }
         } catch {}
       }
-      try {
-        await fetch('/api/auth/logout', {
+      await Promise.allSettled([
+        webPushClient.unsubscribeFromPushNotifications(prevUser),
+        fetch('/api/auth/logout', {
           method: 'POST',
           keepalive: true,
           headers,
-          body: JSON.stringify({ userId: prevUser?.id }),
-        });
-      } catch {}
+          body: JSON.stringify({
+            userId: prevUser?.id,
+            endpoint: cachedEndpoint || undefined,
+          }),
+        }),
+      ]);
       supabaseAuthService.logout().catch(() => {});
     };
 
+    this.teardownRealtimeSync();
     this.currentUserId = null;
     this.isHydratingSession = false;
     this.hydrationUserId = null;
@@ -2506,11 +2537,7 @@ class DataService {
     this.lastHydrationError = null;
     this.clearUserScopedCache();
     authSessionService.destroySession();
-    if (prevUser?.id) {
-      void dispatchServerLogout();
-    } else {
-      supabaseAuthService.logout().catch(() => {});
-    }
+    void dispatchServerLogout();
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'auth' } }));
   }
 
@@ -6102,6 +6129,16 @@ class DataService {
     }
     this.currentUserId = target.id;
 
+    // Ensure Realtime stream is active for this authenticated session
+    if (isSupabaseConfigured() && supabase && !this.realtimeChannel) {
+      this.initSupabaseRealtimeSync();
+    }
+
+    // Rebind this device's push subscription strictly to the active logged-in user (all roles)
+    if (typeof window !== 'undefined') {
+      void webPushClient.autoSyncIfGranted(target).catch(() => {});
+    }
+
     // Deduplicate concurrent hydration bursts for the same user session
     if (this.activeHydrationPromise && this.hydrationUserId === target.id) {
       return this.activeHydrationPromise;
@@ -6586,17 +6623,18 @@ class DataService {
       // Instant Web Push Notification
       if (!updated.isInternalNote && typeof window !== 'undefined') {
         try {
-          const recipientRole = updated.senderRole === 'customer' ? 'agent' : 'customer';
-          const recipientId =
-            updated.senderRole === 'customer'
-              ? conv?.assignedAgentId || 'staff'
-              : conv?.customerId || customerId || '';
+          const isFromCustomer = updated.senderRole === 'customer';
+          const recipientRole = isFromCustomer ? 'agent' : 'customer';
+          const recipientId = isFromCustomer
+            ? 'staff'
+            : conv?.customerId || customerId || '';
 
           if (recipientId) {
             webPushClient
               .notifyRecipientViaPush({
                 recipientId,
                 recipientRole,
+                senderId: updated.senderId,
                 senderName: updated.senderName || 'Support',
                 messageText: updated.text || '',
                 conversationId: targetConvId,
@@ -6761,7 +6799,11 @@ class DataService {
   public appendIncomingMessage(msg: ChatMessage): void {
     if (!msg || !msg.conversationId || !msg.id) return;
     const activeUser = this.getCurrentUser();
-    if (activeUser?.role === 'customer' && isMessageInternalNote(msg)) {
+    const normalizedCheckMsg: ChatMessage = {
+      ...msg,
+      isInternalNote: isMessageInternalNote(msg),
+    };
+    if (!shouldAcceptIncomingChatMessage(normalizedCheckMsg, activeUser)) {
       return;
     }
     const targetConvId = this.resolveCanonicalConvId(msg.conversationId);

@@ -28,15 +28,18 @@ export const BackgroundNotificationPrompt: React.FC<BackgroundNotificationPrompt
   useEffect(() => {
     if (typeof window === 'undefined' || !webPushClient.isPushSupported()) return;
 
+    setFeedbackMsg(null);
     setPermission(webPushClient.getPermission());
 
     webPushClient.hasActiveSubscription().then((active) => {
       setIsSubscribed(active);
       if (active || Notification.permission === 'granted') {
-        webPushClient.autoSyncIfGranted(currentUser).catch(() => {});
+        webPushClient.autoSyncIfGranted(currentUser).then((synced) => {
+          if (synced) setIsSubscribed(true);
+        }).catch(() => {});
       }
     });
-  }, [currentUser]);
+  }, [currentUser.id, currentUser.role]);
 
   const handleEnableNotifications = async () => {
     // If iOS Safari running in regular browser (not installed PWA), show install guide
