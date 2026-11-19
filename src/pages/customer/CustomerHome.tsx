@@ -2,12 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ReferralSummary, UserProfile, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
 import {
-  DEFAULT_GAME_ICON,
   HERO_BANNER_IMAGE,
   TOP_PRIORITY_GAME_COUNT,
-  resolveGameImageUrl,
 } from '../../utils/imageUtils';
 import { LiveCashoutFeedList } from '../../components/common/LiveCashoutFeedList';
+import { GamePlatformCard } from '../../components/customer/GamePlatformCard';
+import { toggleGameCardOverlay } from '../../utils/gameCardUtils';
 import {
   buildUnifiedWalletActivity,
   getActivityStatusMeta,
@@ -27,9 +27,6 @@ import {
   Copy,
   Check,
   Sparkles,
-  ExternalLink,
-  Flame,
-  KeyRound,
   Zap,
 } from 'lucide-react';
 
@@ -79,10 +76,37 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
     (r) => r.status === 'submitted' || r.status === 'processing' || r.status === 'pending_verification'
   );
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
+  const [activeOverlayGameId, setActiveOverlayGameId] = useState<string | null>(null);
   const [serverReferralSummary, setServerReferralSummary] = useState<ReferralSummary | null>(null);
   const localReferralSummary = dataService.getReferralSummary(currentUser.id);
   const referralSummary = serverReferralSummary || localReferralSummary;
   const conversation = dataService.getConversations().find((c) => c.customerId === currentUser.id);
+
+  useEffect(() => {
+    if (!activeOverlayGameId) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      const overlayRoot = target?.closest('[data-game-overlay-id]');
+      if (overlayRoot?.getAttribute('data-game-overlay-id') === activeOverlayGameId) {
+        return;
+      }
+      setActiveOverlayGameId(null);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setActiveOverlayGameId(null);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [activeOverlayGameId]);
   const topUpDisplay = resolveDashboardTopUpDisplay(wallet, topups, currentUser.id);
   const displayTopUpAmount = topUpDisplay.amount;
   const displayTopUpGame = topUpDisplay.gameName;
@@ -400,14 +424,11 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
               <Gamepad2 className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white flex items-center gap-2">
-                <span>Featured Gaming Platforms</span>
-                <span className="text-[10px] font-mono text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/40">
-                  DIRECT PLAY MIRRORS
-                </span>
+              <h2 className="text-base font-bold text-white">
+                Featured Gaming Platforms
               </h2>
               <p className="text-xs text-slate-400">
-                Launch games directly via verified mirror links, request game logins, or load balances with up to +30% promotional bonus.
+                Hover or tap a game image for Web play or Get app, or load and cash out directly.
               </p>
             </div>
           </div>
@@ -422,134 +443,23 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
         </div>
 
         {/* Game Platforms Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {gameCatalog.map((game, index) => {
-            const userAccount = gameAccounts.find(
-              (ga) =>
-                ga.gameCatalogId === game.id ||
-                ga.gameId === game.id ||
-                (ga.gameName || '').toLowerCase().trim() === (game.title || '').toLowerCase().trim()
-            );
-            const playLinks = game.links && game.links.length > 0
-              ? game.links
-              : [{ label: 'Web Play', url: game.gameUrl }];
-
-            return (
-              <div
-                key={game.id}
-                className="group rounded-2xl border border-slate-800 bg-[#0E1726]/80 hover:border-amber-500/60 transition-all p-5 shadow-lg flex flex-col justify-between space-y-4"
-              >
-                <div className="space-y-3">
-                  {/* Top Bar with Icon and Platform */}
-                  <div className="flex items-start gap-3.5">
-                    <img
-                      src={resolveGameImageUrl(game.iconUrl || game.imageUrl)}
-                      alt={game.title}
-                      width={56}
-                      height={56}
-                      loading={index < TOP_PRIORITY_GAME_COUNT ? 'eager' : 'lazy'}
-                      decoding="async"
-                      onError={(e) => {
-                        const img = e.currentTarget;
-                        if (img.dataset.fallbackApplied) return;
-                        img.dataset.fallbackApplied = '1';
-                        img.src = DEFAULT_GAME_ICON;
-                      }}
-                      className="w-14 h-14 rounded-xl object-cover border border-slate-700 group-hover:border-amber-500 transition-colors shrink-0 shadow-md"
-                    />
-
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="text-[10px] font-mono text-amber-400 font-semibold uppercase tracking-wider truncate">
-                          {game.platform}
-                        </span>
-                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-400 font-bold border border-emerald-800 shrink-0">
-                          +30% BONUS
-                        </span>
-                      </div>
-
-                      <h3 className="text-sm font-bold text-white truncate mt-0.5 group-hover:text-amber-300 transition-colors">
-                        {game.title}
-                      </h3>
-
-                      <p className="text-[11px] text-slate-400 line-clamp-2 mt-1 leading-snug">
-                        {game.description}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Multiple Links for this specific game */}
-                  <div className="space-y-1.5 pt-1">
-                    <div className="text-[10px] text-slate-400 font-semibold flex items-center justify-between">
-                      <span>Launch / Play Mirrors:</span>
-                      <span className="font-mono text-slate-500">{playLinks.length} link(s) available</span>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {playLinks.map((link, lIdx) => (
-                        <a
-                          key={lIdx}
-                          href={link.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-2.5 py-1 rounded-lg bg-slate-950 hover:bg-indigo-950/80 border border-slate-800 hover:border-indigo-600 text-slate-300 hover:text-indigo-200 text-[11px] font-medium flex items-center gap-1 transition-all"
-                        >
-                          <span>{link.label}</span>
-                          <ExternalLink className="w-2.5 h-2.5 text-indigo-400" />
-                        </a>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Bottom Action Buttons & Credential Indicator */}
-                <div className="pt-2 border-t border-slate-800/80 space-y-2">
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="text-slate-500 font-medium">Game ID Status:</span>
-                    {userAccount ? (
-                      userAccount.status === 'active' ? (
-                        <span className="font-mono font-semibold text-emerald-400 truncate max-w-[160px]">
-                          ID: {userAccount.username}
-                        </span>
-                      ) : (
-                        <span className="font-mono font-semibold text-amber-400">
-                          Setup Pending
-                        </span>
-                      )
-                    ) : (
-                      <span className="font-mono text-slate-400">No Game ID</span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 text-xs">
-                    <button
-                      onClick={() => onNavigateTab('topup', { gameCatalogId: game.id })}
-                      className="flex-1 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] flex items-center justify-center gap-1 transition-colors shadow-sm"
-                    >
-                      <ArrowDownToLine className="w-3.5 h-3.5" />
-                      <span>Top-Up</span>
-                    </button>
-
-                    <button
-                      onClick={() => onNavigateTab('withdrawal', { gameCatalogId: game.id })}
-                      className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-[11px] flex items-center justify-center gap-1 border border-slate-700 transition-colors"
-                    >
-                      <ArrowUpFromLine className="w-3.5 h-3.5" />
-                      <span>Cashout</span>
-                    </button>
-
-                    <button
-                      onClick={() => onNavigateTab('game_accounts')}
-                      className="py-2 px-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-300 font-medium text-[11px] flex items-center justify-center border border-slate-800 transition-colors"
-                      title={userAccount ? `Account: ${userAccount.username}` : 'Request Credentials'}
-                      aria-label={userAccount ? `Manage ${game.title} credentials (${userAccount.username})` : `Request ${game.title} credentials`}
-                    >
-                      <KeyRound className="w-3.5 h-3.5 text-cyan-400" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-[10px]">
+          {gameCatalog.map((game, index) => (
+            <GamePlatformCard
+              key={game.id}
+              game={game}
+              prioritizeImage={index < TOP_PRIORITY_GAME_COUNT}
+              isOverlayOpen={activeOverlayGameId === game.id}
+              onToggleOverlay={(gameId) =>
+                setActiveOverlayGameId((prev) => toggleGameCardOverlay(prev, gameId))
+              }
+              onCloseOverlay={(gameId) =>
+                setActiveOverlayGameId((prev) => (prev === gameId ? null : prev))
+              }
+              onTopUp={(gameId) => onNavigateTab('topup', { gameCatalogId: gameId })}
+              onCashout={(gameId) => onNavigateTab('withdrawal', { gameCatalogId: gameId })}
+            />
+          ))}
         </div>
       </div>
 
