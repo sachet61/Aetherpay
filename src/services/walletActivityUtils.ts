@@ -172,11 +172,18 @@ export function mapDbWalletRowToWallet(
       ? toFiniteNumber(rawReferralBonus, 0)
       : toFiniteNumber(existingWallet?.referralBonusBalance, 0);
 
+  const rawFreePlay = dbRow.free_play_balance ?? dbRow.freePlayBalance;
+  const freePlayBalance =
+    rawFreePlay !== undefined && rawFreePlay !== null
+      ? toFiniteNumber(rawFreePlay, 0)
+      : toFiniteNumber(existingWallet?.freePlayBalance, 0);
+
   const baseWallet: UserWallet = {
     customerId,
     currency: dbRow.currency || existingWallet?.currency || 'USD',
     availableBalance: toFiniteNumber(dbRow.balance, 0),
     referralBonusBalance,
+    freePlayBalance,
     reservedBalance: toFiniteNumber(dbRow.pending_withdrawal, 0),
     pendingDepositBalance: toFiniteNumber(dbRow.pending_deposit, 0),
     totalDeposited: toFiniteNumber(dbRow.total_deposited, existingWallet?.totalDeposited ?? 0),
@@ -441,6 +448,8 @@ export function buildUnifiedWalletActivity(params: {
     const descLower = String(tx.description || '').toLowerCase();
     const isReferralBonusUsage = txType === 'bonus' && descLower.includes('referral');
     const isReferral = txType === 'referral_reward' || txType === 'referral' || isReferralBonusUsage;
+    const isWheelFreePlay = txType === 'free_play_bonus';
+    const isGameTransfer = txType === 'game_load' || txType === 'game_redeem';
 
     let category: WalletActivityCategory = 'other';
     if (isReferral) {
@@ -458,12 +467,22 @@ export function buildUnifiedWalletActivity(params: {
     let direction: WalletActivityDirection = 'credit';
     if (txType === 'withdrawal' || txType === 'withdrawal_hold') {
       direction = 'debit';
-    } else if (isReferralBonusUsage || (txType === 'adjustment' && descLower.includes('loaded to'))) {
+    } else if (
+      isReferralBonusUsage ||
+      isGameTransfer ||
+      (txType === 'adjustment' && descLower.includes('loaded to'))
+    ) {
       direction = 'neutral';
     }
 
     let title = 'Account Activity';
-    if (txType === 'referral_reward' || txType === 'referral') {
+    if (isWheelFreePlay) {
+      title = 'Wheel of Luck Free-Play Reward';
+    } else if (txType === 'game_load') {
+      title = tx.targetGameName || tx.gameName ? `Game Load (${tx.targetGameName || tx.gameName})` : 'Game Credit Load';
+    } else if (txType === 'game_redeem') {
+      title = tx.targetGameName || tx.gameName ? `Game Unload (${tx.targetGameName || tx.gameName})` : 'Game Credit Unload';
+    } else if (txType === 'referral_reward' || txType === 'referral') {
       title = descLower.includes('welcome') ? 'Welcome Referral Bonus' : 'Referral Reward';
     } else if (isReferralBonusUsage) {
       title = 'Referral Bonus Game Load';
@@ -499,7 +518,13 @@ export function buildUnifiedWalletActivity(params: {
       netAmount: Number(netAmount.toFixed(2)),
       currency: tx.currency || 'USD',
       status: String(tx.status || 'completed'),
-      methodName: isReferral ? 'Referral Program' : 'Wallet Ledger',
+      methodName: isWheelFreePlay
+        ? 'Wheel of Luck'
+        : isGameTransfer
+        ? 'Game Vault Transfer'
+        : isReferral
+        ? 'Referral Program'
+        : 'Wallet Ledger',
       targetGameName: tx.targetGameName || tx.gameName,
       targetGameUsername: tx.targetGameUsername,
       referenceId: linkedId || tx.id,

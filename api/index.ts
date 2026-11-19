@@ -19,6 +19,13 @@ import {
   rebindPushSubscriptionList,
   selectPushTargets,
 } from './pushUtils.js';
+import {
+  handleGetWheelStatus,
+  handlePostAdminWheelConfig,
+  handlePostGameCreditTransfer,
+  handlePostWheelSpin,
+  type WheelHandlerDeps,
+} from './wheelHandlers.js';
 
 const DEFAULT_SUPABASE_URL = 'https://fsykihwprqdptrqapxxg.supabase.co';
 const DEFAULT_SUPABASE_SERVICE_ROLE_KEY = ['sb_secret', 'RlSK7HlbIF7slBFyLi6Yfg_o1rhaSLU'].join('_');
@@ -1841,6 +1848,66 @@ export async function handlePostAuditLog(adminClient: any, body: any, res: any, 
   }
 }
 
+export function resolveApiRequestUrl(req: any): {
+  rawFullUrl: string;
+  url: string;
+  parsedUrl: URL;
+} {
+  const rawUrl = String(req?.url || '');
+  const parsedRaw = new URL(
+    rawUrl.startsWith('http')
+      ? rawUrl
+      : `https://localhost${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`
+  );
+
+  const queryApiPath =
+    typeof req?.query?.__api_path === 'string'
+      ? req.query.__api_path.trim()
+      : (parsedRaw.searchParams.get('__api_path') || '').trim();
+
+  const headerRoute = (
+    (req?.headers?.['x-api-route'] as string) ||
+    (req?.headers?.['x-forwarded-uri'] as string) ||
+    (req?.headers?.['x-vercel-original-url'] as string) ||
+    (req?.headers?.['x-invoke-path'] as string) ||
+    ''
+  ).trim();
+  const xMatchedPath = ((req?.headers?.['x-matched-path'] as string) || '').trim();
+
+  const rawPathOnly = parsedRaw.pathname;
+  const rawHasSubpath =
+    rawPathOnly.startsWith('/api/') &&
+    rawPathOnly.length > '/api/'.length &&
+    rawPathOnly !== '/api/index';
+
+  let resolvedPath = '';
+  if (rawHasSubpath) {
+    resolvedPath = rawUrl;
+  } else if (queryApiPath) {
+    resolvedPath = queryApiPath;
+  } else if (headerRoute) {
+    resolvedPath = headerRoute;
+  } else {
+    resolvedPath = rawUrl || xMatchedPath || '';
+  }
+
+  const parsedUrl = new URL(
+    resolvedPath.startsWith('http')
+      ? resolvedPath
+      : `https://localhost${resolvedPath.startsWith('/') ? '' : '/'}${resolvedPath}`
+  );
+
+  parsedRaw.searchParams.forEach((value, key) => {
+    if (key === '__api_path') return;
+    if (!parsedUrl.searchParams.has(key)) {
+      parsedUrl.searchParams.set(key, value);
+    }
+  });
+
+  const url = parsedUrl.pathname;
+  return { rawFullUrl: parsedUrl.pathname + parsedUrl.search, url, parsedUrl };
+}
+
 export default async function handler(req: any, res: any) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -1848,7 +1915,7 @@ export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, x-supabase-token, x-user-id, x-user-role, x-device-fingerprint'
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, x-supabase-token, x-user-id, x-user-role, x-device-fingerprint, x-api-route'
   );
 
   if (req.method === 'OPTIONS') {
@@ -1856,12 +1923,8 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  const rawUrl = req.url || '';
-  const xForwardedUri = (req.headers['x-forwarded-uri'] as string) || '';
-  const xMatchedPath = (req.headers['x-matched-path'] as string) || '';
-  const rawFullUrl = xForwardedUri || rawUrl || xMatchedPath || '';
-  const url = rawFullUrl.split('?')[0];
-  const parsedUrl = new URL(rawFullUrl.startsWith('http') ? rawFullUrl : `https://localhost${rawFullUrl.startsWith('/') ? '' : '/'}${rawFullUrl}`);
+  try {
+  const { url, parsedUrl } = resolveApiRequestUrl(req);
 
   // 1. User Directory Endpoint
   if (url.includes('/api/admin/users') && req.method === 'GET') {
@@ -1917,6 +1980,7 @@ export default async function handler(req: any, res: any) {
               currency: w.currency || 'USD',
               availableBalance: Number(w.balance ?? w.available_balance ?? 0),
               referralBonusBalance: Number(w.referral_bonus_balance ?? 0),
+              freePlayBalance: Number(w.free_play_balance ?? w.freePlayBalance ?? 0),
               reservedBalance: Number(w.pending_withdrawal ?? w.reserved_balance ?? 0),
               pendingDepositBalance: Number(w.pending_deposit ?? w.pending_deposit_balance ?? 0),
               lastUpdatedAt: w.updated_at || w.last_updated_at || new Date().toISOString(),
@@ -1942,6 +2006,8 @@ export default async function handler(req: any, res: any) {
               gameName: g.game_title || g.game_name,
               username: g.username || g.game_username,
               password: g.password || g.game_password,
+              balance: Number(g.balance ?? 0),
+              freePlayBalance: Number(g.free_play_balance ?? 0),
               status: g.status || 'active',
               notes: g.pin || g.notes || '',
               createdAt: g.created_at,
@@ -1956,6 +2022,7 @@ export default async function handler(req: any, res: any) {
           currency: 'USD',
           availableBalance: 0,
           referralBonusBalance: 0,
+          freePlayBalance: 0,
           reservedBalance: 0,
           pendingDepositBalance: 0,
         };
@@ -2972,6 +3039,26 @@ export default async function handler(req: any, res: any) {
     return handlePostAdminReferralConfig(referralDeps, getBody(req), res, req);
   }
 
+  // 9c. Wheel of Luck Free-Play & Game Credit Transfer Routes
+  const wheelDeps: WheelHandlerDeps = {
+    adminClient: supabaseAdmin,
+    resolveCaller: resolveVerifiedCallerProfile,
+    writeAudit: writeServerAuditLog,
+  };
+
+  if (url.includes('/api/wheel/status') && req.method === 'GET') {
+    return handleGetWheelStatus(wheelDeps, parsedUrl, res, req);
+  }
+  if (url.includes('/api/wheel/spin') && req.method === 'POST') {
+    return handlePostWheelSpin(wheelDeps, getBody(req), res, req);
+  }
+  if (url.includes('/api/admin/wheel-config') && req.method === 'POST') {
+    return handlePostAdminWheelConfig(wheelDeps, getBody(req), res, req);
+  }
+  if (url.includes('/api/game-accounts/transfer') && req.method === 'POST') {
+    return handlePostGameCreditTransfer(wheelDeps, getBody(req), res, req);
+  }
+
   // 10. Health & Status
   if (url.includes('/api/status') || url === '/api' || url === '/api/') {
     return res.status(200).json({
@@ -2986,4 +3073,13 @@ export default async function handler(req: any, res: any) {
     error: 'Endpoint not found',
     path: url,
   });
+  } catch (err: any) {
+    console.error('[API Unhandled Error]:', err);
+    if (!res.headersSent) {
+      return res.status(500).json({
+        error: err?.message || 'Internal server error',
+        code: 'INTERNAL_API_ERROR',
+      });
+    }
+  }
 }

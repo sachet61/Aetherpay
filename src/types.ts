@@ -28,6 +28,7 @@ export interface UserWallet {
   currency: string;
   availableBalance: number;
   referralBonusBalance?: number;
+  freePlayBalance?: number;
   reservedBalance?: number;
   pendingDepositBalance?: number;
   totalDeposited?: number;
@@ -45,6 +46,7 @@ export type TransactionType =
   | 'deposit'
   | 'withdrawal'
   | 'bonus'
+  | 'free_play_bonus'
   | 'game_load'
   | 'game_redeem'
   | 'referral'
@@ -212,6 +214,7 @@ export interface GameAccount {
   password?: string;
   pin?: string;
   balance?: number;
+  freePlayBalance?: number;
   status?: 'active' | 'pending' | 'suspended' | 'pending_assignment' | string;
   createdAt?: string;
   updatedAt?: string;
@@ -362,6 +365,79 @@ export interface ReferredUser {
   source?: string;
 }
 
+export interface WheelSegment {
+  id: string;
+  label: string;
+  rewardAmount: number;
+  probabilityWeight: number;
+  color: string;
+  enabled: boolean;
+}
+
+export interface WheelSimulatedWinDisplay {
+  enabled: boolean;
+  amount: number;
+  label: string;
+}
+
+export interface WheelOfLuckConfig {
+  enabled: boolean;
+  title: string;
+  subtitle: string;
+  segments: WheelSegment[];
+  simulatedWinDisplay: WheelSimulatedWinDisplay;
+}
+
+export interface WheelSpinRecord {
+  id: string;
+  customerId: string;
+  segmentId: string;
+  segmentLabel: string;
+  rewardAmount: number;
+  simulatedWinAmount: number;
+  probabilityWeight: number;
+  status: string;
+  txId?: string;
+  createdAt: string;
+}
+
+export interface WheelEligibilityState {
+  enabled: boolean;
+  eligible: boolean;
+  reason?: string;
+  serverNow: string;
+  lastSpinAt: string | null;
+  nextEligibleAt: string | null;
+  remainingMs: number;
+}
+
+export interface WheelStatusResponse {
+  config: WheelOfLuckConfig;
+  eligibility: WheelEligibilityState;
+  freePlayBalance: number;
+  availableBalance: number;
+  referralBonusBalance: number;
+  recentSpins: WheelSpinRecord[];
+  latestSpin: WheelSpinRecord | null;
+}
+
+export interface WheelSpinResponse {
+  success: boolean;
+  spin: WheelSpinRecord;
+  segmentIndex: number;
+  actualRewardAmount: number;
+  simulatedWinDisplay: {
+    enabled: boolean;
+    amount: number;
+    label: string;
+    isSimulatedOnly: true;
+  };
+  eligibility: WheelEligibilityState;
+  freePlayBalance: number;
+  availableBalance: number;
+  referralBonusBalance: number;
+}
+
 export interface AppConfig {
   currency: string;
   paymentMethods: any[];
@@ -374,6 +450,7 @@ export interface AppConfig {
     [key: string]: any;
   };
   referralProgram?: ReferralProgramConfig;
+  wheelOfLuck?: WheelOfLuckConfig;
   telegram?: any;
   rules?: any;
   [key: string]: any;

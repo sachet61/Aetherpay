@@ -1,6 +1,13 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ReferralSummary, UserProfile, UserWallet } from '../../types';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ReferralSummary, UserProfile, UserWallet, WheelStatusResponse } from '../../types';
 import { dataService } from '../../services/dataService';
+import {
+  DEFAULT_WHEEL_OF_LUCK_CONFIG,
+  computeServerAnchoredRemainingMs,
+  deriveWheelUiState,
+  formatCountdownDuration,
+} from '../../utils/wheelOfLuckUtils';
+import { WheelOfLuckModal } from '../../components/customer/WheelOfLuckModal';
 import {
   DEFAULT_GAME_ICON,
   HERO_BANNER_IMAGE,
@@ -87,6 +94,52 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   const displayTopUpAmount = topUpDisplay.amount;
   const displayTopUpGame = topUpDisplay.gameName;
 
+  // Wheel of Luck authoritative server state
+  const [wheelModalOpen, setWheelModalOpen] = useState(false);
+  const wheelModalOpenRef = useRef(false);
+  wheelModalOpenRef.current = wheelModalOpen;
+  const [wheelStatus, setWheelStatus] = useState<WheelStatusResponse | null>(null);
+  const [wheelFetchedAtMs, setWheelFetchedAtMs] = useState<number>(() => Date.now());
+  const [isLoadingWheel, setIsLoadingWheel] = useState(true);
+  const [wheelStatusError, setWheelStatusError] = useState<string | null>(null);
+  const [isRetryingWheel, setIsRetryingWheel] = useState(false);
+  const [wheelClockMs, setWheelClockMs] = useState(() => Date.now());
+  const autoExpiredRefreshRef = useRef<string | null>(null);
+  const wheelStatusErrorRef = useRef<string | null>(null);
+  wheelStatusErrorRef.current = wheelStatusError;
+
+  const refreshWheelStatus = useCallback(async () => {
+    const retryingFromError = Boolean(wheelStatusErrorRef.current);
+    if (retryingFromError) setIsRetryingWheel(true);
+    setIsLoadingWheel(true);
+    setWheelStatusError(null);
+    const res = await dataService.fetchWheelStatusFromServer(currentUser.id);
+    const now = Date.now();
+    setIsLoadingWheel(false);
+    setIsRetryingWheel(false);
+    if (res.success && res.status) {
+      setWheelStatus(res.status);
+      setWheelFetchedAtMs(now);
+      setWheelClockMs(now);
+    } else {
+      setWheelStatusError(res.error || 'Unable to load Wheel of Luck status.');
+    }
+  }, [currentUser.id]);
+
+  useEffect(() => {
+    void refreshWheelStatus();
+  }, [refreshWheelStatus]);
+
+  useEffect(() => {
+    const elig = wheelStatus?.eligibility;
+    if (!elig || elig.eligible || (elig.remainingMs <= 0 && !elig.nextEligibleAt)) return;
+    const timer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      setWheelClockMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [wheelStatus?.eligibility]);
+
   useEffect(() => {
     let cancelled = false;
     const syncReferralSummary = async () => {
@@ -117,13 +170,60 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
       ) {
         void syncReferralSummary();
       }
+      if (key === 'wheel_spin_claimed' && wheelModalOpenRef.current) {
+        return;
+      }
+      if (
+        key === 'wheel_spin_claimed' ||
+        key === 'aetherpay_config' ||
+        key === 'wallet_updated' ||
+        tables.includes('wheel_spins') ||
+        tables.includes('app_config') ||
+        tables.includes('wallets')
+      ) {
+        void refreshWheelStatus();
+      }
     };
     window.addEventListener('aetherpay_state_changed', onStateChanged);
     return () => {
       cancelled = true;
       window.removeEventListener('aetherpay_state_changed', onStateChanged);
     };
-  }, [currentUser.id, currentUser.emailVerified, currentUser.referredBy]);
+  }, [currentUser.id, currentUser.emailVerified, currentUser.referredBy, refreshWheelStatus]);
+
+  const activeWheelConfig =
+    wheelStatus?.config || dataService.getAppConfig().wheelOfLuck || DEFAULT_WHEEL_OF_LUCK_CONFIG;
+  const effectiveFreePlayBalance = Number(
+    wheelStatus?.freePlayBalance ?? wallet.freePlayBalance ?? 0
+  );
+  const wheelCooldownRemainingMs = computeServerAnchoredRemainingMs({
+    eligibility: wheelStatus?.eligibility,
+    fetchedAtClientMs: wheelFetchedAtMs,
+    nowMs: wheelClockMs,
+  });
+  const wheelUi = deriveWheelUiState({
+    enabled: Boolean(activeWheelConfig.enabled),
+    isLoading: isLoadingWheel,
+    hasStatus: Boolean(wheelStatus) && !isRetryingWheel,
+    statusError: wheelStatusError,
+    isSpinning: false,
+    eligibility: wheelStatus?.eligibility,
+    remainingMs: wheelCooldownRemainingMs,
+  });
+  const isWheelSpinReady = wheelUi.uiState === 'eligible';
+
+  useEffect(() => {
+    const nextAt = wheelStatus?.eligibility?.nextEligibleAt;
+    if (
+      wheelUi.uiState === 'unavailable' &&
+      nextAt &&
+      !isLoadingWheel &&
+      autoExpiredRefreshRef.current !== nextAt
+    ) {
+      autoExpiredRefreshRef.current = nextAt;
+      void refreshWheelStatus();
+    }
+  }, [wheelUi.uiState, wheelStatus?.eligibility?.nextEligibleAt, isLoadingWheel, refreshWheelStatus]);
 
   const welcomeBonus = referralSummary.welcomeBonus;
   const referrerRewardVal = referralSummary.referrerRewardValue ?? referralSummary.rewardPerReferral ?? 25;
@@ -225,7 +325,7 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
               Deposits are loaded straight into your chosen game with dynamic bonus applied!
             </p>
 
-            {/* Non-cashable Referral Balance Badge */}
+            {/* Non-cashable Referral & Free-Play Balance Badges */}
             {(wallet.referralBonusBalance || 0) > 0 && (
               <div className="pt-1">
                 <div className="px-2.5 py-1.5 rounded-lg bg-amber-950/60 border border-amber-500/30 flex items-center justify-between text-xs">
@@ -235,6 +335,20 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
                   </span>
                   <span className="font-mono font-bold text-amber-300">
                     ${(wallet.referralBonusBalance || 0).toFixed(2)}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {effectiveFreePlayBalance > 0 && (
+              <div className="pt-0.5">
+                <div className="px-2.5 py-1.5 rounded-lg bg-emerald-950/60 border border-emerald-500/30 flex items-center justify-between text-xs">
+                  <span className="text-emerald-300 flex items-center gap-1 text-[11px]">
+                    <Zap className="w-3 h-3 text-emerald-400" />
+                    <span>Wheel Free-Play (Game Only):</span>
+                  </span>
+                  <span className="font-mono font-bold text-emerald-300">
+                    ${effectiveFreePlayBalance.toFixed(2)}
                   </span>
                 </div>
               </div>
@@ -287,6 +401,83 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
           <span>24/7 Support Chat</span>
         </button>
       </div>
+
+      {/* Daily Wheel of Luck Free-Play Card */}
+      {activeWheelConfig.enabled && (
+        <div
+          data-testid="wheel-of-luck-promo-card"
+          className="p-5 rounded-2xl border border-amber-500/30 bg-gradient-to-r from-[#0E1726] via-[#171E35] to-[#0E1726] flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl"
+        >
+          <div className="flex items-start gap-3.5">
+            <div className="w-11 h-11 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-300 flex items-center justify-center shrink-0">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-sm sm:text-base font-bold text-white">{activeWheelConfig.title}</h2>
+                <span
+                  className={`px-2 py-0.5 rounded border text-[10px] font-mono font-semibold uppercase ${
+                    wheelUi.uiState === 'eligible'
+                      ? 'bg-emerald-950/80 border-emerald-600/50 text-emerald-300'
+                      : wheelUi.uiState === 'error'
+                      ? 'bg-rose-950/80 border-rose-700/60 text-rose-300'
+                      : 'bg-slate-900 border-slate-700 text-amber-300'
+                  }`}
+                >
+                  {wheelUi.uiState === 'loading'
+                    ? 'Checking...'
+                    : wheelUi.uiState === 'error'
+                    ? 'Retry Status'
+                    : wheelUi.uiState === 'eligible'
+                    ? 'Spin Ready'
+                    : wheelUi.uiState === 'cooldown'
+                    ? `Cooldown ${formatCountdownDuration(wheelCooldownRemainingMs)}`
+                    : wheelStatus?.eligibility?.nextEligibleAt
+                    ? 'Verifying...'
+                    : 'Unavailable'}
+                </span>
+                {effectiveFreePlayBalance > 0 && (
+                  <span className="px-2 py-0.5 rounded bg-emerald-950/60 border border-emerald-500/30 text-[10px] font-mono font-bold text-emerald-300">
+                    Free-Play: ${effectiveFreePlayBalance.toFixed(2)}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                {activeWheelConfig.subtitle}
+                {activeWheelConfig.simulatedWinDisplay?.enabled && activeWheelConfig.simulatedWinDisplay.amount > 0
+                  ? ` · Showcase prize display: $${activeWheelConfig.simulatedWinDisplay.amount.toFixed(0)} (promotional preview)`
+                  : ''}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {effectiveFreePlayBalance > 0 && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('game_accounts')}
+                className="px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-emerald-300 font-semibold text-xs flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              >
+                <Gamepad2 className="w-3.5 h-3.5" />
+                <span>Load Free-Play</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setWheelModalOpen(true);
+                if (!wheelStatus || wheelStatusError || Date.now() - wheelFetchedAtMs > 10_000) {
+                  void refreshWheelStatus();
+                }
+              }}
+              className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 via-yellow-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-extrabold text-xs flex items-center gap-1.5 transition-all shadow-md shadow-amber-500/20 whitespace-nowrap"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>{isWheelSpinReady ? 'Spin Wheel Now' : 'Open Wheel'}</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Referee Welcome Bonus Card (Visible when player signed up via referral or was linked by support) */}
       {welcomeBonus?.hasReferrer && (
@@ -769,6 +960,25 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
       <div className="pt-2">
         <LiveCashoutFeedList maxItems={6} />
       </div>
+
+      <WheelOfLuckModal
+        isOpen={wheelModalOpen}
+        onClose={() => setWheelModalOpen(false)}
+        currentUser={currentUser}
+        wallet={wallet}
+        wheelStatus={isRetryingWheel ? null : wheelStatus}
+        statusFetchedAtMs={wheelFetchedAtMs}
+        isLoadingStatus={isLoadingWheel}
+        statusError={wheelStatusError}
+        onStatusUpdated={(next) => {
+          const now = Date.now();
+          setWheelStatus(next);
+          setWheelFetchedAtMs(now);
+          setWheelClockMs(now);
+        }}
+        onRefreshStatus={refreshWheelStatus}
+        onNavigateTab={onNavigateTab}
+      />
     </div>
   );
 };

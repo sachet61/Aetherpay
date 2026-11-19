@@ -39,6 +39,7 @@ import {
 } from 'lucide-react';
 import { TelegramBotConfigCard } from '../../components/admin/TelegramBotConfigCard';
 import { PolicyAndPartnerCmsCard } from '../../components/admin/PolicyAndPartnerCmsCard';
+import { WheelOfLuckAdminCard } from '../../components/admin/WheelOfLuckAdminCard';
 import { normalizeReferralConfig } from '../../utils/referralUtils';
 import { storageService } from '../../services/storageService';
 import { validateImageFile } from '../../utils/uploadUtils';
@@ -1430,6 +1431,12 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
           </button>
         </div>
       </div>
+
+      {/* Wheel of Luck Free-Play & Daily Spin Settings */}
+      <WheelOfLuckAdminCard
+        initialConfig={config.wheelOfLuck}
+        onConfigSaved={(savedWheel) => setConfig((prev) => ({ ...prev, wheelOfLuck: savedWheel }))}
+      />
 
       {/* Platform Withdrawal Settings */}
       <div className="p-6 rounded-2xl border border-slate-800 bg-slate-900 shadow-md space-y-4">

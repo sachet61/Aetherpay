@@ -584,3 +584,72 @@ test('mapDbWalletRowToWallet preserves referral_bonus_balance and buildUnifiedWa
   assert.equal(unified[0].status, 'completed');
 });
 
+test('mapDbWalletRowToWallet maps free_play_balance and buildUnifiedWalletActivity renders Wheel free-play and game transfers', () => {
+  const mappedWallet = mapDbWalletRowToWallet(
+    {
+      customer_id: 'cust_fp',
+      balance: '40.00',
+      referral_bonus_balance: '10.00',
+      free_play_balance: '15.00',
+      pending_withdrawal: '0',
+      pending_deposit: '0',
+      total_deposited: '40.00',
+      total_withdrawn: '0',
+      currency: 'USD',
+      updated_at: '2026-11-18T12:00:00.000Z',
+    },
+    undefined,
+    [],
+    { authoritativeTopupsLoaded: true }
+  );
+
+  assert.equal(mappedWallet.freePlayBalance, 15);
+
+  const unified = buildUnifiedWalletActivity({
+    customerId: 'cust_fp',
+    topups: [],
+    withdrawals: [],
+    transactions: [
+      {
+        id: 'tx_fp_1',
+        customerId: 'cust_fp',
+        type: 'free_play_bonus',
+        amount: 15,
+        description: 'Wheel of Luck Daily Free-Play Reward ($15 Free Play)',
+        status: 'completed',
+        createdAt: '2026-11-18T12:00:00.000Z',
+      },
+      {
+        id: 'tx_gl_1',
+        customerId: 'cust_fp',
+        type: 'game_load',
+        amount: 15,
+        targetGameName: 'Fire Kirin',
+        description: 'Free-Play Loaded to Fire Kirin (alice_fk)',
+        status: 'completed',
+        createdAt: '2026-11-18T12:05:00.000Z',
+      },
+      {
+        id: 'tx_gr_1',
+        customerId: 'cust_fp',
+        type: 'game_redeem',
+        amount: 10,
+        targetGameName: 'Fire Kirin',
+        description: 'Unloaded $10.00 from Fire Kirin (alice_fk)',
+        status: 'completed',
+        createdAt: '2026-11-18T12:10:00.000Z',
+      },
+    ],
+  });
+
+  assert.equal(unified.length, 3);
+  assert.equal(unified[0].title, 'Game Unload (Fire Kirin)');
+  assert.equal(unified[0].methodName, 'Game Vault Transfer');
+  assert.equal(unified[0].direction, 'neutral');
+  assert.equal(unified[1].title, 'Game Load (Fire Kirin)');
+  assert.equal(unified[2].title, 'Wheel of Luck Free-Play Reward');
+  assert.equal(unified[2].methodName, 'Wheel of Luck');
+  assert.equal(unified[2].direction, 'credit');
+});
+
+

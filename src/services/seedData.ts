@@ -12,6 +12,7 @@ import {
   AppConfig,
   AuditLog,
 } from '../types';
+import { DEFAULT_WHEEL_OF_LUCK_CONFIG } from '../utils/wheelOfLuckUtils';
 
 export const INITIAL_CONFIG: AppConfig = {
   currency: 'USD',
@@ -160,6 +161,7 @@ export const INITIAL_CONFIG: AppConfig = {
     flagSharedNetworkOrDevice: true,
     holdFlaggedForReview: true,
   },
+  wheelOfLuck: DEFAULT_WHEEL_OF_LUCK_CONFIG,
   platformRules: {
     depositTerms: 'All deposits must originate from accounts registered in the customer’s legal name. Third-party deposits are strictly prohibited and subject to immediate freeze pending AML review.',
     bonusWageringTerms: 'Deposit bonuses require 1x wagering in verified gaming matches or 48-hour vault seasoning prior to cashout qualification. Multiple accounts claiming bonuses will forfeit promotional earnings.',

@@ -863,5 +863,411 @@ BEGIN
 END;
 $$;
 
+-- ====================================================================
+-- 19. Wheel of Luck Free-Play Reward System & Game Load/Unload Persistence
+-- ====================================================================
+
+ALTER TABLE public.wallets
+  ADD COLUMN IF NOT EXISTS free_play_balance NUMERIC(12, 2) NOT NULL DEFAULT 0.00;
+
+ALTER TABLE public.game_accounts
+  ADD COLUMN IF NOT EXISTS balance NUMERIC(12, 2) NOT NULL DEFAULT 0.00;
+
+ALTER TABLE public.game_accounts
+  ADD COLUMN IF NOT EXISTS free_play_balance NUMERIC(12, 2) NOT NULL DEFAULT 0.00;
+
+CREATE TABLE IF NOT EXISTS public.wheel_spins (
+  id TEXT PRIMARY KEY,
+  customer_id TEXT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  segment_id TEXT NOT NULL,
+  segment_label TEXT NOT NULL,
+  reward_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  simulated_win_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  probability_weight NUMERIC(10, 4) NOT NULL DEFAULT 1.0000,
+  idempotency_key TEXT,
+  tx_id TEXT,
+  status TEXT NOT NULL DEFAULT 'completed',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE INDEX IF NOT EXISTS idx_wheel_spins_customer_created
+  ON public.wheel_spins(customer_id, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wheel_spins_customer_idempotency
+  ON public.wheel_spins(customer_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
+ALTER TABLE public.wheel_spins ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public' AND tablename = 'wheel_spins' AND policyname = 'Allow authenticated wheel_spins read'
+  ) THEN
+    CREATE POLICY "Allow authenticated wheel_spins read" ON public.wheel_spins
+      FOR SELECT USING (
+        auth.uid()::text = customer_id
+        OR EXISTS (
+          SELECT 1 FROM public.users u
+          WHERE u.id = auth.uid()::text AND u.role IN ('admin', 'agent')
+        )
+      );
+  END IF;
+END $$;
+
+ALTER TABLE public.wheel_spins REPLICA IDENTITY FULL;
+ALTER TABLE public.game_accounts REPLICA IDENTITY FULL;
+ALTER TABLE public.app_config REPLICA IDENTITY FULL;
+
+DO $$
+DECLARE
+  tbl TEXT;
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    FOREACH tbl IN ARRAY ARRAY['wheel_spins', 'game_accounts', 'app_config']
+    LOOP
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = tbl
+      ) THEN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I', tbl);
+      END IF;
+    END LOOP;
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.claim_wheel_of_luck_spin(
+  p_spin_id TEXT,
+  p_customer_id TEXT,
+  p_segment_id TEXT,
+  p_segment_label TEXT,
+  p_reward_amount NUMERIC DEFAULT 0,
+  p_simulated_win_amount NUMERIC DEFAULT 0,
+  p_probability_weight NUMERIC DEFAULT 1,
+  p_idempotency_key TEXT DEFAULT NULL,
+  p_tx_id TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_now TIMESTAMPTZ := timezone('utc'::text, now());
+  v_reward NUMERIC(12, 2) := ROUND(GREATEST(0, COALESCE(p_reward_amount, 0)), 2);
+  v_sim NUMERIC(12, 2) := ROUND(GREATEST(0, COALESCE(p_simulated_win_amount, 0)), 2);
+  v_weight NUMERIC(10, 4) := ROUND(GREATEST(0, COALESCE(p_probability_weight, 0)), 4);
+  v_idemp TEXT := NULLIF(btrim(p_idempotency_key), '');
+  v_tx_id TEXT := COALESCE(NULLIF(btrim(p_tx_id), ''), 'tx_wspin_' || p_spin_id);
+  v_existing RECORD;
+  v_recent RECORD;
+  v_wallet RECORD;
+  v_next_free_play NUMERIC(12, 2);
+BEGIN
+  IF p_customer_id IS NULL OR btrim(p_customer_id) = '' THEN
+    RAISE EXCEPTION 'Customer ID is required';
+  END IF;
+
+  -- Serialize concurrent spin attempts per verified player row
+  PERFORM 1 FROM public.users WHERE id = p_customer_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object(
+      'ok', false,
+      'errorCode', 'USER_NOT_FOUND',
+      'serverNow', v_now
+    );
+  END IF;
+
+  INSERT INTO public.wallets (customer_id, balance, referral_bonus_balance, free_play_balance, currency, updated_at)
+  VALUES (p_customer_id, 0, 0, 0, 'USD', v_now)
+  ON CONFLICT (customer_id) DO NOTHING;
+
+  SELECT * INTO v_wallet
+  FROM public.wallets
+  WHERE customer_id = p_customer_id
+  FOR UPDATE;
+
+  -- Replay protection via client idempotency key
+  IF v_idemp IS NOT NULL THEN
+    SELECT * INTO v_existing
+    FROM public.wheel_spins
+    WHERE customer_id = p_customer_id AND idempotency_key = v_idemp
+    LIMIT 1;
+
+    IF FOUND THEN
+      RETURN jsonb_build_object(
+        'ok', true,
+        'idempotentReplay', true,
+        'spinId', v_existing.id,
+        'segmentId', v_existing.segment_id,
+        'segmentLabel', v_existing.segment_label,
+        'rewardAmount', v_existing.reward_amount,
+        'simulatedWinAmount', v_existing.simulated_win_amount,
+        'freePlayBalance', COALESCE(v_wallet.free_play_balance, 0),
+        'availableBalance', COALESCE(v_wallet.balance, 0),
+        'referralBonusBalance', COALESCE(v_wallet.referral_bonus_balance, 0),
+        'txId', v_existing.tx_id,
+        'createdAt', v_existing.created_at,
+        'nextEligibleAt', v_existing.created_at + INTERVAL '24 hours',
+        'serverNow', v_now
+      );
+    END IF;
+  END IF;
+
+  -- Enforce rolling 24-hour server-time cooldown
+  SELECT id, created_at INTO v_recent
+  FROM public.wheel_spins
+  WHERE customer_id = p_customer_id
+    AND status = 'completed'
+    AND created_at > (v_now - INTERVAL '24 hours')
+  ORDER BY created_at DESC
+  LIMIT 1;
+
+  IF FOUND THEN
+    RETURN jsonb_build_object(
+      'ok', false,
+      'errorCode', 'COOLDOWN_ACTIVE',
+      'lastSpinAt', v_recent.created_at,
+      'nextEligibleAt', v_recent.created_at + INTERVAL '24 hours',
+      'serverNow', v_now
+    );
+  END IF;
+
+  -- Record authoritative spin
+  INSERT INTO public.wheel_spins (
+    id, customer_id, segment_id, segment_label, reward_amount, simulated_win_amount,
+    probability_weight, idempotency_key, tx_id, status, created_at
+  ) VALUES (
+    p_spin_id,
+    p_customer_id,
+    p_segment_id,
+    p_segment_label,
+    v_reward,
+    v_sim,
+    v_weight,
+    v_idemp,
+    CASE WHEN v_reward > 0 THEN v_tx_id ELSE NULL END,
+    'completed',
+    v_now
+  );
+
+  v_next_free_play := ROUND((COALESCE(v_wallet.free_play_balance, 0) + v_reward)::numeric, 2);
+
+  -- Credit ONLY actual rewardAmount (NEVER simulatedWinAmount) to free_play_balance
+  IF v_reward > 0 THEN
+    UPDATE public.wallets
+    SET free_play_balance = v_next_free_play,
+        updated_at = v_now
+    WHERE customer_id = p_customer_id;
+
+    INSERT INTO public.transactions (
+      id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+    ) VALUES (
+      v_tx_id,
+      p_customer_id,
+      v_reward,
+      'free_play_bonus',
+      'completed',
+      'Wheel of Luck Daily Free-Play Reward (' || p_segment_label || ')',
+      p_spin_id,
+      'Wheel of Luck',
+      v_now
+    )
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO public.notifications (
+      id, user_id, title, message, type, read, link_tab, link_request_id, created_at
+    ) VALUES (
+      'notif_' || p_spin_id,
+      p_customer_id,
+      'Wheel of Luck Free-Play Credited!',
+      'You won $' || to_char(v_reward, 'FM999999990.00') || ' in non-cashable Free-Play credits from the Wheel of Luck!',
+      'bonus',
+      false,
+      'game_accounts',
+      p_spin_id,
+      v_now
+    )
+    ON CONFLICT (id) DO NOTHING;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'idempotentReplay', false,
+    'spinId', p_spin_id,
+    'segmentId', p_segment_id,
+    'segmentLabel', p_segment_label,
+    'rewardAmount', v_reward,
+    'simulatedWinAmount', v_sim,
+    'freePlayBalance', v_next_free_play,
+    'availableBalance', COALESCE(v_wallet.balance, 0),
+    'referralBonusBalance', COALESCE(v_wallet.referral_bonus_balance, 0),
+    'txId', CASE WHEN v_reward > 0 THEN v_tx_id ELSE NULL END,
+    'createdAt', v_now,
+    'nextEligibleAt', v_now + INTERVAL '24 hours',
+    'serverNow', v_now
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.transfer_game_credits_atomic(
+  p_customer_id TEXT,
+  p_game_account_id TEXT,
+  p_direction TEXT, -- 'load' | 'unload'
+  p_source TEXT,    -- 'free_play' | 'referral_bonus' | 'wallet_cash'
+  p_amount NUMERIC,
+  p_tx_id TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_now TIMESTAMPTZ := timezone('utc'::text, now());
+  v_amt NUMERIC(12, 2) := ROUND(GREATEST(0, COALESCE(p_amount, 0)), 2);
+  v_dir TEXT := lower(btrim(COALESCE(p_direction, '')));
+  v_src TEXT := lower(btrim(COALESCE(p_source, 'wallet_cash')));
+  v_tx_id TEXT := COALESCE(NULLIF(btrim(p_tx_id), ''), 'tx_gxf_' || md5(p_customer_id || p_game_account_id || v_now::text || random()::text));
+  v_wallet RECORD;
+  v_acc RECORD;
+  v_fp_return NUMERIC(12, 2) := 0;
+  v_cash_return NUMERIC(12, 2) := 0;
+  v_next_wallet_cash NUMERIC(12, 2);
+  v_next_wallet_ref NUMERIC(12, 2);
+  v_next_wallet_fp NUMERIC(12, 2);
+  v_next_game_bal NUMERIC(12, 2);
+  v_next_game_fp NUMERIC(12, 2);
+  v_tx_type TEXT;
+  v_tx_desc TEXT;
+BEGIN
+  IF v_amt <= 0 THEN
+    RETURN jsonb_build_object('ok', false, 'errorCode', 'INVALID_AMOUNT', 'error', 'Transfer amount must be greater than zero.');
+  END IF;
+  IF v_dir NOT IN ('load', 'unload') THEN
+    RETURN jsonb_build_object('ok', false, 'errorCode', 'INVALID_DIRECTION', 'error', 'Invalid transfer direction.');
+  END IF;
+
+  INSERT INTO public.wallets (customer_id, balance, referral_bonus_balance, free_play_balance, currency, updated_at)
+  VALUES (p_customer_id, 0, 0, 0, 'USD', v_now)
+  ON CONFLICT (customer_id) DO NOTHING;
+
+  SELECT * INTO v_wallet
+  FROM public.wallets
+  WHERE customer_id = p_customer_id
+  FOR UPDATE;
+
+  SELECT * INTO v_acc
+  FROM public.game_accounts
+  WHERE id = p_game_account_id AND customer_id = p_customer_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'errorCode', 'GAME_ACCOUNT_NOT_FOUND', 'error', 'Game account not found.');
+  END IF;
+
+  v_next_wallet_cash := COALESCE(v_wallet.balance, 0);
+  v_next_wallet_ref := COALESCE(v_wallet.referral_bonus_balance, 0);
+  v_next_wallet_fp := COALESCE(v_wallet.free_play_balance, 0);
+  v_next_game_bal := COALESCE(v_acc.balance, 0);
+  v_next_game_fp := LEAST(v_next_game_bal, COALESCE(v_acc.free_play_balance, 0));
+
+  IF v_dir = 'load' THEN
+    IF v_src = 'free_play' THEN
+      IF v_next_wallet_fp < v_amt THEN
+        RETURN jsonb_build_object('ok', false, 'errorCode', 'INSUFFICIENT_FUNDS', 'error', 'Insufficient free-play balance.');
+      END IF;
+      v_next_wallet_fp := ROUND((v_next_wallet_fp - v_amt)::numeric, 2);
+      v_next_game_fp := ROUND((v_next_game_fp + v_amt)::numeric, 2);
+      v_next_game_bal := ROUND((v_next_game_bal + v_amt)::numeric, 2);
+      v_tx_type := 'game_load';
+      v_tx_desc := 'Free-Play Loaded to ' || v_acc.game_title || ' (' || v_acc.username || ')';
+    ELSIF v_src = 'referral_bonus' THEN
+      IF v_next_wallet_ref < v_amt THEN
+        RETURN jsonb_build_object('ok', false, 'errorCode', 'INSUFFICIENT_FUNDS', 'error', 'Insufficient referral bonus balance.');
+      END IF;
+      v_next_wallet_ref := ROUND((v_next_wallet_ref - v_amt)::numeric, 2);
+      v_next_game_fp := ROUND((v_next_game_fp + v_amt)::numeric, 2);
+      v_next_game_bal := ROUND((v_next_game_bal + v_amt)::numeric, 2);
+      v_tx_type := 'game_load';
+      v_tx_desc := 'Referral Bonus Loaded to ' || v_acc.game_title || ' (' || v_acc.username || ')';
+    ELSE
+      IF v_next_wallet_cash < v_amt THEN
+        RETURN jsonb_build_object('ok', false, 'errorCode', 'INSUFFICIENT_FUNDS', 'error', 'Insufficient wallet cash balance.');
+      END IF;
+      v_next_wallet_cash := ROUND((v_next_wallet_cash - v_amt)::numeric, 2);
+      v_next_game_bal := ROUND((v_next_game_bal + v_amt)::numeric, 2);
+      v_tx_type := 'game_load';
+      v_tx_desc := 'Wallet Cash Loaded to ' || v_acc.game_title || ' (' || v_acc.username || ')';
+    END IF;
+  ELSE
+    -- Unload from game account back to wallet: free-play portion ALWAYS returns to free_play_balance first
+    IF v_next_game_bal < v_amt THEN
+      RETURN jsonb_build_object('ok', false, 'errorCode', 'INSUFFICIENT_GAME_CREDITS', 'error', 'Insufficient game credits to unload.');
+    END IF;
+    v_fp_return := ROUND(LEAST(v_amt, v_next_game_fp)::numeric, 2);
+    v_cash_return := ROUND(GREATEST(0, v_amt - v_fp_return)::numeric, 2);
+
+    v_next_game_bal := ROUND(GREATEST(0, v_next_game_bal - v_amt)::numeric, 2);
+    v_next_game_fp := ROUND(GREATEST(0, v_next_game_fp - v_fp_return)::numeric, 2);
+    v_next_wallet_fp := ROUND((v_next_wallet_fp + v_fp_return)::numeric, 2);
+    v_next_wallet_cash := ROUND((v_next_wallet_cash + v_cash_return)::numeric, 2);
+    v_tx_type := 'game_redeem';
+    v_tx_desc := 'Unloaded $' || to_char(v_amt, 'FM999999990.00') || ' from ' || v_acc.game_title || ' (' || v_acc.username || ')';
+  END IF;
+
+  UPDATE public.wallets
+  SET balance = v_next_wallet_cash,
+      referral_bonus_balance = v_next_wallet_ref,
+      free_play_balance = v_next_wallet_fp,
+      updated_at = v_now
+  WHERE customer_id = p_customer_id;
+
+  UPDATE public.game_accounts
+  SET balance = v_next_game_bal,
+      free_play_balance = v_next_game_fp,
+      updated_at = v_now
+  WHERE id = p_game_account_id;
+
+  INSERT INTO public.transactions (
+    id, customer_id, amount, type, status, description, reference_id, game_name, created_at
+  ) VALUES (
+    v_tx_id,
+    p_customer_id,
+    v_amt,
+    v_tx_type,
+    'completed',
+    v_tx_desc,
+    p_game_account_id,
+    v_acc.game_title,
+    v_now
+  )
+  ON CONFLICT (id) DO NOTHING;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'direction', v_dir,
+    'source', v_src,
+    'amount', v_amt,
+    'freePlayReturn', v_fp_return,
+    'cashReturn', v_cash_return,
+    'txId', v_tx_id,
+    'wallet', jsonb_build_object(
+      'availableBalance', v_next_wallet_cash,
+      'referralBonusBalance', v_next_wallet_ref,
+      'freePlayBalance', v_next_wallet_fp
+    ),
+    'gameAccount', jsonb_build_object(
+      'id', v_acc.id,
+      'balance', v_next_game_bal,
+      'freePlayBalance', v_next_game_fp
+    ),
+    'serverNow', v_now
+  );
+END;
+$$;
+
+
 
 

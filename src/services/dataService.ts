@@ -23,6 +23,10 @@ import {
   CashoutFeedItem,
   PasswordResetToken,
   UserRole,
+  WheelEligibilityState,
+  WheelOfLuckConfig,
+  WheelSpinResponse,
+  WheelStatusResponse,
 } from '../types';
 import {
   INITIAL_CONFIG,
@@ -60,6 +64,11 @@ import {
   normalizeReferralConfig,
   normalizeReferralCodeInput,
 } from '../utils/referralUtils';
+import {
+  formatWheelHttpError,
+  isHtmlFallbackResponse,
+  normalizeWheelConfig,
+} from '../utils/wheelOfLuckUtils';
 import {
   mergeVerifiedStatus,
   readVerifiedCache,
@@ -455,6 +464,9 @@ class DataService {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'referral_awards' }, (p) => {
         this.queueRealtimeMutation('referral_awards', p.eventType, p.new, p.old);
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'wheel_spins' }, (p) => {
+        this.queueRealtimeMutation('wheel_spins', p.eventType, p.new, p.old);
+      })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           this.syncStatus = 'connected';
@@ -507,6 +519,7 @@ class DataService {
     const appConfigRows = filterRealtimeRowsForUser('app_config', rowsByTable['app_config'], activeUser);
     const auditLogRows = filterRealtimeRowsForUser('audit_logs', rowsByTable['audit_logs'], activeUser);
     const referralAwardRows = filterRealtimeRowsForUser('referral_awards', rowsByTable['referral_awards'], activeUser);
+    const wheelSpinRows = filterRealtimeRowsForUser('wheel_spins', rowsByTable['wheel_spins'], activeUser);
 
     if (messageRows.length) {
       this.applyMessageRows(messageRows, true);
@@ -565,6 +578,9 @@ class DataService {
     }
     if (referralAwardRows.length) {
       tablesModified.add('referral_awards');
+    }
+    if (wheelSpinRows.length) {
+      tablesModified.add('wheel_spins');
     }
 
     if (tablesModified.size > 0) {
@@ -1692,6 +1708,8 @@ class DataService {
         platformName: 'Sweepstakes',
         username: ga.username,
         password: ga.password,
+        balance: Number(ga.balance ?? 0),
+        freePlayBalance: Number(ga.free_play_balance ?? ga.freePlayBalance ?? 0),
         status: ga.status || 'active',
         notes: ga.pin || '',
         createdAt: ga.created_at || new Date().toISOString(),
@@ -1990,6 +2008,7 @@ class DataService {
       ...data,
     };
     merged.referralProgram = normalizeReferralConfig(merged.referralProgram);
+    merged.wheelOfLuck = normalizeWheelConfig(merged.wheelOfLuck);
     this.cache[STORAGE_KEYS.CONFIG] = merged;
     this.saveToLocalStorage(STORAGE_KEYS.CONFIG, this.cache[STORAGE_KEYS.CONFIG]);
   }
@@ -3754,6 +3773,7 @@ class DataService {
         currency: 'USD',
         availableBalance: 0,
         referralBonusBalance: 0,
+        freePlayBalance: 0,
         reservedBalance: 0,
         pendingDepositBalance: 0,
         lastTopUpAmount: 0,
@@ -3761,8 +3781,16 @@ class DataService {
       };
       this.cache[STORAGE_KEYS.WALLETS] = wallets;
       this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
-    } else if (wallets[customerId].referralBonusBalance === undefined) {
-      wallets[customerId].referralBonusBalance = 0;
+    } else if (
+      wallets[customerId].referralBonusBalance === undefined ||
+      wallets[customerId].freePlayBalance === undefined
+    ) {
+      if (wallets[customerId].referralBonusBalance === undefined) {
+        wallets[customerId].referralBonusBalance = 0;
+      }
+      if (wallets[customerId].freePlayBalance === undefined) {
+        wallets[customerId].freePlayBalance = 0;
+      }
       this.cache[STORAGE_KEYS.WALLETS] = wallets;
       this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
     }
@@ -7927,6 +7955,426 @@ class DataService {
     }
   }
 
+  // Wheel of Luck Free-Play Reward & Game Credit Transfers (Server-Enforced)
+  public async fetchWheelStatusFromServer(
+    userId?: string
+  ): Promise<{
+    success: boolean;
+    status?: WheelStatusResponse;
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
+    try {
+      const targetId = userId || this.getCurrentUser()?.id || '';
+      const params = new URLSearchParams();
+      if (targetId) params.set('userId', targetId);
+      const queryStr = params.toString();
+      const primaryUrl = `/api/wheel/status${queryStr ? `?${queryStr}` : ''}`;
+
+      let attempt = await this.fetchWithAuthTokenRetry(primaryUrl, (headers) => ({
+        cache: 'no-store',
+        headers: {
+          ...headers,
+          'x-api-route': '/api/wheel/status',
+        },
+      }));
+
+      // If an edge proxy served SPA HTML or collapsed to /api health root, retry once via /api/index?__api_path
+      if (
+        !attempt.requiresReauth &&
+        !attempt.isTransientError &&
+        (isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText }) ||
+          (attempt.json && attempt.json.online === true && !attempt.json.eligibility))
+      ) {
+        const indexParams = new URLSearchParams(params);
+        indexParams.set('__api_path', '/api/wheel/status');
+        attempt = await this.fetchWithAuthTokenRetry(`/api/index?${indexParams.toString()}`, (headers) => ({
+          cache: 'no-store',
+          headers: {
+            ...headers,
+            'x-api-route': '/api/wheel/status',
+          },
+        }));
+      }
+
+      const json = attempt.json;
+      if (!attempt.response?.ok) {
+        return {
+          success: false,
+          error: formatWheelHttpError({
+            actionLabel: 'Wheel of Luck status',
+            status: attempt.response?.status,
+            json,
+            contentType: attempt.contentType,
+            rawText: attempt.rawText,
+          }),
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
+      }
+      if (!json || typeof json !== 'object') {
+        return {
+          success: false,
+          error: formatWheelHttpError({
+            actionLabel: 'Wheel of Luck status',
+            status: attempt.response?.status,
+            json,
+            contentType: attempt.contentType,
+            rawText: attempt.rawText,
+          }),
+          code: 'INVALID_WHEEL_RESPONSE',
+        };
+      }
+      if (json.online === true && !json.eligibility) {
+        return {
+          success: false,
+          error: formatWheelHttpError({
+            actionLabel: 'Wheel of Luck status',
+            status: attempt.response?.status,
+            json,
+            contentType: attempt.contentType,
+            rawText: attempt.rawText,
+          }),
+          code: 'WHEEL_ROUTE_MISROUTED',
+        };
+      }
+      if (!json.eligibility || typeof json.eligibility !== 'object') {
+        return {
+          success: false,
+          error: formatWheelHttpError({
+            actionLabel: 'Wheel of Luck status',
+            status: attempt.response?.status,
+            json,
+            contentType: attempt.contentType,
+            rawText: attempt.rawText,
+          }),
+          code: json?.code || 'MISSING_ELIGIBILITY',
+          requiresReauth: attempt.requiresReauth,
+        };
+      }
+
+      const status: WheelStatusResponse = {
+        config: normalizeWheelConfig(json.config),
+        eligibility: json.eligibility as WheelEligibilityState,
+        freePlayBalance: Number(json.freePlayBalance ?? 0),
+        availableBalance: Number(json.availableBalance ?? 0),
+        referralBonusBalance: Number(json.referralBonusBalance ?? 0),
+        recentSpins: Array.isArray(json.recentSpins) ? json.recentSpins : [],
+        latestSpin: json.latestSpin || null,
+      };
+
+      const activeUserId = this.getCurrentUser()?.id;
+      if (targetId && activeUserId && targetId === activeUserId) {
+        const wallets = { ...this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS) };
+        const curW = wallets[targetId] || this.getWallet(targetId);
+        if (
+          Math.abs(Number(curW.freePlayBalance ?? 0) - status.freePlayBalance) > 0.005 ||
+          Math.abs(Number(curW.availableBalance ?? 0) - status.availableBalance) > 0.005 ||
+          Math.abs(Number(curW.referralBonusBalance ?? 0) - status.referralBonusBalance) > 0.005
+        ) {
+          wallets[targetId] = {
+            ...curW,
+            freePlayBalance: status.freePlayBalance,
+            availableBalance: status.availableBalance,
+            referralBonusBalance: status.referralBonusBalance,
+            lastUpdatedAt: new Date().toISOString(),
+          };
+          this.cache[STORAGE_KEYS.WALLETS] = wallets;
+          this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
+          window.dispatchEvent(
+            new CustomEvent('aetherpay_state_changed', {
+              detail: { key: 'wallet_updated', tables: ['wallets'] },
+            })
+          );
+        }
+      }
+
+      return { success: true, status };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Unable to load Wheel of Luck status.' };
+    }
+  }
+
+  public async spinWheelOfLuck(
+    idempotencyKey?: string
+  ): Promise<{
+    success: boolean;
+    data?: WheelSpinResponse;
+    eligibility?: WheelEligibilityState;
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
+    try {
+      const activeUser = this.getCurrentUser();
+      const spinBody = JSON.stringify({
+        userId: activeUser?.id,
+        idempotencyKey: idempotencyKey || `wspin_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+      });
+      let attempt = await this.fetchWithAuthTokenRetry('/api/wheel/spin', (headers) => ({
+        method: 'POST',
+        headers: {
+          ...headers,
+          'x-api-route': '/api/wheel/spin',
+        },
+        body: spinBody,
+      }));
+      if (
+        !attempt.requiresReauth &&
+        !attempt.isTransientError &&
+        (isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText }) ||
+          (attempt.json && attempt.json.online === true && !attempt.json.eligibility))
+      ) {
+        attempt = await this.fetchWithAuthTokenRetry('/api/index?__api_path=%2Fapi%2Fwheel%2Fspin', (headers) => ({
+          method: 'POST',
+          headers: {
+            ...headers,
+            'x-api-route': '/api/wheel/spin',
+          },
+          body: spinBody,
+        }));
+      }
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success) {
+        return {
+          success: false,
+          error: formatWheelHttpError({
+            actionLabel: 'Wheel spin',
+            status: attempt.response?.status,
+            json: attempt.json,
+            contentType: attempt.contentType,
+            rawText: attempt.rawText,
+          }),
+          code: json?.code,
+          eligibility: json?.eligibility,
+          requiresReauth: attempt.requiresReauth,
+        };
+      }
+
+      const data = json as WheelSpinResponse;
+      if (activeUser?.id) {
+        const wallets = { ...this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS) };
+        const curW = wallets[activeUser.id] || this.getWallet(activeUser.id);
+        wallets[activeUser.id] = {
+          ...curW,
+          freePlayBalance: Number(data.freePlayBalance ?? curW.freePlayBalance ?? 0),
+          availableBalance: Number(data.availableBalance ?? curW.availableBalance ?? 0),
+          referralBonusBalance: Number(data.referralBonusBalance ?? curW.referralBonusBalance ?? 0),
+          lastUpdatedAt: new Date().toISOString(),
+        };
+        this.cache[STORAGE_KEYS.WALLETS] = wallets;
+        this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'wheel_spin_claimed', tables: ['wallets', 'wheel_spins', 'transactions'] },
+          })
+        );
+        void this.syncDelta();
+      }
+
+      return { success: true, data, eligibility: data.eligibility };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Unable to spin Wheel of Luck.' };
+    }
+  }
+
+  public async saveWheelOfLuckConfig(
+    wheelOfLuck: WheelOfLuckConfig
+  ): Promise<{
+    success: boolean;
+    wheelOfLuck?: WheelOfLuckConfig;
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
+    try {
+      const activeUser = this.getCurrentUser();
+      const normalized = normalizeWheelConfig(wheelOfLuck);
+      const attempt = await this.fetchWithAuthTokenRetry('/api/admin/wheel-config', (headers) => ({
+        method: 'POST',
+        headers: {
+          ...headers,
+          'x-api-route': '/api/admin/wheel-config',
+        },
+        body: JSON.stringify({
+          wheelOfLuck: normalized,
+          actingUserId: activeUser?.id,
+        }),
+      }));
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success) {
+        return {
+          success: false,
+          error: json?.error || `Failed to save Wheel of Luck settings (${attempt.response?.status || 401})`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
+      }
+      const current = this.getAppConfig();
+      const nextCfg: AppConfig = {
+        ...current,
+        wheelOfLuck: normalizeWheelConfig(json.wheelOfLuck || normalized),
+      };
+      this.cache[STORAGE_KEYS.CONFIG] = nextCfg;
+      this.saveToLocalStorage(STORAGE_KEYS.CONFIG, nextCfg);
+      window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.CONFIG } }));
+      return { success: true, wheelOfLuck: nextCfg.wheelOfLuck };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to save Wheel of Luck settings.' };
+    }
+  }
+
+  public async transferGameCreditsAsync(params: {
+    gameAccountId?: string;
+    gameCatalogId?: string;
+    direction: 'load' | 'unload';
+    source?: 'free_play' | 'referral_bonus' | 'wallet_cash';
+    amount: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    freePlayReturn?: number;
+    cashReturn?: number;
+    wallet?: { availableBalance: number; referralBonusBalance: number; freePlayBalance: number };
+    gameAccount?: GameAccount;
+    staffMessage?: ChatMessage;
+    staffNotificationDelivered?: boolean;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
+    try {
+      const activeUser = this.getCurrentUser();
+      const attempt = await this.fetchWithAuthTokenRetry('/api/game-accounts/transfer', (headers) => ({
+        method: 'POST',
+        headers: {
+          ...headers,
+          'x-api-route': '/api/game-accounts/transfer',
+        },
+        body: JSON.stringify({
+          userId: activeUser?.id,
+          gameAccountId: params.gameAccountId,
+          gameCatalogId: params.gameCatalogId,
+          direction: params.direction,
+          source: params.source || 'wallet_cash',
+          amount: params.amount,
+        }),
+      }));
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success) {
+        return {
+          success: false,
+          message: json?.error || `Game credit transfer failed (${attempt.response?.status || 500})`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
+      }
+
+      if (activeUser?.id && json.wallet) {
+        const wallets = { ...this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS) };
+        const curW = wallets[activeUser.id] || this.getWallet(activeUser.id);
+        wallets[activeUser.id] = {
+          ...curW,
+          availableBalance: Number(json.wallet.availableBalance ?? curW.availableBalance ?? 0),
+          referralBonusBalance: Number(json.wallet.referralBonusBalance ?? curW.referralBonusBalance ?? 0),
+          freePlayBalance: Number(json.wallet.freePlayBalance ?? curW.freePlayBalance ?? 0),
+          lastUpdatedAt: new Date().toISOString(),
+        };
+        this.cache[STORAGE_KEYS.WALLETS] = wallets;
+        this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
+      }
+
+      let updatedAccount: GameAccount | undefined;
+      if (json.gameAccount?.id) {
+        const allAccounts = [...this.getGameAccounts()];
+        const idx = allAccounts.findIndex((a) => a.id === json.gameAccount.id);
+        if (idx !== -1) {
+          updatedAccount = {
+            ...allAccounts[idx],
+            balance: Number(json.gameAccount.balance ?? allAccounts[idx].balance ?? 0),
+            freePlayBalance: Number(json.gameAccount.freePlayBalance ?? allAccounts[idx].freePlayBalance ?? 0),
+            updatedAt: new Date().toISOString(),
+          };
+          allAccounts[idx] = updatedAccount;
+          this.cache[STORAGE_KEYS.GAME_ACCOUNTS] = allAccounts;
+          this.saveToLocalStorage(STORAGE_KEYS.GAME_ACCOUNTS, allAccounts);
+        }
+      }
+
+      let staffMessage: ChatMessage | undefined;
+      if (json.staffMessage && json.staffMessage.id) {
+        const targetConvId = this.resolveCanonicalConvId(
+          json.staffMessage.conversation_id ||
+            json.staffMessage.conversationId ||
+            (activeUser?.id ? `conv_${activeUser.id}` : '')
+        );
+        if (targetConvId && activeUser?.id) {
+          this.getOrCreateConversationForCustomer(activeUser.id, activeUser.displayName || 'Customer');
+        }
+        const mappedMsg = mapDbMessageRowToChatMessage(json.staffMessage, targetConvId || undefined);
+        staffMessage = mappedMsg;
+        this.appendIncomingMessage(mappedMsg);
+
+        if (supabase && isSupabaseConfigured()) {
+          void realtimeChatHub.broadcastMessage(`chat_${mappedMsg.conversationId}`, mappedMsg);
+          void realtimeChatHub.broadcastMessage('room_admin_support', mappedMsg);
+        }
+
+        if (typeof window !== 'undefined') {
+          try {
+            webPushClient
+              .notifyRecipientViaPush({
+                recipientId: 'staff',
+                recipientRole: 'agent',
+                senderId: mappedMsg.senderId || activeUser?.id || '',
+                senderName: mappedMsg.senderName || activeUser?.displayName || 'Player',
+                messageText: mappedMsg.text || '',
+                conversationId: mappedMsg.conversationId,
+                messageId: mappedMsg.id,
+              })
+              .catch(() => {});
+          } catch {
+            // Non-blocking push alert
+          }
+        }
+      }
+
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: STORAGE_KEYS.GAME_ACCOUNTS, tables: ['wallets', 'game_accounts', 'transactions', 'conversations', 'messages'] },
+        })
+      );
+      void this.syncDelta();
+
+      const isManualBonusLoad =
+        params.direction === 'load' &&
+        (params.source === 'free_play' || params.source === 'referral_bonus');
+
+      const msg =
+        params.direction === 'load'
+          ? isManualBonusLoad
+            ? `Successfully loaded $${Number(params.amount).toFixed(2)} to ${updatedAccount?.gameName || 'game account'}! Support has been notified to confirm it on your game.`
+            : `Successfully loaded $${Number(params.amount).toFixed(2)} to ${updatedAccount?.gameName || 'game account'}!`
+          : `Unloaded $${Number(params.amount).toFixed(2)} from ${updatedAccount?.gameName || 'game account'} (Free-Play returned: $${Number(json.freePlayReturn ?? 0).toFixed(2)}, Cash returned: $${Number(json.cashReturn ?? 0).toFixed(2)}).`;
+
+      return {
+        success: true,
+        message: msg,
+        freePlayReturn: Number(json.freePlayReturn ?? 0),
+        cashReturn: Number(json.cashReturn ?? 0),
+        wallet: json.wallet,
+        gameAccount: updatedAccount,
+        staffMessage,
+        staffNotificationDelivered: Boolean(json.staffNotificationDelivered),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Unable to process game credit transfer.',
+      };
+    }
+  }
+
   // App Settings & Configuration
   public getAppConfig(): AppConfig {
     const cfg = this.load<AppConfig>(STORAGE_KEYS.CONFIG, INITIAL_CONFIG);
@@ -7940,6 +8388,11 @@ class DataService {
       cfg.referralProgram.refereeRewardValue === undefined
     ) {
       cfg.referralProgram = normalizedRef;
+      dirty = true;
+    }
+    const normalizedWheel = normalizeWheelConfig(cfg.wheelOfLuck);
+    if (!cfg.wheelOfLuck || !Array.isArray(cfg.wheelOfLuck.segments) || cfg.wheelOfLuck.segments.length === 0) {
+      cfg.wheelOfLuck = normalizedWheel;
       dirty = true;
     }
     if (!cfg.gatewaySimulator) {
@@ -8038,9 +8491,15 @@ class DataService {
   ): Promise<{
     response: Response | null;
     json: any;
+    rawText: string;
+    contentType: string;
     requiresReauth: boolean;
     isTransientError: boolean;
   }> {
+    const withAccept = (headers: Record<string, string>) => ({
+      Accept: 'application/json',
+      ...headers,
+    });
     const initial = await this.buildAuditAuthHeadersWithMeta(false);
     if (initial.requiresReauth) {
       return {
@@ -8050,12 +8509,14 @@ class DataService {
           code: 'TOKEN_EXPIRED',
           requiresReauth: true,
         },
+        rawText: '',
+        contentType: 'application/json',
         requiresReauth: true,
         isTransientError: false,
       };
     }
 
-    let res = await fetch(url, buildInit(initial.headers));
+    let res = await fetch(url, buildInit(withAccept(initial.headers)));
     if (res.status === 401) {
       const refreshed = await this.buildAuditAuthHeadersWithMeta(true, initial.token);
       if (refreshed.requiresReauth) {
@@ -8066,6 +8527,8 @@ class DataService {
             code: 'TOKEN_EXPIRED',
             requiresReauth: true,
           },
+          rawText: '',
+          contentType: res.headers.get('content-type') || '',
           requiresReauth: true,
           isTransientError: false,
         };
@@ -8077,20 +8540,33 @@ class DataService {
             error: refreshed.error || 'Temporary network error refreshing authentication. Please retry.',
             code: 'TOKEN_REFRESH_FAILED',
           },
+          rawText: '',
+          contentType: res.headers.get('content-type') || '',
           requiresReauth: false,
           isTransientError: true,
         };
       }
       if (refreshed.token) {
-        res = await fetch(url, buildInit(refreshed.headers));
+        res = await fetch(url, buildInit(withAccept(refreshed.headers)));
       }
     }
 
-    const json = await res.json().catch(() => null);
+    const contentType = res.headers.get('content-type') || '';
+    const rawText = await res.text().catch(() => '');
+    let json: any = null;
+    if (rawText && rawText.trim()) {
+      try {
+        json = JSON.parse(rawText);
+      } catch {
+        json = null;
+      }
+    }
     const requiresReauth = res.status === 401 && json?.code === 'TOKEN_EXPIRED';
     return {
       response: res,
       json,
+      rawText,
+      contentType,
       requiresReauth,
       isTransientError: false,
     };

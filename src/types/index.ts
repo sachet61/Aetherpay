@@ -25,6 +25,9 @@ export type TransactionType =
   | 'withdrawal_hold'
   | 'withdrawal_release'
   | 'bonus'
+  | 'free_play_bonus'
+  | 'game_load'
+  | 'game_redeem'
   | 'referral_reward'
   | 'adjustment';
 
@@ -53,6 +56,7 @@ export interface UserWallet {
   currency: string;
   availableBalance: number; // Withdrawable cash balance (winnings)
   referralBonusBalance: number; // Promotional referral funds (non-cashable, game load only)
+  freePlayBalance?: number; // Wheel of Luck non-cashable free-play funds (game load only)
   reservedBalance: number;
   pendingDepositBalance: number;
   registeredPaymentMethod?: PaymentMethodType;
@@ -197,6 +201,7 @@ export interface GameAccount {
   gameUrl: string;
   status: GameAccountStatus;
   balance: number; // Game credits loaded on this specific game
+  freePlayBalance?: number; // Non-cashable free-play portion loaded on this game
   requestType?: 'new_id_request' | 'password_reset_request';
   notes?: string;
   assignedByAgentId?: string;

@@ -22,6 +22,7 @@ import {
   ShieldCheck,
   Send,
   ArrowDownToLine,
+  ArrowUpFromLine,
   Wallet,
   Coins,
 } from 'lucide-react';
@@ -67,15 +68,44 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
 
   const [revealedPasswords, setRevealedPasswords] = useState<Record<string, boolean>>({});
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  const [notificationMsg, setNotificationMsg] = useState<{ text: string; type: 'success' | 'info' } | null>(null);
+  const [notificationMsg, setNotificationMsg] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [showRequestConfirmModal, setShowRequestConfirmModal] = useState<GameCatalogItem | null>(null);
   const [showResetConfirmModal, setShowResetConfirmModal] = useState<GameAccount | null>(null);
   const [loadFundsAccount, setLoadFundsAccount] = useState<GameAccount | null>(null);
   const [loadAmount, setLoadAmount] = useState<string>('50');
-  const [fundingSource, setFundingSource] = useState<'wallet_cash' | 'referral_bonus'>(
-    (wallet.referralBonusBalance || 0) > 0 ? 'referral_bonus' : 'wallet_cash'
+  const [fundingSource, setFundingSource] = useState<'free_play' | 'referral_bonus' | 'wallet_cash'>(() =>
+    (wallet.freePlayBalance || 0) > 0
+      ? 'free_play'
+      : (wallet.referralBonusBalance || 0) > 0
+      ? 'referral_bonus'
+      : 'wallet_cash'
   );
+  const [unloadAccount, setUnloadAccount] = useState<GameAccount | null>(null);
+  const [unloadAmount, setUnloadAmount] = useState<string>('0');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const openLoadFundsModal = (account: GameAccount) => {
+    const defaultSource: 'free_play' | 'referral_bonus' | 'wallet_cash' =
+      (wallet.freePlayBalance || 0) > 0
+        ? 'free_play'
+        : (wallet.referralBonusBalance || 0) > 0
+        ? 'referral_bonus'
+        : 'wallet_cash';
+    const defaultAvail =
+      defaultSource === 'free_play'
+        ? wallet.freePlayBalance || 0
+        : defaultSource === 'referral_bonus'
+        ? wallet.referralBonusBalance || 0
+        : wallet.availableBalance;
+    setFundingSource(defaultSource);
+    setLoadAmount(defaultAvail > 0 ? String(Math.min(defaultAvail, 50)) : '10');
+    setLoadFundsAccount(account);
+  };
+
+  const openUnloadModal = (account: GameAccount) => {
+    setUnloadAccount(account);
+    setUnloadAmount(String(Number((account.balance || 0).toFixed(2))));
+  };
 
   const togglePasswordVisibility = (accountId: string) => {
     setRevealedPasswords((prev) => ({
@@ -142,35 +172,67 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
     }, 400);
   };
 
-  const handleConfirmLoadFunds = () => {
+  const handleConfirmLoadFunds = async () => {
     if (!loadFundsAccount) return;
-    const parsedAmt = parseFloat(loadAmount) || 0;
+    const parsedAmt = Number((parseFloat(loadAmount) || 0).toFixed(2));
     if (parsedAmt <= 0) {
-      setNotificationMsg({ text: 'Please enter a valid amount to load to game.', type: 'info' });
+      setNotificationMsg({ text: 'Please enter a valid amount greater than $0.00 to load to game.', type: 'error' });
       return;
     }
 
     setIsSubmitting(true);
-    setTimeout(() => {
-      const res = dataService.loadFundsToGame({
-        customerId: currentUser.id,
-        customerName: currentUser.displayName,
+    try {
+      const res = await dataService.transferGameCreditsAsync({
+        gameAccountId: loadFundsAccount.id,
         gameCatalogId: loadFundsAccount.gameCatalogId,
+        direction: 'load',
+        source: fundingSource,
         amount: parsedAmt,
-        fundingSource,
       });
 
-      setIsSubmitting(false);
-      setLoadFundsAccount(null);
+      setPlayerAccounts(dataService.getGameAccounts(currentUser.id));
 
       if (res.success) {
+        setLoadFundsAccount(null);
         setNotificationMsg({ text: res.message, type: 'success' });
-        setTimeout(() => setNotificationMsg(null), 5000);
+        setTimeout(() => setNotificationMsg(null), 5500);
       } else {
-        setNotificationMsg({ text: res.message, type: 'info' });
-        setTimeout(() => setNotificationMsg(null), 4000);
+        setNotificationMsg({ text: res.message, type: 'error' });
       }
-    }, 400);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleConfirmUnloadFunds = async () => {
+    if (!unloadAccount) return;
+    const parsedAmt = Number((parseFloat(unloadAmount) || 0).toFixed(2));
+    if (parsedAmt <= 0) {
+      setNotificationMsg({ text: 'Please enter a valid amount greater than $0.00 to unload.', type: 'error' });
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await dataService.transferGameCreditsAsync({
+        gameAccountId: unloadAccount.id,
+        gameCatalogId: unloadAccount.gameCatalogId,
+        direction: 'unload',
+        amount: parsedAmt,
+      });
+
+      setPlayerAccounts(dataService.getGameAccounts(currentUser.id));
+
+      if (res.success) {
+        setUnloadAccount(null);
+        setNotificationMsg({ text: res.message, type: 'success' });
+        setTimeout(() => setNotificationMsg(null), 6000);
+      } else {
+        setNotificationMsg({ text: res.message, type: 'error' });
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -179,7 +241,7 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Gaming IDs &amp; Game Balances</h1>
           <p className="text-xs text-slate-400 mt-1">
-            Official games catalog managed by Admin. Load referral bonuses or wallet cash directly to your Game IDs.
+            Official games catalog managed by Admin. Load Wheel Free-Play, referral bonuses, or wallet cash directly to your Game IDs.
           </p>
         </div>
 
@@ -192,15 +254,51 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
         </button>
       </div>
 
+      {((wallet.freePlayBalance || 0) > 0 || (wallet.referralBonusBalance || 0) > 0) && (
+        <div className="p-4 rounded-2xl border border-amber-500/30 bg-gradient-to-r from-amber-950/40 via-slate-900 to-indigo-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300 shrink-0">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-xs font-bold text-white">Promotional Free-Play &amp; Bonus Credits Available</div>
+              <p className="text-[11px] text-slate-300 mt-0.5">
+                Load your non-cashable promotional credits into any active Gaming ID below. Tracked Free-Play credits return to your Free-Play Balance when unloaded.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 shrink-0 flex-wrap">
+            {(wallet.freePlayBalance || 0) > 0 && (
+              <div className="px-3 py-1.5 rounded-xl bg-slate-950/90 border border-amber-500/30">
+                <div className="text-[10px] text-amber-300 font-semibold uppercase tracking-wider">Free-Play (Wheel)</div>
+                <div className="text-sm font-bold font-mono text-white tabular-nums">${(wallet.freePlayBalance || 0).toFixed(2)}</div>
+              </div>
+            )}
+            {(wallet.referralBonusBalance || 0) > 0 && (
+              <div className="px-3 py-1.5 rounded-xl bg-slate-950/90 border border-indigo-500/30">
+                <div className="text-[10px] text-indigo-300 font-semibold uppercase tracking-wider">Referral Bonus</div>
+                <div className="text-sm font-bold font-mono text-white tabular-nums">${(wallet.referralBonusBalance || 0).toFixed(2)}</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {notificationMsg && (
         <div
           className={`p-3.5 rounded-xl border text-xs flex items-center gap-2 animate-in fade-in duration-200 ${
             notificationMsg.type === 'success'
               ? 'bg-emerald-950/60 border-emerald-800 text-emerald-300'
+              : notificationMsg.type === 'error'
+              ? 'bg-rose-950/60 border-rose-800 text-rose-300'
               : 'bg-indigo-950/60 border-indigo-800 text-indigo-300'
           }`}
         >
-          <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+          {notificationMsg.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+          )}
           <span>{notificationMsg.text}</span>
         </div>
       )}
@@ -354,25 +452,38 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
                     </div>
 
                     {/* Game Account Balance Display */}
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-800/80 bg-slate-900/60 -mx-3.5 -mb-3.5 p-3 rounded-b-xl">
-                      <div className="flex items-center gap-1.5 text-slate-300">
-                        <Coins className="w-3.5 h-3.5 text-amber-400" />
-                        <span>Game Credits:</span>
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80 bg-slate-900/60 -mx-3.5 -mb-3.5 p-3 rounded-b-xl">
+                      <div>
+                        <div className="flex items-center gap-1.5 text-slate-300">
+                          <Coins className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Game Credits:</span>
+                          <span className="font-mono font-bold text-amber-400 text-sm tabular-nums">
+                            ${(account.balance || 0).toFixed(2)}
+                          </span>
+                        </div>
+                        {(account.freePlayBalance || 0) > 0 && (
+                          <div className="text-[10px] font-mono text-amber-300/90 mt-0.5">
+                            Includes Free-Play: ${(account.freePlayBalance || 0).toFixed(2)}
+                          </div>
+                        )}
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono font-bold text-amber-400 text-sm tabular-nums">
-                          ${(account.balance || 0).toFixed(2)}
-                        </span>
+                      <div className="flex items-center gap-1.5">
                         <button
-                          onClick={() => {
-                            setLoadFundsAccount(account);
-                            setFundingSource((wallet.referralBonusBalance || 0) > 0 ? 'referral_bonus' : 'wallet_cash');
-                          }}
+                          onClick={() => openLoadFundsModal(account)}
                           className="px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-[11px] flex items-center gap-1 shadow-sm"
                         >
                           <ArrowDownToLine className="w-3 h-3" />
                           <span>Load Funds</span>
                         </button>
+                        {(account.balance || 0) > 0 && (
+                          <button
+                            onClick={() => openUnloadModal(account)}
+                            className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 font-medium text-[11px] flex items-center gap-1 shadow-sm"
+                          >
+                            <ArrowUpFromLine className="w-3 h-3" />
+                            <span>Unload</span>
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -436,17 +547,23 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
                 </div>
 
                 {hasActiveCredentials && account ? (
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <button
-                      onClick={() => {
-                        setLoadFundsAccount(account);
-                        setFundingSource((wallet.referralBonusBalance || 0) > 0 ? 'referral_bonus' : 'wallet_cash');
-                      }}
+                      onClick={() => openLoadFundsModal(account)}
                       className="px-2.5 py-1.5 rounded-lg bg-indigo-600/90 hover:bg-indigo-600 text-white text-xs font-semibold flex items-center gap-1 transition-colors"
                     >
                       <ArrowDownToLine className="w-3.5 h-3.5" />
                       <span>Top-Up Game</span>
                     </button>
+                    {(account.balance || 0) > 0 && (
+                      <button
+                        onClick={() => openUnloadModal(account)}
+                        className="px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-emerald-300 border border-emerald-800/50 text-xs font-semibold flex items-center gap-1 transition-colors"
+                      >
+                        <ArrowUpFromLine className="w-3.5 h-3.5" />
+                        <span>Unload</span>
+                      </button>
+                    )}
                     <button
                       onClick={() => setShowResetConfirmModal(account)}
                       className="px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-amber-400 border border-slate-800 text-xs font-medium flex items-center gap-1 transition-colors"
@@ -591,16 +708,16 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
             className="fixed inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => setLoadFundsAccount(null)}
+            onClick={() => !isSubmitting && setLoadFundsAccount(null)}
           />
-          <div className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
+          <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <ArrowDownToLine className="w-4 h-4 text-emerald-400" />
                 <span>Load Funds to {loadFundsAccount.gameName}</span>
               </h3>
               <button
-                onClick={() => setLoadFundsAccount(null)}
+                onClick={() => !isSubmitting && setLoadFundsAccount(null)}
                 className="text-xs text-slate-400 hover:text-white"
               >
                 Cancel
@@ -615,10 +732,39 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
             {/* Funding Source Selector */}
             <div className="space-y-2">
               <label className="text-xs font-semibold text-slate-300">Choose Funding Source</label>
-              <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                 <button
                   type="button"
-                  onClick={() => setFundingSource('referral_bonus')}
+                  onClick={() => {
+                    setFundingSource('free_play');
+                    if ((wallet.freePlayBalance || 0) > 0) {
+                      setLoadAmount(String(wallet.freePlayBalance || 0));
+                    }
+                  }}
+                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all ${
+                    fundingSource === 'free_play'
+                      ? 'bg-amber-950/70 border-amber-500 text-white'
+                      : 'bg-slate-950/60 border-slate-800 text-slate-400'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 font-semibold text-amber-300">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Free-Play (Wheel)</span>
+                  </div>
+                  <div className="text-[11px] font-mono text-emerald-400 font-bold mt-1">
+                    Avail: ${(wallet.freePlayBalance || 0).toFixed(2)}
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">Game-only promotional</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFundingSource('referral_bonus');
+                    if ((wallet.referralBonusBalance || 0) > 0) {
+                      setLoadAmount(String(wallet.referralBonusBalance || 0));
+                    }
+                  }}
                   className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all ${
                     fundingSource === 'referral_bonus'
                       ? 'bg-indigo-950/80 border-indigo-500 text-white'
@@ -664,7 +810,9 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
                   type="button"
                   onClick={() => {
                     const max =
-                      fundingSource === 'referral_bonus'
+                      fundingSource === 'free_play'
+                        ? wallet.freePlayBalance || 0
+                        : fundingSource === 'referral_bonus'
                         ? wallet.referralBonusBalance || 0
                         : wallet.availableBalance;
                     setLoadAmount(String(max));
@@ -679,7 +827,7 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
                 <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-400">$</span>
                 <input
                   type="number"
-                  min="5"
+                  min="1"
                   step="any"
                   value={loadAmount}
                   onChange={(e) => setLoadAmount(e.target.value)}
@@ -692,8 +840,9 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
             <div className="flex items-center gap-3 pt-2">
               <button
                 type="button"
+                disabled={isSubmitting}
                 onClick={() => setLoadFundsAccount(null)}
-                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition-colors"
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition-colors"
               >
                 Cancel
               </button>
@@ -703,7 +852,96 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
                 onClick={handleConfirmLoadFunds}
                 className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs transition-colors shadow-lg shadow-emerald-600/20"
               >
-                {isSubmitting ? 'Loading Game...' : `Load $${parseFloat(loadAmount) || 0} to Game`}
+                {isSubmitting ? 'Loading Game...' : `Load $${(parseFloat(loadAmount) || 0).toFixed(2)} to Game`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal for Unloading Credits from Game */}
+      {unloadAccount && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm"
+            onClick={() => !isSubmitting && setUnloadAccount(null)}
+          />
+          <div className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <ArrowUpFromLine className="w-4 h-4 text-emerald-400" />
+                <span>Unload Credits from {unloadAccount.gameName}</span>
+              </h3>
+              <button
+                onClick={() => !isSubmitting && setUnloadAccount(null)}
+                className="text-xs text-slate-400 hover:text-white"
+              >
+                Cancel
+              </button>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Game Account:</span>
+                <span className="font-mono font-bold text-white">{unloadAccount.username}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Current Game Credits:</span>
+                <span className="font-mono font-bold text-amber-400 tabular-nums">${(unloadAccount.balance || 0).toFixed(2)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Tracked Free-Play Portion:</span>
+                <span className="font-mono font-bold text-amber-300 tabular-nums">${(unloadAccount.freePlayBalance || 0).toFixed(2)}</span>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-slate-300 leading-relaxed">
+              Tracked promotional Free-Play credits return to your <strong className="text-amber-300">Free-Play Balance</strong> first before any remaining cashable credits return to your <strong className="text-emerald-300">Wallet Cash</strong>.
+            </p>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs">
+                <label className="font-semibold text-slate-300">Amount to Unload ($ USD)</label>
+                <button
+                  type="button"
+                  onClick={() => setUnloadAmount(String(Number((unloadAccount.balance || 0).toFixed(2))))}
+                  className="text-[11px] text-indigo-400 hover:text-indigo-300 font-mono font-medium"
+                >
+                  Max (${(unloadAccount.balance || 0).toFixed(2)})
+                </button>
+              </div>
+
+              <div className="relative">
+                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-400">$</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  max={unloadAccount.balance || 0}
+                  step="any"
+                  value={unloadAmount}
+                  onChange={(e) => setUnloadAmount(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-2.5 text-sm font-bold text-white font-mono focus:outline-none focus:border-emerald-500"
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={() => setUnloadAccount(null)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={handleConfirmUnloadFunds}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs transition-colors shadow-lg shadow-emerald-600/20"
+              >
+                {isSubmitting ? 'Unloading...' : `Unload $${(parseFloat(unloadAmount) || 0).toFixed(2)}`}
               </button>
             </div>
           </div>

@@ -11,6 +11,7 @@ import handler, {
   handlePushStatus,
   handlePushNotify,
   sendVercelPushNotification,
+  resolveApiRequestUrl,
 } from './index.js';
 
 function createMockRes() {
@@ -906,6 +907,45 @@ test('sendVercelPushNotification prunes 410 Gone endpoints automatically', async
     row.data.map((s: any) => s.subscription.endpoint),
     [liveEndpoint]
   );
+});
+
+test('resolveApiRequestUrl preserves Vercel rewrite __api_path, x-api-route header, and direct subpaths', () => {
+  const viaQueryRewrite = resolveApiRequestUrl({
+    url: '/api?__api_path=%2Fapi%2Fwheel%2Fstatus&userId=u1',
+    query: { __api_path: '/api/wheel/status', userId: 'u1' },
+    headers: {},
+  });
+  assert.equal(viaQueryRewrite.url, '/api/wheel/status');
+  assert.equal(viaQueryRewrite.parsedUrl.searchParams.get('userId'), 'u1');
+  assert.equal(viaQueryRewrite.parsedUrl.searchParams.get('__api_path'), null);
+
+  const viaHeader = resolveApiRequestUrl({
+    url: '/api?userId=u2',
+    headers: { 'x-api-route': '/api/wheel/status' },
+  });
+  assert.equal(viaHeader.url, '/api/wheel/status');
+  assert.equal(viaHeader.parsedUrl.searchParams.get('userId'), 'u2');
+
+  const direct = resolveApiRequestUrl({
+    url: '/api/wheel/spin?idempotencyKey=k1',
+    headers: { 'x-api-route': '/api/should-not-override-direct' },
+  });
+  assert.equal(direct.url, '/api/wheel/spin');
+  assert.equal(direct.parsedUrl.searchParams.get('idempotencyKey'), 'k1');
+
+  const viaIndexRewrite = resolveApiRequestUrl({
+    url: '/api/index?__api_path=%2Fapi%2Fwheel%2Fstatus&userId=u3',
+    query: { __api_path: '/api/wheel/status', userId: 'u3' },
+    headers: {},
+  });
+  assert.equal(viaIndexRewrite.url, '/api/wheel/status');
+  assert.equal(viaIndexRewrite.parsedUrl.searchParams.get('userId'), 'u3');
+
+  const bareRoot = resolveApiRequestUrl({
+    url: '/api',
+    headers: {},
+  });
+  assert.equal(bareRoot.url, '/api');
 });
 
 

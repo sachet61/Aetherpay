@@ -33,7 +33,7 @@ const CATEGORY_LABELS: Record<UnifiedWalletActivityItem['category'], string> = {
   deposit: 'Deposit',
   withdrawal: 'Withdrawal',
   referral: 'Referral',
-  other: 'Adjustment',
+  other: 'Bonus / Transfer',
 };
 
 export const CustomerWallet: React.FC<CustomerWalletProps> = ({
@@ -224,6 +224,35 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
           <div className="text-[11px] text-slate-400 mt-2">Awaiting treasury review or chain confirmation</div>
         </div>
       </div>
+
+      {/* Wheel of Luck Free-Play Balance Strip */}
+      {(wallet.freePlayBalance || 0) > 0 && (
+        <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-950/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shrink-0">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-xs font-bold text-white flex items-center gap-2">
+                <span>Wheel of Luck Free-Play Balance</span>
+                <span className="font-mono text-emerald-400 font-extrabold">
+                  ${(wallet.freePlayBalance || 0).toFixed(2)}
+                </span>
+              </div>
+              <p className="text-[11px] text-emerald-200/75">
+                Non-cashable promotional credits. Load directly into any active Game ID to play.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigateTab('game_accounts')}
+            className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs whitespace-nowrap shrink-0 transition-colors"
+          >
+            Load Free-Play to Game
+          </button>
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="p-4 rounded-xl border border-slate-800 bg-[#0E1726] flex flex-col md:flex-row md:items-center justify-between gap-4">

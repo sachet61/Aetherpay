@@ -75,6 +75,7 @@ export function filterRealtimeRowsForUser(
     case 'transactions':
     case 'wallets':
     case 'game_accounts':
+    case 'wheel_spins':
       return rows.filter((r) => Boolean(r && r.customer_id === uid));
     case 'users':
       return rows.filter((r) => Boolean(r && r.id === uid));

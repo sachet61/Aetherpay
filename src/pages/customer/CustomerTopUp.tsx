@@ -62,7 +62,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     [currentUser.id]
   );
 
-  const [fundingMode, setFundingMode] = useState<'gateway_payment' | 'referral_rewards'>(
+  const [fundingMode, setFundingMode] = useState<'gateway_payment' | 'free_play' | 'referral_rewards'>(
     () => initialDraft?.fundingMode || 'gateway_payment'
   );
 
@@ -84,6 +84,9 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     () => initialDraft?.selectedCryptoCoin || 'USDT'
   );
   const [amount, setAmount] = useState<string>(prefilledAmount ? String(prefilledAmount) : '100');
+  const [freePlayAmount, setFreePlayAmount] = useState<string>(() =>
+    (wallet.freePlayBalance || 0) > 0 ? String(Number((wallet.freePlayBalance || 0).toFixed(2))) : '5'
+  );
   const [referralAmount, setReferralAmount] = useState<string>(
     () =>
       initialDraft?.referralAmount ||
@@ -118,7 +121,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
   useEffect(() => {
     if (typeof window === 'undefined') return;
     saveTopUpDraft(window.sessionStorage, currentUser.id, {
-      fundingMode,
+      fundingMode: fundingMode === 'free_play' ? 'gateway_payment' : fundingMode,
       selectedGameCatalogId,
       selectedMethodType,
       selectedCryptoCoin,
@@ -147,7 +150,8 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     config.paymentMethods[0];
 
   const parsedAmount = parseFloat(amount) || 0;
-  const parsedRefAmount = parseFloat(referralAmount) || 0;
+  const parsedFreePlayAmount = Number((parseFloat(freePlayAmount) || 0).toFixed(2));
+  const parsedRefAmount = Number((parseFloat(referralAmount) || 0).toFixed(2));
 
   // Dynamic Bonus Calculation:
   // Via Link: 20%
@@ -287,12 +291,57 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
     setSuccessMessage(null);
 
-    // Branch A: Referral Rewards Load
+    // Branch A1: Wheel of Luck Free-Play Load
+    if (fundingMode === 'free_play') {
+      if (parsedFreePlayAmount <= 0) {
+        setErrorMessage('Please enter a Free-Play credit amount greater than $0.00.');
+        return;
+      }
+      if (parsedFreePlayAmount > (wallet.freePlayBalance || 0)) {
+        setErrorMessage(
+          `Insufficient Free-Play balance ($${(wallet.freePlayBalance || 0).toFixed(2)}).`
+        );
+        return;
+      }
+      if (!targetAccount || targetAccount.status !== 'active') {
+        setErrorMessage(
+          `An active Gaming ID for "${targetGameName}" is required before loading Free-Play credits. Request or activate it in Gaming IDs first.`
+        );
+        return;
+      }
+
+      setIsSubmitting(true);
+      try {
+        const res = await dataService.transferGameCreditsAsync({
+          gameAccountId: targetAccount.id,
+          gameCatalogId: selectedGameCatalogId,
+          direction: 'load',
+          source: 'free_play',
+          amount: parsedFreePlayAmount,
+        });
+        if (res.success) {
+          setSuccessMessage(
+            `Free-Play Loaded! $${parsedFreePlayAmount.toFixed(2)} loaded to ${targetGameName} (${targetAccount.username}). Support has been notified for manual game confirmation.`
+          );
+          const remainingFp = Number(res.wallet?.freePlayBalance ?? Math.max(0, (wallet.freePlayBalance || 0) - parsedFreePlayAmount));
+          setFreePlayAmount(remainingFp > 0 ? String(Number(remainingFp.toFixed(2))) : '0');
+        } else {
+          setErrorMessage(res.message);
+        }
+      } catch (err: any) {
+        setErrorMessage(err?.message || 'Error processing Free-Play load.');
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
+    // Branch A2: Referral Rewards Load
     if (fundingMode === 'referral_rewards') {
       if (parsedRefAmount <= 0) {
         setErrorMessage('Please enter an amount of referral bonus credits to load to the game.');
@@ -304,30 +353,34 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
         );
         return;
       }
+      if (!targetAccount || targetAccount.status !== 'active') {
+        setErrorMessage(
+          `An active Gaming ID for "${targetGameName}" is required before loading referral bonus credits.`
+        );
+        return;
+      }
 
       setIsSubmitting(true);
-      setTimeout(() => {
-        try {
-          const res = dataService.loadFundsToGame({
-            customerId: currentUser.id,
-            customerName: currentUser.displayName,
-            gameCatalogId: selectedGameCatalogId,
-            amount: parsedRefAmount,
-            fundingSource: 'referral_bonus',
-          });
-          setIsSubmitting(false);
-          if (res.success) {
-            setSuccessMessage(
-              `Referral Bonus Loaded! $${parsedRefAmount.toFixed(2)} loaded directly to ${targetGameName}.`
-            );
-          } else {
-            setErrorMessage(res.message);
-          }
-        } catch (err: any) {
-          setIsSubmitting(false);
-          setErrorMessage(err.message || 'Error processing referral top-up.');
+      try {
+        const res = await dataService.transferGameCreditsAsync({
+          gameAccountId: targetAccount.id,
+          gameCatalogId: selectedGameCatalogId,
+          direction: 'load',
+          source: 'referral_bonus',
+          amount: parsedRefAmount,
+        });
+        if (res.success) {
+          setSuccessMessage(
+            `Referral Bonus Loaded! $${parsedRefAmount.toFixed(2)} loaded to ${targetGameName} (${targetAccount.username}). Support has been notified for manual game confirmation.`
+          );
+        } else {
+          setErrorMessage(res.message);
         }
-      }, 500);
+      } catch (err: any) {
+        setErrorMessage(err?.message || 'Error processing referral top-up.');
+      } finally {
+        setIsSubmitting(false);
+      }
       return;
     }
 
@@ -422,10 +475,13 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
         </div>
 
         {/* Mode Switcher */}
-        <div className="flex items-center gap-1.5 p-1 bg-slate-900 border border-slate-800 rounded-xl w-fit">
+        <div className="flex flex-wrap items-center gap-1.5 p-1 bg-slate-900 border border-slate-800 rounded-xl w-fit max-w-full">
           <button
             type="button"
-            onClick={() => setFundingMode('gateway_payment')}
+            onClick={() => {
+              setFundingMode('gateway_payment');
+              setErrorMessage(null);
+            }}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               fundingMode === 'gateway_payment'
                 ? 'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 font-bold shadow-sm'
@@ -437,10 +493,29 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
 
           <button
             type="button"
-            onClick={() => setFundingMode('referral_rewards')}
+            onClick={() => {
+              setFundingMode('free_play');
+              setErrorMessage(null);
+            }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+              fundingMode === 'free_play'
+                ? 'bg-amber-500 text-slate-950 font-bold shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Zap className={`w-3.5 h-3.5 ${fundingMode === 'free_play' ? 'text-slate-950' : 'text-amber-300'}`} />
+            <span>Free-Play (${(wallet.freePlayBalance || 0).toFixed(2)})</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setFundingMode('referral_rewards');
+              setErrorMessage(null);
+            }}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
               fundingMode === 'referral_rewards'
-                ? 'bg-amber-600 text-white shadow-sm'
+                ? 'bg-indigo-600 text-white shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
@@ -584,12 +659,63 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
               </div>
             )}
 
-            {/* Direct Top-Up Workflow */}
-            {fundingMode !== 'gateway_payment' && (
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-slate-300">
-                  Referral Credits to Load to Game
-                </label>
+            {/* Direct Free-Play Top-Up Workflow */}
+            {fundingMode === 'free_play' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-xs">
+                  <label className="font-semibold text-slate-300">
+                    Wheel Free-Play Credits to Load to Game
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setFreePlayAmount(String(Number((wallet.freePlayBalance || 0).toFixed(2))))}
+                    className="text-[11px] font-mono font-semibold text-amber-300 hover:text-amber-200"
+                  >
+                    Max Available (${(wallet.freePlayBalance || 0).toFixed(2)})
+                  </button>
+                </div>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-base font-bold text-slate-400">$</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max={wallet.freePlayBalance || 0}
+                    step="any"
+                    value={freePlayAmount}
+                    onChange={(e) => setFreePlayAmount(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-3 text-lg font-bold text-white font-mono focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+                {(!targetAccount || targetAccount.status !== 'active') && (
+                  <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/50 text-[11px] text-amber-200 flex items-center justify-between gap-2">
+                    <span>Active Gaming ID required for {targetGameName} before loading Free-Play.</span>
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('game_accounts')}
+                      className="text-amber-300 font-semibold underline shrink-0"
+                    >
+                      Open Gaming IDs
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Direct Referral Bonus Top-Up Workflow */}
+            {fundingMode === 'referral_rewards' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-xs">
+                  <label className="font-semibold text-slate-300">
+                    Referral Credits to Load to Game
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setReferralAmount(String(Number((wallet.referralBonusBalance || 0).toFixed(2))))}
+                    className="text-[11px] font-mono font-semibold text-indigo-300 hover:text-indigo-200"
+                  >
+                    Max Available (${(wallet.referralBonusBalance || 0).toFixed(2)})
+                  </button>
+                </div>
                 <div className="relative">
                   <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-base font-bold text-slate-400">$</span>
                   <input
@@ -602,6 +728,18 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-3 text-lg font-bold text-white font-mono focus:outline-none focus:border-amber-400"
                   />
                 </div>
+                {(!targetAccount || targetAccount.status !== 'active') && (
+                  <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/50 text-[11px] text-amber-200 flex items-center justify-between gap-2">
+                    <span>Active Gaming ID required for {targetGameName} before loading referral bonus.</span>
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('game_accounts')}
+                      className="text-amber-300 font-semibold underline shrink-0"
+                    >
+                      Open Gaming IDs
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1004,7 +1142,11 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
               <ArrowDownToLine className="w-4 h-4" />
               <span>
                 {isSubmitting
-                  ? 'Submitting Proof to Admin...'
+                  ? fundingMode === 'gateway_payment'
+                    ? 'Submitting Proof to Admin...'
+                    : 'Transferring Credits to Game...'
+                  : fundingMode === 'free_play'
+                  ? `Load $${parsedFreePlayAmount.toFixed(2)} Free-Play to Game`
                   : fundingMode === 'referral_rewards'
                   ? `Load $${parsedRefAmount.toFixed(2)} Referral Bonus`
                   : 'Submit'}
@@ -1020,61 +1162,103 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Zap className="w-4 h-4 text-amber-400" />
-                <h2 className="text-sm font-bold text-white">Promotional Bonus Details</h2>
+                <h2 className="text-sm font-bold text-white">
+                  {fundingMode === 'free_play'
+                    ? 'Wheel Free-Play Transfer'
+                    : fundingMode === 'referral_rewards'
+                    ? 'Referral Bonus Transfer'
+                    : 'Promotional Bonus Details'}
+                </h2>
               </div>
-              <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] font-bold border border-emerald-500/30">
-                +{dynamicBonusPercent}% EXTRA
-              </span>
+              {fundingMode === 'gateway_payment' ? (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] font-bold border border-emerald-500/30">
+                  +{dynamicBonusPercent}% EXTRA
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-bold border border-amber-500/30">
+                  GAME-ONLY CREDIT
+                </span>
+              )}
             </div>
 
-            <div className="space-y-3 text-xs">
-              <div className="flex items-center justify-between text-slate-300">
-                <span>Game Platform</span>
-                <span className="font-semibold text-white">{targetGameName}</span>
-              </div>
+            {fundingMode === 'gateway_payment' ? (
+              <div className="space-y-3 text-xs">
+                <div className="flex items-center justify-between text-slate-300">
+                  <span>Game Platform</span>
+                  <span className="font-semibold text-white">{targetGameName}</span>
+                </div>
 
-              <div className="flex items-center justify-between text-slate-300">
-                <span>Payment Channel</span>
-                <span className="font-semibold text-amber-300">{currentMethod?.name}</span>
-              </div>
+                <div className="flex items-center justify-between text-slate-300">
+                  <span>Payment Channel</span>
+                  <span className="font-semibold text-amber-300">{currentMethod?.name}</span>
+                </div>
 
-              <div className="flex items-center justify-between text-slate-300">
-                <span>Promotional Bonus</span>
-                <span className="font-mono font-bold text-emerald-400">
-                  +{dynamicBonusPercent}% Extra Credits
-                </span>
-              </div>
+                <div className="flex items-center justify-between text-slate-300">
+                  <span>Promotional Bonus</span>
+                  <span className="font-mono font-bold text-emerald-400">
+                    +{dynamicBonusPercent}% Extra Credits
+                  </span>
+                </div>
 
-              <div className="flex items-center justify-between text-slate-300">
-                <span>Deposit Base Amount</span>
-                <span className="font-mono text-amber-300">
-                  {fundingMode === 'gateway_payment' ? 'Verified by Admin from Proof' : `$${parsedRefAmount.toFixed(2)}`}
-                </span>
-              </div>
+                <div className="flex items-center justify-between text-slate-300">
+                  <span>Deposit Base Amount</span>
+                  <span className="font-mono text-amber-300">
+                    Verified by Admin from Proof
+                  </span>
+                </div>
 
-              <div className="pt-3 border-t border-slate-800 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-xs font-bold text-white">Total Game Credits Loaded</div>
-                    <div className="text-[10px] text-slate-400">Direct game account credit</div>
+                <div className="pt-3 border-t border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-xs font-bold text-white">Total Game Credits Loaded</div>
+                      <div className="text-[10px] text-slate-400">Direct game account credit</div>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-sm font-bold font-mono text-emerald-400">
+                        Amount + {dynamicBonusPercent}% Bonus
+                      </span>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <span className="text-sm font-bold font-mono text-emerald-400">
-                      Amount + {dynamicBonusPercent}% Bonus
-                    </span>
+
+                  <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-400 space-y-1">
+                    <div className="font-semibold text-slate-200">How it works:</div>
+                    <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
+                      <li>Click link / scan QR / copy address to complete payment</li>
+                      <li>Upload your completed payment receipt screenshot</li>
+                      <li>Submit proof to agent/admin for instant verification and crediting</li>
+                    </ol>
                   </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3 text-xs">
+                <div className="flex items-center justify-between text-slate-300">
+                  <span>Game Platform</span>
+                  <span className="font-semibold text-white">{targetGameName}</span>
+                </div>
+
+                <div className="flex items-center justify-between text-slate-300">
+                  <span>Funding Source</span>
+                  <span className="font-semibold text-amber-300">
+                    {fundingMode === 'free_play' ? 'Wheel of Luck Free-Play' : 'Referral Bonus Wallet'}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between text-slate-300">
+                  <span>Transfer Amount</span>
+                  <span className="font-mono font-bold text-emerald-400">
+                    ${(fundingMode === 'free_play' ? parsedFreePlayAmount : parsedRefAmount).toFixed(2)}
+                  </span>
                 </div>
 
                 <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-400 space-y-1">
-                  <div className="font-semibold text-slate-200">How it works:</div>
-                  <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
-                    <li>Click link / scan QR / copy address to complete payment</li>
-                    <li>Upload your completed payment receipt screenshot</li>
-                    <li>Submit proof to agent/admin for instant verification and crediting</li>
-                  </ol>
+                  <div className="font-semibold text-slate-200">Free-Play &amp; Unload Policy:</div>
+                  <p className="leading-relaxed">
+                    Promotional credits load directly into your active Gaming ID at a 1:1 rate. Unloading returns tracked Free-Play credits back to your Free-Play Balance first before cashable balance.
+                  </p>
                 </div>
               </div>
-            </div>
+            )}
 
             {/* Anti-fraud info */}
             <div className="p-3.5 rounded-xl bg-slate-950 border border-amber-500/30 text-xs text-slate-300 space-y-1.5">
