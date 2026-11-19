@@ -12,12 +12,14 @@ interface PWAInstallButtonProps {
   currentUser?: UserProfile | null;
   className?: string;
   variant?: 'navbar' | 'banner' | 'compact';
+  showPushButton?: boolean;
 }
 
 export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
   currentUser,
   className = '',
   variant = 'navbar',
+  showPushButton = true,
 }) => {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstalled, setIsInstalled] = useState(false);
@@ -88,8 +90,9 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
 
   // If already running standalone and push permission is granted, we can render a subtle indicator or nothing
   const canInstall = !isInstalled && (!!deferredPrompt || isIOS);
+  const canShowPush = showPushButton && !!currentUser && pushStatus !== 'granted';
 
-  if (!canInstall && pushStatus === 'granted') {
+  if (!canInstall && !canShowPush) {
     return null;
   }
 
@@ -99,32 +102,36 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
         {/* PWA Install Button */}
         {canInstall && (
           <button
+            type="button"
             onClick={handleInstallClick}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-gradient-to-r from-amber-500/20 to-yellow-500/10 hover:from-amber-500/30 hover:to-yellow-500/20 text-amber-300 border border-amber-500/30 transition-all shadow-sm active:scale-95"
+            className="flex items-center gap-1.5 px-2.5 py-2 text-xs font-semibold rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 transition-colors active:scale-95 whitespace-nowrap shrink-0"
             title="Install Swift Sweeps app for home screen access and instant notifications"
+            aria-label="Install Swift Sweeps app"
           >
-            <Download className="w-3.5 h-3.5 text-amber-400" />
-            <span className="hidden sm:inline">Install App</span>
+            <Download className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="hidden 2xl:inline">Install App</span>
           </button>
         )}
 
         {/* Background Notifications Prompt (when permission not yet granted) */}
-        {currentUser && pushStatus !== 'granted' && (
+        {canShowPush && (
           <button
+            type="button"
             onClick={handleEnablePush}
             disabled={isSubscribingPush}
-            className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-indigo-950/80 hover:bg-indigo-900 text-indigo-300 border border-indigo-700/50 transition-all active:scale-95 disabled:opacity-50"
+            className="flex items-center gap-1.5 px-2.5 py-2 text-xs font-semibold rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-200 border border-indigo-700/50 transition-colors active:scale-95 disabled:opacity-50 whitespace-nowrap shrink-0"
             title="Enable Background Notifications to receive alerts when the browser is closed"
+            aria-label="Enable Background Alerts"
           >
             {pushSuccess ? (
               <>
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
-                <span className="text-emerald-300 hidden md:inline">Alerts On</span>
+                <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span className="text-emerald-300 hidden 2xl:inline">Alerts On</span>
               </>
             ) : (
               <>
-                <Bell className="w-3.5 h-3.5 text-indigo-400" />
-                <span className="hidden md:inline">
+                <Bell className="w-3.5 h-3.5 text-indigo-300 shrink-0" />
+                <span className="hidden 2xl:inline">
                   {isSubscribingPush ? 'Enabling...' : 'Background Alerts'}
                 </span>
               </>

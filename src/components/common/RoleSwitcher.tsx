@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { UserProfile, UserRole, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
 import { useVerificationResolution } from '../../hooks/useVerificationResolution';
@@ -31,6 +31,15 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const verificationUi = useVerificationResolution(currentUser);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen]);
 
   const activeWallet = wallet || dataService.getWallet(currentUser.id);
 
@@ -88,23 +97,19 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
   return (
     <div className="relative inline-block text-left z-50">
       <button
+        type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700/80 hover:border-slate-600 transition-colors text-xs font-medium text-slate-200 cursor-pointer"
+        aria-expanded={isOpen}
+        aria-haspopup="menu"
+        className="flex items-center gap-2 px-2.5 py-1.5 min-h-[36px] rounded-lg bg-[#0E1726] border border-slate-700/80 hover:border-slate-600 transition-colors text-xs font-medium text-slate-200 cursor-pointer whitespace-nowrap shrink-0"
         title="Account Details"
       >
         <span className="flex items-center gap-1.5">
-          <span className="relative flex h-2 w-2">
-            <span
-              className={`animate-ping absolute inline-flex h-full w-full rounded-full ${
-                isVerified ? 'bg-emerald-400' : 'bg-amber-400'
-              } opacity-75`}
-            ></span>
-            <span
-              className={`relative inline-flex rounded-full h-2 w-2 ${
-                isVerified ? 'bg-emerald-500' : 'bg-amber-500'
-              }`}
-            ></span>
-          </span>
+          <span
+            className={`inline-flex rounded-full h-2 w-2 shrink-0 ${
+              isVerified ? 'bg-emerald-500' : 'bg-amber-500'
+            }`}
+          />
           {currentUser.avatarUrl ? (
             <img
               src={currentUser.avatarUrl}
@@ -115,10 +120,10 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
           ) : (
             getRoleIcon(currentUser.role)
           )}
-          <span className="font-semibold text-slate-100">{currentUser.displayName.split(' ')[0]}</span>
+          <span className="font-semibold text-slate-100 max-w-[90px] truncate">{currentUser.displayName.split(' ')[0]}</span>
         </span>
         <ChevronDown
-          className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`}
+          className={`w-3.5 h-3.5 text-slate-400 transition-transform shrink-0 ${isOpen ? 'rotate-180' : ''}`}
         />
       </button>
 

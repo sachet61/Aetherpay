@@ -9,18 +9,13 @@ import {
   ArrowUpFromLine,
   Clock,
   MessageSquare,
-  TrendingUp,
   CheckCircle2,
   Users,
-  AlertCircle,
   ArrowRight,
-  Filter,
   Gamepad2,
   KeyRound,
   Shield,
   Headphones,
-  Settings,
-  FileSpreadsheet,
   RefreshCw,
   LogIn,
 } from 'lucide-react';
@@ -90,6 +85,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Metrics
   const pendingTopUps = topups.filter((t) => t.status === 'submitted' || t.status === 'verifying');
   const pendingWithdrawals = withdrawals.filter((w) => w.status === 'submitted' || w.status === 'processing');
+  const totalQueueCount = pendingTopUps.length + pendingWithdrawals.length;
   const unreadMessagesCount = conversations.reduce((sum, c) => sum + c.unreadCountStaff, 0);
   const completedVolume = topups
     .filter((t) => t.status === 'completed')
@@ -97,143 +93,190 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   return (
     <div className="space-y-6 max-w-6xl mx-auto pb-12">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-white tracking-tight">
-              {isAdmin ? 'Platform Administration Command' : 'Customer Support Command Desk'}
-            </h1>
-            <span
-              className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold flex items-center gap-1 ${
-                isAdmin
-                  ? 'bg-amber-950/60 text-amber-300 border border-amber-800/60'
-                  : 'bg-cyan-950/60 text-cyan-300 border border-cyan-800/60'
-              }`}
-            >
-              {isAdmin ? <Shield className="w-3 h-3 text-amber-400" /> : <Headphones className="w-3 h-3 text-cyan-400" />}
-              <span>{isAdmin ? 'Super Admin Privileges' : 'Customer Support Specialist'}</span>
-            </span>
-            <RealtimeSyncBadge />
+      {/* Hero Banner */}
+      <section
+        aria-label={isAdmin ? 'Admin Overview' : 'Customer Support Command Desk'}
+        className="rounded-2xl border border-slate-800/90 bg-gradient-to-br from-[#0F172A] via-[#0E1526] to-[#131B31] p-5 sm:p-6 shadow-lg"
+      >
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+          <div className="min-w-0 space-y-2.5">
+            {/* Role & System Status Badges */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={`inline-flex items-center gap-1.5 text-[11px] px-2.5 py-0.5 rounded-md font-semibold tracking-wide ${
+                  isAdmin
+                    ? 'bg-amber-500/10 text-amber-300 border border-amber-500/25'
+                    : 'bg-cyan-500/10 text-cyan-300 border border-cyan-500/25'
+                }`}
+              >
+                {isAdmin ? (
+                  <Shield className="w-3 h-3 text-amber-400 shrink-0" />
+                ) : (
+                  <Headphones className="w-3 h-3 text-cyan-400 shrink-0" />
+                )}
+                <span>{isAdmin ? 'Super Admin' : 'Support Specialist'}</span>
+              </span>
+
+              <RealtimeSyncBadge label="Live Sync" />
+
+              {totalQueueCount === 0 ? (
+                <span className="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-0.5 rounded-md font-medium bg-slate-800/80 text-slate-300 border border-slate-700/70 whitespace-nowrap">
+                  <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                  <span>All queues clear</span>
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-0.5 rounded-md font-medium bg-indigo-500/15 text-indigo-200 border border-indigo-500/35 tabular-nums whitespace-nowrap">
+                  <Clock className="w-3 h-3 text-indigo-300 shrink-0" />
+                  <span>
+                    {totalQueueCount} pending review{totalQueueCount === 1 ? '' : 's'}
+                  </span>
+                </span>
+              )}
+            </div>
+
+            <div>
+              <h1 className="text-2xl sm:text-[28px] font-bold text-white tracking-tight leading-tight">
+                {isAdmin ? 'Admin Overview' : 'Customer Support Command Desk'}
+              </h1>
+              <p className="text-sm text-slate-300/90 mt-1.5 max-w-2xl leading-relaxed">
+                {isAdmin
+                  ? 'Manage games, player access, requests, fees, and audit activity.'
+                  : 'Answer player tickets, fulfill game ID & password requests, and verify deposits.'}
+              </p>
+            </div>
           </div>
-          <p className="text-xs text-slate-400 mt-1">
-            {isAdmin
-              ? 'Full platform authority: Master game catalog, financial fees, audit logs, and operational queues.'
-              : 'Support operations: Answer player tickets, fulfill game ID & password requests, and verify deposits.'}
-          </p>
-        </div>
 
-        <div className="flex items-center gap-2">
-          {pendingGameRequests.length > 0 && (
-            <button
-              onClick={() => onNavigateTab('ops_game_credentials')}
-              className="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-amber-600/20"
-            >
-              <KeyRound className="w-3.5 h-3.5" />
-              <span>{pendingGameRequests.length} Game ID Request{pendingGameRequests.length > 1 ? 's' : ''}</span>
-            </button>
-          )}
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            {pendingGameRequests.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('ops_game_credentials')}
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs inline-flex items-center gap-2 transition-colors shadow-md shadow-amber-500/15 whitespace-nowrap shrink-0"
+              >
+                <KeyRound className="w-3.5 h-3.5 shrink-0" />
+                <span className="tabular-nums">
+                  {pendingGameRequests.length} Game ID Request{pendingGameRequests.length > 1 ? 's' : ''}
+                </span>
+              </button>
+            )}
 
-          <button
-            onClick={() => onNavigateTab('ops_requests')}
-            className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-indigo-600/20"
-          >
-            <span>Open Queue ({pendingTopUps.length + pendingWithdrawals.length})</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
+            {totalQueueCount === 0 ? (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('ops_requests')}
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800/90 hover:bg-slate-800 text-slate-200 hover:text-white border border-slate-700/80 hover:border-slate-600 font-medium text-xs inline-flex items-center gap-2 transition-colors whitespace-nowrap shrink-0"
+              >
+                <span>View Queue</span>
+                <ArrowRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('ops_requests')}
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs inline-flex items-center gap-2 transition-colors shadow-md shadow-indigo-600/20 whitespace-nowrap shrink-0"
+              >
+                <span className="tabular-nums">Open Queue ({totalQueueCount})</span>
+                <ArrowRight className="w-3.5 h-3.5 shrink-0" />
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      </section>
 
       {/* Role-Specific Quick Capabilities Banner */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
         {/* Capability 1: Game Credentials Desk */}
-        <div
+        <button
+          type="button"
           onClick={() => onNavigateTab('ops_game_credentials')}
-          className="cursor-pointer p-4 rounded-xl border border-slate-800 bg-slate-900/90 hover:border-indigo-500/50 transition-colors flex items-center gap-3.5"
+          className="text-left w-full cursor-pointer p-4 rounded-xl border border-slate-800 bg-slate-900/90 hover:border-indigo-500/50 transition-colors flex items-center gap-3.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/70"
         >
           <div className="w-10 h-10 rounded-lg bg-indigo-950 text-indigo-400 flex items-center justify-center shrink-0">
             <KeyRound className="w-5 h-5" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xs font-bold text-white">Game IDs &amp; Passwords</h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-bold text-white truncate">Game IDs &amp; Passwords</h3>
               {pendingGameRequests.length > 0 && (
-                <span className="text-[10px] font-bold text-amber-400 bg-amber-950 px-1.5 py-0.2 rounded border border-amber-800/60 font-mono">
+                <span className="text-[10px] font-bold text-amber-400 bg-amber-950 px-1.5 py-0.5 rounded border border-amber-800/60 font-mono tabular-nums shrink-0">
                   {pendingGameRequests.length} pending
                 </span>
               )}
             </div>
-            <p className="text-[11px] text-slate-400 truncate">
-              Customer Support assigns player login credentials
+            <p className="text-[11px] text-slate-400 truncate mt-0.5">
+              Assign player login credentials
             </p>
           </div>
-        </div>
+        </button>
 
         {/* Capability 2: Support Inbox */}
-        <div
+        <button
+          type="button"
           onClick={() => onNavigateTab('ops_chat')}
-          className="cursor-pointer p-4 rounded-xl border border-slate-800 bg-slate-900/90 hover:border-cyan-500/50 transition-colors flex items-center gap-3.5"
+          className="text-left w-full cursor-pointer p-4 rounded-xl border border-slate-800 bg-slate-900/90 hover:border-cyan-500/50 transition-colors flex items-center gap-3.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/70"
         >
           <div className="w-10 h-10 rounded-lg bg-cyan-950 text-cyan-400 flex items-center justify-center shrink-0">
             <MessageSquare className="w-5 h-5" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xs font-bold text-white">Live Support Inbox</h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-bold text-white truncate">Live Support Inbox</h3>
               {unreadMessagesCount > 0 && (
-                <span className="text-[10px] font-bold text-cyan-400 bg-cyan-950 px-1.5 py-0.2 rounded border border-cyan-800/60 font-mono">
+                <span className="text-[10px] font-bold text-cyan-400 bg-cyan-950 px-1.5 py-0.5 rounded border border-cyan-800/60 font-mono tabular-nums shrink-0">
                   {unreadMessagesCount} unread
                 </span>
               )}
             </div>
-            <p className="text-[11px] text-slate-400 truncate">
+            <p className="text-[11px] text-slate-400 truncate mt-0.5">
               Real-time messaging with players
             </p>
           </div>
-        </div>
+        </button>
 
         {/* Capability 3: Admin Game Catalog (or Queue if agent) */}
         {isAdmin ? (
-          <div
+          <button
+            type="button"
             onClick={() => onNavigateTab('ops_game_catalog')}
-            className="cursor-pointer p-4 rounded-xl border border-amber-900/40 bg-amber-950/20 hover:border-amber-500/50 transition-colors flex items-center gap-3.5"
+            className="text-left w-full cursor-pointer p-4 rounded-xl border border-amber-900/40 bg-amber-950/20 hover:border-amber-500/50 transition-colors flex items-center gap-3.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/70"
           >
             <div className="w-10 h-10 rounded-lg bg-amber-950 text-amber-400 flex items-center justify-center shrink-0">
               <Gamepad2 className="w-5 h-5" />
             </div>
             <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-bold text-amber-300">Master Game Catalog</h3>
-                <span className="text-[9px] font-mono text-amber-400 uppercase tracking-wider">Admin Only</span>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-bold text-amber-300 truncate">Game Catalog</h3>
               </div>
-              <p className="text-[11px] text-amber-200/70 truncate">
-                Configure {catalog.length} games shown to players
+              <p className="text-[11px] text-amber-200/75 truncate mt-0.5 tabular-nums">
+                Configure {catalog.length} active games
               </p>
             </div>
-          </div>
+          </button>
         ) : (
-          <div
+          <button
+            type="button"
             onClick={() => onNavigateTab('ops_requests')}
-            className="cursor-pointer p-4 rounded-xl border border-slate-800 bg-slate-900/90 hover:border-indigo-500/50 transition-colors flex items-center gap-3.5"
+            className="text-left w-full cursor-pointer p-4 rounded-xl border border-slate-800 bg-slate-900/90 hover:border-indigo-500/50 transition-colors flex items-center gap-3.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/70"
           >
             <div className="w-10 h-10 rounded-lg bg-indigo-950 text-indigo-400 flex items-center justify-center shrink-0">
               <ArrowDownToLine className="w-5 h-5" />
             </div>
             <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-bold text-white">Deposit &amp; Cashout Queue</h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-bold text-white truncate">Deposit &amp; Cashout Queue</h3>
               </div>
-              <p className="text-[11px] text-slate-400 truncate">
+              <p className="text-[11px] text-slate-400 truncate mt-0.5">
                 Verify payment proofs &amp; process cashouts
               </p>
             </div>
-          </div>
+          </button>
         )}
 
         {/* Capability 4: User Directory & Staff Role Governance */}
-        <div
+        <button
+          type="button"
           onClick={() => onNavigateTab('ops_users')}
-          className={`cursor-pointer p-4 rounded-xl border transition-colors flex items-center gap-3.5 ${
+          className={`text-left w-full cursor-pointer p-4 rounded-xl border transition-colors flex items-center gap-3.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/70 ${
             isAdmin
               ? 'border-amber-900/40 bg-amber-950/20 hover:border-amber-500/50'
               : 'border-slate-800 bg-slate-900/90 hover:border-cyan-500/50'
@@ -247,68 +290,69 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <Users className="w-5 h-5" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xs font-bold text-white">
-                {isAdmin ? 'Users & Governance' : 'User Directory'}
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-bold text-white truncate">
+                {isAdmin ? 'Users & Roles' : 'User Directory'}
               </h3>
-              <span
-                className={`text-[9px] font-mono px-1.5 py-0.2 rounded uppercase ${
-                  isAdmin ? 'text-amber-400 bg-amber-950/80' : 'text-cyan-400 bg-cyan-950/80'
-                }`}
-              >
-                {isAdmin ? 'Role Admin' : 'Read-Only'}
-              </span>
+              {!isAdmin && (
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded uppercase shrink-0 text-cyan-300 bg-cyan-950/80">
+                  Read-Only
+                </span>
+              )}
             </div>
-            <p className="text-[11px] text-slate-400 truncate">
+            <p className="text-[11px] text-slate-400 truncate mt-0.5">
               {isAdmin
-                ? 'Manage roles (Agent / Admin). Parent Admin locked.'
-                : 'Inspect customer profiles, balances & game IDs'}
+                ? 'Player accounts & role permissions'
+                : 'Inspect customer profiles & balances'}
             </p>
           </div>
-        </div>
+        </button>
       </div>
 
       {/* KPI Cards Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div
+        <button
+          type="button"
           onClick={() => onNavigateTab('ops_requests', { filter: 'topup' })}
-          className="cursor-pointer p-5 rounded-2xl border border-slate-800 bg-slate-900/90 shadow-md hover:border-indigo-500/50 transition-colors"
+          className="text-left w-full cursor-pointer p-5 rounded-2xl border border-slate-800 bg-slate-900/90 shadow-md hover:border-indigo-500/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/70"
         >
           <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
             <span>Pending Deposits</span>
-            <ArrowDownToLine className="w-4 h-4 text-indigo-400" />
+            <ArrowDownToLine className="w-4 h-4 text-indigo-400 shrink-0" />
           </div>
           <div className="text-3xl font-bold text-white font-mono tabular-nums">
             {pendingTopUps.length}
           </div>
-          <div className="text-[11px] text-indigo-400 mt-2 font-mono">
+          <div className="text-[11px] text-indigo-400 mt-2 font-mono tabular-nums">
             ${pendingTopUps.reduce((sum, r) => sum + r.amount, 0).toLocaleString()} awaiting verification
           </div>
-        </div>
+        </button>
 
-        <div
+        <button
+          type="button"
           onClick={() => onNavigateTab('ops_requests', { filter: 'withdrawal' })}
-          className="cursor-pointer p-5 rounded-2xl border border-slate-800 bg-slate-900/90 shadow-md hover:border-amber-500/50 transition-colors"
+          className="text-left w-full cursor-pointer p-5 rounded-2xl border border-slate-800 bg-slate-900/90 shadow-md hover:border-amber-500/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/70"
         >
           <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
             <span>Pending Cashouts</span>
-            <ArrowUpFromLine className="w-4 h-4 text-amber-400" />
+            <ArrowUpFromLine className="w-4 h-4 text-amber-400 shrink-0" />
           </div>
           <div className="text-3xl font-bold text-amber-400 font-mono tabular-nums">
             {pendingWithdrawals.length}
           </div>
-          <div className="text-[11px] text-amber-400 mt-2 font-mono">
+          <div className="text-[11px] text-amber-400 mt-2 font-mono tabular-nums">
             ${pendingWithdrawals.reduce((sum, r) => sum + r.amount, 0).toLocaleString()} reserved in vault
           </div>
-        </div>
+        </button>
 
-        <div
+        <button
+          type="button"
           onClick={() => onNavigateTab('ops_game_credentials')}
-          className="cursor-pointer p-5 rounded-2xl border border-slate-800 bg-slate-900/90 shadow-md hover:border-amber-500/50 transition-colors"
+          className="text-left w-full cursor-pointer p-5 rounded-2xl border border-slate-800 bg-slate-900/90 shadow-md hover:border-amber-500/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/70"
         >
           <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
             <span>Game ID Requests</span>
-            <KeyRound className="w-4 h-4 text-amber-400" />
+            <KeyRound className="w-4 h-4 text-amber-400 shrink-0" />
           </div>
           <div className="text-3xl font-bold text-amber-400 font-mono tabular-nums">
             {pendingGameRequests.length}
@@ -316,17 +360,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="text-[11px] text-slate-400 mt-2">
             Awaiting Customer Support assignment
           </div>
-        </div>
+        </button>
 
         <div className="p-5 rounded-2xl border border-slate-800 bg-slate-900/90 shadow-md">
           <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
             <span>Active Players</span>
-            <Users className="w-4 h-4 text-emerald-400" />
+            <Users className="w-4 h-4 text-emerald-400 shrink-0" />
           </div>
           <div className="text-3xl font-bold text-white font-mono tabular-nums">
             {users.length}
           </div>
-          <div className="text-[11px] text-emerald-400 mt-2 font-mono">
+          <div className="text-[11px] text-emerald-400 mt-2 font-mono tabular-nums">
             ${completedVolume.toLocaleString()} total deposit volume
           </div>
         </div>
