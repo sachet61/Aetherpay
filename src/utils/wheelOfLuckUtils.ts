@@ -806,3 +806,84 @@ export function buildGameBonusLoadStaffMessage(params: {
   };
 }
 
+export interface StickyWheelButtonState {
+  visible: boolean;
+  state: 'ready' | 'cooldown' | 'loading' | 'error';
+  tooltipLabel: 'Daily Wheel';
+  ariaLabel: string;
+  badgeText: string;
+  cooldownText: string | null;
+}
+
+export function buildStickyWheelButtonState(params: {
+  enabled: boolean;
+  uiState: WheelUiState;
+  remainingMs: number;
+}): StickyWheelButtonState {
+  if (!params.enabled) {
+    return {
+      visible: false,
+      state: 'cooldown',
+      tooltipLabel: 'Daily Wheel',
+      ariaLabel: 'Daily Wheel',
+      badgeText: '',
+      cooldownText: null,
+    };
+  }
+
+  if (params.uiState === 'eligible') {
+    return {
+      visible: true,
+      state: 'ready',
+      tooltipLabel: 'Daily Wheel',
+      ariaLabel: 'Daily Wheel — Spin ready',
+      badgeText: '1',
+      cooldownText: null,
+    };
+  }
+
+  if (params.uiState === 'cooldown' && params.remainingMs > 0) {
+    const cooldownText = formatCountdownDuration(params.remainingMs);
+    return {
+      visible: true,
+      state: 'cooldown',
+      tooltipLabel: 'Daily Wheel',
+      ariaLabel: `Daily Wheel — Cooldown ${cooldownText}`,
+      badgeText: '',
+      cooldownText,
+    };
+  }
+
+  if (params.uiState === 'error') {
+    return {
+      visible: true,
+      state: 'error',
+      tooltipLabel: 'Daily Wheel',
+      ariaLabel: 'Daily Wheel — Check status',
+      badgeText: '!',
+      cooldownText: null,
+    };
+  }
+
+  if (params.uiState === 'loading') {
+    return {
+      visible: true,
+      state: 'loading',
+      tooltipLabel: 'Daily Wheel',
+      ariaLabel: 'Daily Wheel — Checking availability',
+      badgeText: '',
+      cooldownText: null,
+    };
+  }
+
+  return {
+    visible: true,
+    state: 'cooldown',
+    tooltipLabel: 'Daily Wheel',
+    ariaLabel: 'Daily Wheel — Open Daily Wheel',
+    badgeText: '',
+    cooldownText: null,
+  };
+}
+
+

@@ -5,6 +5,7 @@ import {
   ROLLING_SPIN_COOLDOWN_MS,
   buildGameBonusLoadStaffMessage,
   buildLatestSpinCardViewModel,
+  buildStickyWheelButtonState,
   buildWheelWinPresentation,
   computeGameCreditUnloadSplit,
   computeSegmentProbabilities,
@@ -465,3 +466,44 @@ test('buildGameBonusLoadStaffMessage formats agent/admin confirmation messages o
     null
   );
 });
+
+test('buildStickyWheelButtonState keeps button visible in ready and cooldown states with accessible labels', () => {
+  const ready = buildStickyWheelButtonState({
+    enabled: true,
+    uiState: 'eligible',
+    remainingMs: 0,
+  });
+  assert.equal(ready.visible, true);
+  assert.equal(ready.state, 'ready');
+  assert.equal(ready.tooltipLabel, 'Daily Wheel');
+  assert.equal(ready.badgeText, '1');
+  assert.match(ready.ariaLabel, /Daily Wheel.*Spin ready/);
+
+  const cooldown = buildStickyWheelButtonState({
+    enabled: true,
+    uiState: 'cooldown',
+    remainingMs: 3661_000,
+  });
+  assert.equal(cooldown.visible, true);
+  assert.equal(cooldown.state, 'cooldown');
+  assert.equal(cooldown.badgeText, '');
+  assert.equal(cooldown.cooldownText, '01h 01m 01s');
+  assert.match(cooldown.ariaLabel, /Daily Wheel.*01h 01m 01s/);
+
+  const errState = buildStickyWheelButtonState({
+    enabled: true,
+    uiState: 'error',
+    remainingMs: 0,
+  });
+  assert.equal(errState.visible, true);
+  assert.equal(errState.state, 'error');
+  assert.equal(errState.badgeText, '!');
+
+  const disabled = buildStickyWheelButtonState({
+    enabled: false,
+    uiState: 'disabled',
+    remainingMs: 0,
+  });
+  assert.equal(disabled.visible, false);
+});
+

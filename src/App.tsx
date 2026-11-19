@@ -9,6 +9,8 @@ import { TopNavbar } from './components/layout/TopNavbar';
 import { CustomerMobileNav } from './components/layout/CustomerMobileNav';
 import { StaffMobileNav } from './components/layout/StaffMobileNav';
 import { LegalContent } from './components/common/LegalContent';
+import { WheelOfLuckModal } from './components/customer/WheelOfLuckModal';
+import { useWheelOfLuckStatus } from './hooks/useWheelOfLuckStatus';
 
 // Auth & Guest Landing
 import { AuthPage } from './pages/auth/AuthPage';
@@ -59,6 +61,7 @@ import {
 export default function App() {
   const { currentUser, wallet, hydrationState, switchUser, logout } = useDataService();
   const verificationUi = useVerificationResolution(currentUser);
+  const wheelOfLuck = useWheelOfLuckStatus(currentUser);
   const [bypassedHydrationUserId, setBypassedHydrationUserId] = useState<string | null>(null);
 
   const [currentHash, setCurrentHash] = useState<string>(window.location.hash);
@@ -405,7 +408,7 @@ export default function App() {
           isCustomerChatOpen
             ? 'h-viewport-dynamic bg-[#080E1D] overflow-hidden pb-0'
             : isCustomer
-            ? 'min-h-screen bg-[#0A0F1D] pb-32 sm:pb-28'
+            ? 'min-h-screen bg-[#0A0F1D] pb-36 sm:pb-28'
             : isStaffOpsChatTab
             ? isMobileChatActive
               ? 'h-viewport-dynamic bg-[#070D20] overflow-hidden pb-0'
@@ -660,12 +663,30 @@ export default function App() {
         </Suspense>
       </main>
 
-      {/* Persistent Android-Style Bottom Navigation for Customer (Hidden during full-screen support chat) */}
+      {/* Persistent Android-Style Bottom Navigation & Sticky Wheel of Luck for Customer (Hidden during full-screen support chat) */}
       {isCustomer && !isCustomerChatOpen && (
         <CustomerMobileNav
           activeTab={activeTab}
           onNavigateTab={handleNavigateTab}
           currentUser={currentUser}
+          wheelStickyState={wheelOfLuck.stickyWheelState}
+          onOpenWheel={wheelOfLuck.openWheelModal}
+        />
+      )}
+
+      {isCustomer && (
+        <WheelOfLuckModal
+          isOpen={wheelOfLuck.wheelModalOpen}
+          onClose={wheelOfLuck.closeWheelModal}
+          currentUser={currentUser}
+          wallet={activeWallet}
+          wheelStatus={wheelOfLuck.isRetryingWheel ? null : wheelOfLuck.wheelStatus}
+          statusFetchedAtMs={wheelOfLuck.wheelFetchedAtMs}
+          isLoadingStatus={wheelOfLuck.isLoadingWheel}
+          statusError={wheelOfLuck.wheelStatusError}
+          onStatusUpdated={wheelOfLuck.handleStatusUpdated}
+          onRefreshStatus={wheelOfLuck.refreshWheelStatus}
+          onNavigateTab={handleNavigateTab}
         />
       )}
 
