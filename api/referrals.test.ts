@@ -6,6 +6,7 @@ import {
   handlePatchVanityReferralCode,
   handlePostAdminReferralConfig,
   handlePostManualAssignReferral,
+  handlePostReconcileReferrals,
   handlePostReferralAttribute,
   handlePostReferralEvaluate,
   handlePostReviewReferral,
@@ -46,6 +47,7 @@ function createReferralMockEnv(seed?: {
   wallets?: any[];
   topups?: any[];
   awards?: any[];
+  transactions?: any[];
   appConfig?: any;
 }) {
   const db: Record<string, any[]> = {
@@ -53,7 +55,7 @@ function createReferralMockEnv(seed?: {
     wallets: [...(seed?.wallets || [])],
     topups: [...(seed?.topups || [])],
     referral_awards: [...(seed?.awards || [])],
-    transactions: [],
+    transactions: [...(seed?.transactions || [])],
     notifications: [],
     app_config: seed?.appConfig
       ? [{ id: 'main', data: seed.appConfig }]
@@ -143,25 +145,25 @@ function createReferralMockEnv(seed?: {
         return q;
       };
 
-      const wrapMutationChain = (rowsAffected: any[]) => ({
+      const wrapMutationChain = (rowsAffected: any[], err: any = null) => ({
         select() {
           return {
             async maybeSingle() {
-              return { data: rowsAffected[0] || null, error: null };
+              return { data: err ? null : rowsAffected[0] || null, error: err };
             },
             async single() {
-              return { data: rowsAffected[0] || null, error: null };
+              return { data: err ? null : rowsAffected[0] || null, error: err };
             },
             then(resolve: any) {
-              return resolve({ data: rowsAffected, error: null });
+              return resolve({ data: err ? null : rowsAffected, error: err });
             },
           };
         },
         catch() {
-          return Promise.resolve({ data: rowsAffected, error: null });
+          return Promise.resolve({ data: err ? null : rowsAffected, error: err });
         },
         then(resolve: any) {
-          return resolve({ data: rowsAffected, error: null });
+          return resolve({ data: err ? null : rowsAffected, error: err });
         },
       });
 
@@ -171,10 +173,25 @@ function createReferralMockEnv(seed?: {
         },
         insert(payload: any) {
           const arr = Array.isArray(payload) ? payload : [payload];
-          for (const item of arr) {
-            db[table].push({ ...item });
+          const uniqueTables = new Set(['transactions', 'referral_awards', 'wallets']);
+          const pkCol = table === 'wallets' ? 'customer_id' : 'id';
+          if (uniqueTables.has(table)) {
+            for (const item of arr) {
+              if (item?.[pkCol] && db[table].some((r) => r[pkCol] === item[pkCol])) {
+                return wrapMutationChain([], {
+                  code: '23505',
+                  message: `duplicate key value violates unique constraint "${table}_pkey"`,
+                });
+              }
+            }
           }
-          return wrapMutationChain(arr);
+          const inserted: any[] = [];
+          for (const item of arr) {
+            const copy = { ...item };
+            db[table].push(copy);
+            inserted.push(copy);
+          }
+          return wrapMutationChain(inserted);
         },
         upsert(payload: any) {
           const arr = Array.isArray(payload) ? payload : [payload];
@@ -207,6 +224,10 @@ function createReferralMockEnv(seed?: {
               ops.push({ type: 'eq', col, val });
               return uq;
             },
+            neq(col: string, val: any) {
+              ops.push({ type: 'neq', col, val });
+              return uq;
+            },
             ilike(col: string, val: any) {
               ops.push({ type: 'ilike', col, val });
               return uq;
@@ -232,6 +253,29 @@ function createReferralMockEnv(seed?: {
             },
           };
           return uq;
+        },
+        delete() {
+          const ops: Array<{ type: string; col: string; val: any }> = [];
+          const runDelete = () => {
+            const toDelete = new Set(applyFilters(db[table], ops));
+            db[table] = db[table].filter((r) => !toDelete.has(r));
+            return Array.from(toDelete);
+          };
+          const dq: any = {
+            eq(col: string, val: any) {
+              ops.push({ type: 'eq', col, val });
+              return dq;
+            },
+            neq(col: string, val: any) {
+              ops.push({ type: 'neq', col, val });
+              return dq;
+            },
+            then(resolve: any) {
+              const deleted = runDelete();
+              return resolve({ data: deleted, error: null });
+            },
+          };
+          return dq;
         },
       };
     },
@@ -604,4 +648,271 @@ test('caps, admin-config, admin-ledger, and customer summary work end to end', a
   assert.equal(sumRes.getStatus(), 200);
   assert.equal(sumRes.getBody().summary.rewardMode, 'percent');
   assert.equal(sumRes.getBody().summary.referredUsers.length, 2);
+});
+
+test('welcome bonus: credits dynamic admin percent/flat amount into Game Bonus Wallet + transactions and prevents parallel double-credit', async () => {
+  const { db, deps } = createReferralMockEnv({
+    users: [
+      { id: 'usr_ref', email: 'ref@example.com', display_name: 'Alice', referral_code: 'ALICE1' },
+      { id: 'usr_friend', email: 'friend@example.com', display_name: 'Bob', referred_by: 'ALICE1', email_verified: true },
+    ],
+    wallets: [
+      { customer_id: 'usr_ref', balance: 20, referral_bonus_balance: 5 },
+      { customer_id: 'usr_friend', balance: 50, referral_bonus_balance: 0 },
+    ],
+    topups: [
+      { id: 'top_q', customer_id: 'usr_friend', amount: 80, status: 'completed', payment_method_id: 'cashapp' },
+    ],
+    appConfig: {
+      referralProgram: {
+        enabled: true,
+        rewardMode: 'percent',
+        referrerRewardValue: 25,
+        refereeRewardValue: 15,
+        qualificationDepositMin: 20,
+        payoutTarget: 'referral_bonus',
+        maxReferralsPerUser: 50,
+        dailyPayoutCap: 1000,
+      },
+    },
+  });
+
+  // Simulate concurrent duplicate evaluation callbacks triggered simultaneously
+  const resA = createMockRes();
+  const resB = createMockRes();
+  await Promise.all([
+    handlePostReferralEvaluate(deps, { refereeId: 'usr_friend' }, resA.res, {
+      headers: { 'x-supabase-token': 'friend' },
+    }),
+    handlePostReferralEvaluate(deps, { refereeId: 'usr_friend' }, resB.res, {
+      headers: { 'x-supabase-token': 'friend' },
+    }),
+  ]);
+
+  assert.equal(resA.getStatus(), 200);
+  assert.equal(resB.getStatus(), 200);
+
+  // Dynamic config: 25% of $80 = $20 referrer, 15% of $80 = $12 referee Welcome Bonus
+  const refWallet = db.wallets.find((w) => w.customer_id === 'usr_ref');
+  const friendWallet = db.wallets.find((w) => w.customer_id === 'usr_friend');
+  assert.equal(refWallet?.referral_bonus_balance, 25); // 5 + 20 (credited ONCE)
+  assert.equal(friendWallet?.referral_bonus_balance, 12); // 0 + 12 (credited ONCE)
+  assert.equal(friendWallet?.balance, 50); // Cash wallet untouched
+
+  // Verify transaction metadata on referee account
+  const friendTxs = db.transactions.filter(
+    (t) => t.customer_id === 'usr_friend' && t.type === 'referral_reward'
+  );
+  assert.equal(friendTxs.length, 1);
+  assert.equal(friendTxs[0].id, 'tx_ref_f_refaw_usr_friend');
+  assert.equal(friendTxs[0].amount, 12);
+  assert.equal(friendTxs[0].reference_id, 'refaw_usr_friend');
+  assert.equal(friendTxs[0].status, 'completed');
+  assert.ok(String(friendTxs[0].description).toLowerCase().includes('welcome'));
+  assert.ok(Boolean(friendTxs[0].created_at));
+
+  // Referee's summary reflects Welcome Bonus status + Game Bonus Wallet balance
+  const friendSum = createMockRes();
+  await handleGetReferralSummary(
+    deps,
+    new URL('https://localhost/api/referrals/summary'),
+    friendSum.res,
+    { headers: { 'x-supabase-token': 'friend' } }
+  );
+  assert.equal(friendSum.getStatus(), 200);
+  const wb = friendSum.getBody().summary.welcomeBonus;
+  assert.equal(wb.status, 'rewarded');
+  assert.equal(wb.expectedAmount, 12);
+  assert.equal(wb.creditedAmount, 12);
+  assert.equal(wb.txId, 'tx_ref_f_refaw_usr_friend');
+  assert.equal(friendSum.getBody().summary.walletBalances.referralBonusBalance, 12);
+});
+
+test('reconcile: heals REWARDED awards with missing welcome bonus tx AND desynced wallet balances without re-crediting spent bonus', async () => {
+  const { db, audits, deps } = createReferralMockEnv({
+    users: [
+      { id: 'usr_ref', email: 'ref@example.com', display_name: 'Alice', referral_code: 'ALICE1' },
+      // User 1: REWARDED award with referee_reward_amount=0 and no referee tx yet
+      { id: 'usr_friend', email: 'friend@example.com', display_name: 'Bob', referred_by: 'ALICE1', email_verified: true },
+      // User 2: REWARDED award with completed tx ($20) & partial load ($5), but wallet.referral_bonus_balance was zeroed (0)
+      { id: 'usr_friend2', email: 'friend2@example.com', display_name: 'Cara', referred_by: 'ALICE1', email_verified: true },
+    ],
+    wallets: [
+      { customer_id: 'usr_ref', balance: 0, referral_bonus_balance: 50 },
+      { customer_id: 'usr_friend', balance: 0, referral_bonus_balance: 0 },
+      { customer_id: 'usr_friend2', balance: 10, referral_bonus_balance: 0 },
+    ],
+    topups: [
+      { id: 'top_b1', customer_id: 'usr_friend', amount: 50, status: 'completed', payment_method_id: 'cashapp' },
+      { id: 'top_b2', customer_id: 'usr_friend2', amount: 50, status: 'completed', payment_method_id: 'crypto' },
+    ],
+    awards: [
+      {
+        id: 'refaw_usr_friend',
+        referrer_id: 'usr_ref',
+        referee_id: 'usr_friend',
+        referral_code_used: 'ALICE1',
+        status: 'rewarded',
+        payout_target: 'referral_bonus',
+        referrer_reward_amount: 30,
+        referee_reward_amount: 0, // Missing referee welcome amount
+        qualifying_deposit_amount: 50,
+        rewarded_at: '2026-11-17T10:00:00.000Z',
+        created_at: '2026-11-17T10:00:00.000Z',
+      },
+      {
+        id: 'refaw_usr_friend2',
+        referrer_id: 'usr_ref',
+        referee_id: 'usr_friend2',
+        referral_code_used: 'ALICE1',
+        status: 'rewarded',
+        payout_target: 'referral_bonus',
+        referrer_reward_amount: 30,
+        referee_reward_amount: 20,
+        qualifying_deposit_amount: 50,
+        rewarded_at: '2026-11-17T11:00:00.000Z',
+        created_at: '2026-11-17T11:00:00.000Z',
+      },
+    ],
+    transactions: [
+      {
+        id: 'tx_ref_r_refaw_usr_friend',
+        customer_id: 'usr_ref',
+        amount: 30,
+        type: 'referral_reward',
+        status: 'completed',
+        reference_id: 'refaw_usr_friend',
+        description: 'Referral Reward',
+        created_at: '2026-11-17T10:00:00.000Z',
+      },
+      {
+        id: 'tx_ref_r_refaw_usr_friend2',
+        customer_id: 'usr_ref',
+        amount: 30,
+        type: 'referral_reward',
+        status: 'completed',
+        reference_id: 'refaw_usr_friend2',
+        description: 'Referral Reward',
+        created_at: '2026-11-17T11:00:00.000Z',
+      },
+      {
+        id: 'tx_ref_f_refaw_usr_friend2',
+        customer_id: 'usr_friend2',
+        amount: 20,
+        type: 'referral_reward',
+        status: 'completed',
+        reference_id: 'refaw_usr_friend2',
+        description: 'Welcome Referral Bonus',
+        created_at: '2026-11-17T11:00:00.000Z',
+      },
+      {
+        id: 'tx_load_cara',
+        customer_id: 'usr_friend2',
+        amount: 5,
+        type: 'bonus',
+        status: 'completed',
+        reference_id: 'top_cara_load_1',
+        description: 'Referral Bonus Loaded to Fire Kirin',
+        created_at: '2026-11-17T11:30:00.000Z',
+      },
+    ],
+    appConfig: {
+      referralProgram: {
+        enabled: true,
+        rewardMode: 'flat',
+        referrerRewardValue: 30,
+        refereeRewardValue: 20,
+        qualificationDepositMin: 20,
+        payoutTarget: 'referral_bonus',
+        maxReferralsPerUser: 50,
+        dailyPayoutCap: 1000,
+      },
+    },
+  });
+
+  const recRes = createMockRes();
+  await handlePostReconcileReferrals(deps, {}, recRes.res, {
+    headers: { 'x-supabase-token': 'admin' },
+  });
+
+  assert.equal(recRes.getStatus(), 200);
+  const body = recRes.getBody();
+  assert.equal(body.checkedAwards, 2);
+  assert.equal(body.reconciledAwards, 2);
+
+  // User 1 (Bob) received dynamic Admin $20 Welcome Bonus into Game Bonus Wallet + tx
+  const bobWallet = db.wallets.find((w) => w.customer_id === 'usr_friend');
+  assert.equal(bobWallet?.referral_bonus_balance, 20);
+  const bobTx = db.transactions.find((t) => t.id === 'tx_ref_f_refaw_usr_friend');
+  assert.equal(bobTx?.amount, 20);
+  assert.equal(bobTx?.status, 'completed');
+  const bobAward = db.referral_awards.find((a) => a.id === 'refaw_usr_friend');
+  assert.equal(bobAward?.referee_reward_amount, 20);
+
+  // User 2 (Cara) had wallet restored to $15 ($20 earned - $5 already loaded to game) WITHOUT duplicate transaction rows
+  const caraWallet = db.wallets.find((w) => w.customer_id === 'usr_friend2');
+  assert.equal(caraWallet?.referral_bonus_balance, 15);
+  const caraRefTxs = db.transactions.filter(
+    (t) => t.customer_id === 'usr_friend2' && t.type === 'referral_reward'
+  );
+  assert.equal(caraRefTxs.length, 1);
+
+  // Referrer Alice wallet ($50 < $60 total earned across both awards) also restored cleanly to $60
+  const aliceWallet = db.wallets.find((w) => w.customer_id === 'usr_ref');
+  assert.equal(aliceWallet?.referral_bonus_balance, 60);
+  assert.ok(audits.some((a) => a.action === 'REFERRAL_WALLET_BALANCE_RECONCILED'));
+});
+
+test('summary recovery: eligible unfinalized referee with verified email + deposit auto-credits Welcome Bonus on summary read', async () => {
+  const { db, deps } = createReferralMockEnv({
+    users: [
+      { id: 'usr_ref', email: 'ref@example.com', display_name: 'Alice', referral_code: 'ALICE1' },
+      { id: 'usr_friend', email: 'friend@example.com', display_name: 'Bob', referred_by: 'ALICE1', email_verified: true },
+    ],
+    wallets: [
+      { customer_id: 'usr_ref', balance: 0, referral_bonus_balance: 0 },
+      { customer_id: 'usr_friend', balance: 0, referral_bonus_balance: 0 },
+    ],
+    topups: [
+      { id: 'top_1', customer_id: 'usr_friend', amount: 40, status: 'completed', payment_method_id: 'chime' },
+    ],
+    awards: [
+      {
+        id: 'refaw_usr_friend',
+        referrer_id: 'usr_ref',
+        referee_id: 'usr_friend',
+        referral_code_used: 'ALICE1',
+        status: 'pending_deposit',
+        referrer_reward_amount: 0,
+        referee_reward_amount: 0,
+        created_at: '2026-11-17T09:00:00.000Z',
+      },
+    ],
+    appConfig: {
+      referralProgram: {
+        enabled: true,
+        rewardMode: 'flat',
+        referrerRewardValue: 35,
+        refereeRewardValue: 18,
+        qualificationDepositMin: 20,
+        payoutTarget: 'referral_bonus',
+      },
+    },
+  });
+
+  const sumRes = createMockRes();
+  await handleGetReferralSummary(
+    deps,
+    new URL('https://localhost/api/referrals/summary'),
+    sumRes.res,
+    { headers: { 'x-supabase-token': 'friend' } }
+  );
+
+  assert.equal(sumRes.getStatus(), 200);
+  const summary = sumRes.getBody().summary;
+  assert.equal(summary.welcomeBonus.status, 'rewarded');
+  assert.equal(summary.welcomeBonus.creditedAmount, 18);
+  assert.equal(summary.walletBalances.referralBonusBalance, 18);
+  assert.equal(db.wallets.find((w) => w.customer_id === 'usr_ref')?.referral_bonus_balance, 35);
+  assert.equal(db.wallets.find((w) => w.customer_id === 'usr_friend')?.referral_bonus_balance, 18);
 });

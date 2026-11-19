@@ -56,6 +56,7 @@ import {
   mergeAuditLogs,
 } from '../utils/auditLogUtils';
 import {
+  calculateReferralPayouts,
   normalizeReferralConfig,
   normalizeReferralCodeInput,
 } from '../utils/referralUtils';
@@ -2059,16 +2060,18 @@ class DataService {
             target.totalDeposited !== undefined
               ? target.totalDeposited
               : computeCumulativeCompletedDeposits(this.getTopUpRequests(target.customerId), target.customerId);
-          await supabase.from('wallets').upsert({
-            customer_id: target.customerId,
-            balance: target.availableBalance || 0,
-            referral_bonus_balance: target.referralBonusBalance || 0,
-            pending_withdrawal: target.reservedBalance || 0,
-            pending_deposit: target.pendingDepositBalance || 0,
-            total_deposited: cumulativeDeposited || 0,
-            total_withdrawn: target.totalWithdrawn || 0,
-            currency: target.currency || 'USD',
-          });
+          // Never blindly overwrite referral_bonus_balance or available cash balance if row already exists
+          await this.syncWalletFieldsToSupabase(
+            target.customerId,
+            {
+              pending_withdrawal: target.reservedBalance || 0,
+              pending_deposit: target.pendingDepositBalance || 0,
+              total_deposited: cumulativeDeposited || 0,
+              total_withdrawn: target.totalWithdrawn || 0,
+              currency: target.currency || 'USD',
+            },
+            target
+          );
         }
       } else if (key === STORAGE_KEYS.TRANSACTIONS && Array.isArray(value) && value.length > 0) {
         const t = value[0];
@@ -2184,6 +2187,46 @@ class DataService {
     }
   }
 
+  private async syncWalletFieldsToSupabase(
+    customerId: string,
+    patch: Record<string, any>,
+    fallbackWallet?: Partial<UserWallet>
+  ): Promise<void> {
+    if (!isSupabaseConfigured() || !supabase || !customerId) return;
+    try {
+      const nowIso = new Date().toISOString();
+      const { data: updatedRows, error: updErr } = await supabase
+        .from('wallets')
+        .update({ ...patch, updated_at: nowIso })
+        .eq('customer_id', customerId)
+        .select('customer_id');
+
+      if (!updErr && Array.isArray(updatedRows) && updatedRows.length > 0) {
+        return;
+      }
+
+      if (updErr && updErr.code !== 'PGRST116') {
+        console.warn('Supabase wallet partial update notice:', updErr.message);
+        return;
+      }
+
+      await supabase.from('wallets').insert({
+        customer_id: customerId,
+        balance: Number(fallbackWallet?.availableBalance ?? 0),
+        referral_bonus_balance: Number(fallbackWallet?.referralBonusBalance ?? 0),
+        pending_withdrawal: Number(fallbackWallet?.reservedBalance ?? 0),
+        pending_deposit: Number(fallbackWallet?.pendingDepositBalance ?? 0),
+        total_deposited: Number(fallbackWallet?.totalDeposited ?? 0),
+        total_withdrawn: Number(fallbackWallet?.totalWithdrawn ?? 0),
+        currency: fallbackWallet?.currency || 'USD',
+        ...patch,
+        updated_at: nowIso,
+      });
+    } catch (err) {
+      console.warn('Supabase wallet targeted sync notice:', err);
+    }
+  }
+
   public async migrateAllToSupabase(): Promise<{
     success: boolean;
     counts: Record<string, number>;
@@ -2226,6 +2269,7 @@ class DataService {
         const rows = wallets.map((w) => ({
           customer_id: w.customerId,
           balance: w.availableBalance || 0,
+          referral_bonus_balance: w.referralBonusBalance || 0,
           pending_withdrawal: w.reservedBalance || 0,
           pending_deposit: w.pendingDepositBalance || 0,
           total_deposited:
@@ -2755,6 +2799,9 @@ class DataService {
           this.registerUser(user);
           authSessionService.updateUserProfile(user);
           window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
+          if (isVerified) {
+            void this.triggerServerReferralEvaluation(user.id);
+          }
           return {
             verified: isVerified,
             message: isVerified
@@ -2787,6 +2834,7 @@ class DataService {
           this.registerUser(user);
           authSessionService.updateUserProfile(user);
           window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
+          void this.triggerServerReferralEvaluation(user.id);
           return {
             verified: true,
             message: 'Email address confirmed and verified! Cashouts and referral bonuses are now unlocked.',
@@ -2814,9 +2862,11 @@ class DataService {
     }
     const res = await supabaseAuthService.confirmEmailNow(targetEmail);
     if (res.success) {
+      let verifiedUserId: string | undefined;
       const u = this.getUsers().find((usr) => usr.email.toLowerCase() === targetEmail);
       if (u) {
         u.emailVerified = true;
+        verifiedUserId = u.id;
         writeVerifiedCache(u.id, u.email, true);
         this.registerUser(u);
         authSessionService.updateUserProfile(u);
@@ -2824,11 +2874,15 @@ class DataService {
       const cur = this.getCurrentUser();
       if (cur && cur.email.toLowerCase() === targetEmail) {
         cur.emailVerified = true;
+        verifiedUserId = cur.id;
         writeVerifiedCache(cur.id, cur.email, true);
         this.registerUser(cur);
         authSessionService.updateUserProfile(cur);
       }
       window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
+      if (verifiedUserId) {
+        void this.triggerServerReferralEvaluation(verifiedUserId);
+      }
     }
     return res;
   }
@@ -3832,6 +3886,7 @@ class DataService {
       customerId: params.customerId,
       currency: config.currency,
       availableBalance: 0,
+      referralBonusBalance: 0,
       reservedBalance: 0,
       pendingDepositBalance: 0,
       lastUpdatedAt: new Date().toISOString(),
@@ -3860,7 +3915,14 @@ class DataService {
       wallet.lastTopUpAt = new Date().toISOString();
       wallet.lastUpdatedAt = new Date().toISOString();
       wallets[params.customerId] = wallet;
-      this.save(STORAGE_KEYS.WALLETS, wallets);
+      this.save(STORAGE_KEYS.WALLETS, wallets, true);
+      void this.syncWalletFieldsToSupabase(
+        params.customerId,
+        {
+          total_deposited: computeCumulativeCompletedDeposits(allReqs, params.customerId),
+        },
+        wallet
+      );
 
       // Record immutable ledger entry
       this.recordTransaction({
@@ -3929,7 +3991,12 @@ class DataService {
       wallet.pendingDepositBalance += params.amount;
       wallet.lastUpdatedAt = new Date().toISOString();
       wallets[params.customerId] = wallet;
-      this.save(STORAGE_KEYS.WALLETS, wallets);
+      this.save(STORAGE_KEYS.WALLETS, wallets, true);
+      void this.syncWalletFieldsToSupabase(
+        params.customerId,
+        { pending_deposit: wallet.pendingDepositBalance },
+        wallet
+      );
     }
 
     this.createNotification({
@@ -4027,6 +4094,7 @@ class DataService {
       customerId: req.customerId,
       currency: req.currency,
       availableBalance: 0,
+      referralBonusBalance: 0,
       reservedBalance: 0,
       pendingDepositBalance: 0,
       lastUpdatedAt: new Date().toISOString(),
@@ -4039,7 +4107,7 @@ class DataService {
     wallet.lastTopUpAt = new Date().toISOString();
     wallet.lastUpdatedAt = new Date().toISOString();
     wallets[req.customerId] = wallet;
-    this.save(STORAGE_KEYS.WALLETS, wallets);
+    this.save(STORAGE_KEYS.WALLETS, wallets, true);
 
     // Direct game account crediting & credential verification
     const allAccounts = this.getGameAccounts();
@@ -4221,7 +4289,12 @@ class DataService {
     if (wallets[req.customerId]) {
       wallets[req.customerId].pendingDepositBalance = Math.max(0, wallets[req.customerId].pendingDepositBalance - req.amount);
       wallets[req.customerId].lastUpdatedAt = new Date().toISOString();
-      this.save(STORAGE_KEYS.WALLETS, wallets);
+      this.save(STORAGE_KEYS.WALLETS, wallets, true);
+      void this.syncWalletFieldsToSupabase(
+        req.customerId,
+        { pending_deposit: wallets[req.customerId].pendingDepositBalance },
+        wallets[req.customerId]
+      );
     }
 
     this.createNotification({
@@ -4491,20 +4564,13 @@ class DataService {
     this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
 
     if (isSupabaseConfigured() && supabase) {
-      const { error: walletErr } = await supabase.from('wallets').upsert({
-        customer_id: params.customerId,
-        balance: reconciledWallet.availableBalance || 0,
-        referral_bonus_balance: reconciledWallet.referralBonusBalance || 0,
-        pending_withdrawal: reconciledWallet.reservedBalance || 0,
-        pending_deposit: reconciledWallet.pendingDepositBalance || 0,
-        total_deposited: reconciledWallet.totalDeposited || 0,
-        total_withdrawn: reconciledWallet.totalWithdrawn || 0,
-        currency: reconciledWallet.currency || 'USD',
-        updated_at: newReq.updatedAt,
-      });
-      if (walletErr) {
-        console.warn('createStaffTopUpAsync wallet sync warning:', walletErr);
-      }
+      await this.syncWalletFieldsToSupabase(
+        params.customerId,
+        isCompleted
+          ? { total_deposited: reconciledWallet.totalDeposited || 0 }
+          : { pending_deposit: reconciledWallet.pendingDepositBalance || 0 },
+        reconciledWallet
+      );
     }
 
     if (isCompleted) {
@@ -4767,21 +4833,12 @@ class DataService {
     this.cache[STORAGE_KEYS.WALLETS] = wallets;
     this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
 
-    if (isSupabaseConfigured() && supabase) {
-      const { error: walletErr } = await supabase.from('wallets').upsert({
-        customer_id: params.customerId,
-        balance: wallet.availableBalance || 0,
-        referral_bonus_balance: wallet.referralBonusBalance || 0,
-        pending_withdrawal: wallet.reservedBalance || 0,
-        pending_deposit: wallet.pendingDepositBalance || 0,
-        total_deposited: wallet.totalDeposited || 0,
-        total_withdrawn: wallet.totalWithdrawn || 0,
-        currency: wallet.currency || 'USD',
-        updated_at: newReq.updatedAt,
-      });
-      if (walletErr) {
-        console.warn('createStaffWithdrawalAsync wallet sync warning:', walletErr);
-      }
+    if (isSupabaseConfigured() && supabase && isCompleted) {
+      await this.syncWalletFieldsToSupabase(
+        params.customerId,
+        { total_withdrawn: wallet.totalWithdrawn || 0 },
+        wallet
+      );
     }
 
     const allTxs = this.load<WalletTransaction[]>(STORAGE_KEYS.TRANSACTIONS, INITIAL_TRANSACTIONS);
@@ -5084,7 +5141,12 @@ class DataService {
       if (wallet) {
         wallet.reservedBalance = Math.max(0, wallet.reservedBalance - req.reservedAmount);
         wallet.lastUpdatedAt = new Date().toISOString();
-        this.save(STORAGE_KEYS.WALLETS, wallets);
+        this.save(STORAGE_KEYS.WALLETS, wallets, true);
+        void this.syncWalletFieldsToSupabase(
+          req.customerId,
+          { pending_withdrawal: wallet.reservedBalance },
+          wallet
+        );
       }
 
       this.recordTransaction({
@@ -5114,7 +5176,15 @@ class DataService {
         wallet.reservedBalance = Math.max(0, wallet.reservedBalance - req.reservedAmount);
         wallet.availableBalance += req.reservedAmount;
         wallet.lastUpdatedAt = new Date().toISOString();
-        this.save(STORAGE_KEYS.WALLETS, wallets);
+        this.save(STORAGE_KEYS.WALLETS, wallets, true);
+        void this.syncWalletFieldsToSupabase(
+          req.customerId,
+          {
+            pending_withdrawal: wallet.reservedBalance,
+            balance: wallet.availableBalance,
+          },
+          wallet
+        );
       }
 
       // Restore source game balance if cashout originated from a specific game
@@ -7328,14 +7398,19 @@ class DataService {
 
       const isEmailVerified = Boolean(ru.emailVerified);
       const hasRealDepositMet = realCashDeposits >= refCfg.qualificationDepositMin;
-      const hasEarnedReward = allTxs.some(
-        (t) => t.customerId === userId && t.type === 'referral_reward' && t.description.includes(ru.displayName)
+      const matchedTx = allTxs.find(
+        (t) =>
+          t.customerId === userId &&
+          t.type === 'referral_reward' &&
+          String(t.status || '').toLowerCase() === 'completed' &&
+          (t.referenceId === `refaw_${ru.id}` ||
+            t.relatedRequestId === `refaw_${ru.id}` ||
+            t.description.includes(ru.displayName))
       );
+      const hasEarnedReward = Boolean(matchedTx);
 
       const status = hasEarnedReward
         ? 'rewarded'
-        : isEmailVerified && hasRealDepositMet
-        ? 'pending_deposit'
         : isEmailVerified
         ? 'pending_deposit'
         : 'registered';
@@ -7346,13 +7421,45 @@ class DataService {
         joinedAt: ru.createdAt,
         status,
         depositTotal: Number(realCashDeposits.toFixed(2)),
-        rewardEarned: hasEarnedReward ? refCfg.referrerRewardValue : 0,
+        rewardEarned: matchedTx ? Number(Number(matchedTx.amount || 0).toFixed(2)) : 0,
         emailVerified: isEmailVerified,
         hasRealDepositMet,
       };
     });
 
     const totalRewardsEarned = referredSummaryUsers.reduce((sum, u) => sum + u.rewardEarned, 0);
+
+    // Local fallback Welcome Bonus snapshot for referred user
+    const hasReferrer = Boolean(user?.referredBy && String(user.referredBy).trim() !== '');
+    const myRealCashDeposits = allTopups
+      .filter(
+        (t) =>
+          t.customerId === userId &&
+          (t.status === 'completed' || t.status === 'approved') &&
+          t.method !== ('referral_bonus' as any)
+      )
+      .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    const welcomeTx = allTxs.find(
+      (t) =>
+        t.customerId === userId &&
+        t.type === 'referral_reward' &&
+        String(t.status || '').toLowerCase() === 'completed' &&
+        (t.id.startsWith('tx_ref_f_') ||
+          t.referenceId === `refaw_${userId}` ||
+          t.relatedRequestId === `refaw_${userId}` ||
+          String(t.description || '').toLowerCase().includes('welcome'))
+    );
+    const expectedWelcome = hasReferrer
+      ? calculateReferralPayouts(
+          refCfg,
+          myRealCashDeposits > 0 ? myRealCashDeposits : refCfg.qualificationDepositMin
+        ).refereeAmount
+      : 0;
+    const referrerUser = hasReferrer
+      ? allUsers.find(
+          (u) => normalizeReferralCodeInput(u.referralCode) === normalizeReferralCodeInput(user?.referredBy)
+        )
+      : undefined;
 
     return {
       referralCode,
@@ -7371,6 +7478,27 @@ class DataService {
       maxReferralsPerUser: refCfg.maxReferralsPerUser,
       programEnabled: refCfg.enabled,
       referredUsers: referredSummaryUsers,
+      welcomeBonus: hasReferrer
+        ? {
+            hasReferrer: true,
+            awardId: `refaw_${userId}`,
+            referrerId: referrerUser?.id,
+            referrerName: referrerUser?.displayName,
+            referralCodeUsed: user?.referredBy,
+            status: welcomeTx
+              ? 'rewarded'
+              : myRealCashDeposits >= refCfg.qualificationDepositMin && Boolean(user?.emailVerified)
+              ? 'processing'
+              : 'pending',
+            expectedAmount: expectedWelcome,
+            creditedAmount: welcomeTx ? Number(Number(welcomeTx.amount || 0).toFixed(2)) : 0,
+            depositTotal: Number(myRealCashDeposits.toFixed(2)),
+            qualifyingDepositMin: refCfg.qualificationDepositMin,
+            payoutTarget: refCfg.payoutTarget,
+            txId: welcomeTx?.id,
+            rewardedAt: welcomeTx?.createdAt,
+          }
+        : undefined,
     };
   }
 
@@ -7417,24 +7545,33 @@ class DataService {
     try {
       const targetId = refereeId || this.getCurrentUser()?.id;
       if (!targetId) return;
-      const headers = await this.buildAuditAuthHeaders(false);
       const fp = this.getBrowserDeviceFingerprint();
-      if (fp) headers['x-device-fingerprint'] = fp;
 
-      const res = await fetch('/api/referrals/evaluate', {
+      const attempt = await this.fetchWithAuthTokenRetry('/api/referrals/evaluate', (headers) => ({
         method: 'POST',
-        headers,
+        headers: {
+          ...headers,
+          ...(fp ? { 'x-device-fingerprint': fp } : {}),
+        },
         body: JSON.stringify({ refereeId: targetId }),
-      });
-      if (res.ok) {
-        const json = await res.json().catch(() => ({}));
+      }));
+      const res = attempt.response;
+      const json = attempt.json || {};
+      if (res?.ok) {
         if (json?.status === 'rewarded' || json?.depositSynced || json?.reconciled) {
-          void this.syncDelta();
+          await this.syncDelta().catch(() => {});
           window.dispatchEvent(
             new CustomEvent('aetherpay_state_changed', {
               detail: { key: 'referrals_updated', status: json?.status },
             })
           );
+          if (json?.status === 'rewarded' || json?.reconciled) {
+            window.dispatchEvent(
+              new CustomEvent('aetherpay_state_changed', {
+                detail: { key: 'wallet_updated', tables: ['wallets', 'transactions'] },
+              })
+            );
+          }
         }
       }
     } catch {
@@ -7472,11 +7609,16 @@ class DataService {
       if ((json.reconciledAwards || 0) > 0 || (json.creditedLegs || 0) > 0) {
         void this.syncDelta();
         window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'referrals_updated' } }));
+        window.dispatchEvent(
+          new CustomEvent('aetherpay_state_changed', {
+            detail: { key: 'wallet_updated', tables: ['wallets', 'transactions'] },
+          })
+        );
       }
       return {
         success: true,
-        checkedAwards: Number(json.checkedAwards || 0),
-        reconciledAwards: Number(json.reconciledAwards || 0),
+        checkedAwards: Number(json.checkedAwards || json.scanned || 0),
+        reconciledAwards: Number(json.reconciledAwards || json.reconciledCount || 0),
         creditedLegs: Number(json.creditedLegs || 0),
         totalCreditedAmount: Number(json.totalCreditedAmount || 0),
       };
@@ -7505,7 +7647,57 @@ class DataService {
           requiresReauth: attempt.requiresReauth,
         };
       }
-      return { success: true, summary: json.summary };
+
+      const summary = json.summary as ReferralSummary;
+      const activeUserId = this.getCurrentUser()?.id;
+      if (targetId && activeUserId && targetId === activeUserId) {
+        let needsDeltaSync = false;
+        const sb = summary.walletBalances;
+        if (sb && typeof sb.availableBalance === 'number' && typeof sb.referralBonusBalance === 'number') {
+          const wallets = { ...this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS) };
+          const curW = wallets[targetId];
+          const curAvail = Number(curW?.availableBalance ?? 0);
+          const curRefBonus = Number(curW?.referralBonusBalance ?? 0);
+          if (!curW || Math.abs(curAvail - sb.availableBalance) > 0.005 || Math.abs(curRefBonus - sb.referralBonusBalance) > 0.005) {
+            wallets[targetId] = {
+              ...(curW || {
+                customerId: targetId,
+                currency: 'USD',
+                availableBalance: 0,
+                referralBonusBalance: 0,
+                reservedBalance: 0,
+                pendingDepositBalance: 0,
+              }),
+              availableBalance: sb.availableBalance,
+              referralBonusBalance: sb.referralBonusBalance,
+              lastUpdatedAt: new Date().toISOString(),
+            };
+            this.cache[STORAGE_KEYS.WALLETS] = wallets;
+            this.saveToLocalStorage(STORAGE_KEYS.WALLETS, wallets);
+            window.dispatchEvent(
+              new CustomEvent('aetherpay_state_changed', {
+                detail: { key: 'wallet_updated', tables: ['wallets'] },
+              })
+            );
+            needsDeltaSync = true;
+          }
+        }
+
+        const welcomeTxId = summary.welcomeBonus?.txId;
+        if (
+          summary.welcomeBonus?.status === 'rewarded' &&
+          welcomeTxId &&
+          !this.getTransactions(targetId).some((t) => t.id === welcomeTxId)
+        ) {
+          needsDeltaSync = true;
+        }
+
+        if (needsDeltaSync) {
+          void this.syncDelta();
+        }
+      }
+
+      return { success: true, summary };
     } catch (err: any) {
       return { success: false, error: err?.message || 'Unable to load referral summary' };
     }
@@ -8389,11 +8581,16 @@ class DataService {
       }
 
       // Deduct from non-withdrawable promotional referral balance
-      wallet.referralBonusBalance -= params.amount;
+      wallet.referralBonusBalance = Number(Math.max(0, (wallet.referralBonusBalance || 0) - params.amount).toFixed(2));
       wallet.lastUpdatedAt = new Date().toISOString();
       const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
       wallets[params.customerId] = wallet;
-      this.save(STORAGE_KEYS.WALLETS, wallets);
+      this.save(STORAGE_KEYS.WALLETS, wallets, true);
+      void this.syncWalletFieldsToSupabase(
+        params.customerId,
+        { referral_bonus_balance: wallet.referralBonusBalance },
+        wallet
+      );
 
       // Credit directly into game account
       targetAccount.balance = (targetAccount.balance || 0) + params.amount;
@@ -8454,11 +8651,16 @@ class DataService {
         };
       }
 
-      wallet.availableBalance -= params.amount;
+      wallet.availableBalance = Number(Math.max(0, wallet.availableBalance - params.amount).toFixed(2));
       wallet.lastUpdatedAt = new Date().toISOString();
       const wallets = this.load<Record<string, UserWallet>>(STORAGE_KEYS.WALLETS, INITIAL_WALLETS);
       wallets[params.customerId] = wallet;
-      this.save(STORAGE_KEYS.WALLETS, wallets);
+      this.save(STORAGE_KEYS.WALLETS, wallets, true);
+      void this.syncWalletFieldsToSupabase(
+        params.customerId,
+        { balance: wallet.availableBalance },
+        wallet
+      );
 
       targetAccount.balance = (targetAccount.balance || 0) + params.amount;
       targetAccount.updatedAt = new Date().toISOString();

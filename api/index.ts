@@ -2337,6 +2337,14 @@ export default async function handler(req: any, res: any) {
         return res.status(400).json({ error: error.message });
       }
 
+      await supabaseAdmin
+        .from('users')
+        .update({
+          email_verified: true,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', targetUser.id);
+
       return res.status(200).json({
         success: true,
         message: `Email ${cleanEmail} has been successfully verified!`,

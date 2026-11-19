@@ -612,16 +612,25 @@ BEGIN
 END $$;
 
 ALTER TABLE public.referral_awards REPLICA IDENTITY FULL;
+ALTER TABLE public.wallets REPLICA IDENTITY FULL;
+ALTER TABLE public.transactions REPLICA IDENTITY FULL;
+ALTER TABLE public.topups REPLICA IDENTITY FULL;
+ALTER TABLE public.withdrawals REPLICA IDENTITY FULL;
 
 DO $$
+DECLARE
+  tbl TEXT;
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_publication_tables
-      WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'referral_awards'
-    ) THEN
-      ALTER PUBLICATION supabase_realtime ADD TABLE public.referral_awards;
-    END IF;
+    FOREACH tbl IN ARRAY ARRAY['referral_awards', 'wallets', 'transactions', 'topups', 'withdrawals']
+    LOOP
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = tbl
+      ) THEN
+        EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I', tbl);
+      END IF;
+    END LOOP;
   END IF;
 END $$;
 
@@ -709,7 +718,7 @@ BEGIN
   IF v_ref_amt > 0 AND p_referrer_id IS NOT NULL AND btrim(p_referrer_id) <> '' THEN
     IF EXISTS (
       SELECT 1 FROM public.transactions
-      WHERE id = v_ref_tx_id
+      WHERE (id = v_ref_tx_id AND status = 'completed')
          OR (customer_id = p_referrer_id AND reference_id = p_award_id AND type = 'referral_reward' AND status = 'completed')
     ) THEN
       v_ref_already := true;
@@ -738,7 +747,14 @@ BEGIN
         p_award_id,
         'Swift Sweeps Referral',
         v_now
-      );
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        amount = EXCLUDED.amount,
+        status = 'completed',
+        description = EXCLUDED.description,
+        reference_id = EXCLUDED.reference_id,
+        game_name = EXCLUDED.game_name,
+        created_at = EXCLUDED.created_at;
 
       INSERT INTO public.notifications (
         id, user_id, title, message, type, read, link_tab, link_request_id, created_at
@@ -762,7 +778,7 @@ BEGIN
   IF v_ee_amt > 0 AND p_referee_id IS NOT NULL AND btrim(p_referee_id) <> '' THEN
     IF EXISTS (
       SELECT 1 FROM public.transactions
-      WHERE id = v_ee_tx_id
+      WHERE (id = v_ee_tx_id AND status = 'completed')
          OR (customer_id = p_referee_id AND reference_id = p_award_id AND type = 'referral_reward' AND status = 'completed')
     ) THEN
       v_ee_already := true;
@@ -791,7 +807,14 @@ BEGIN
         p_award_id,
         'Swift Sweeps Referral',
         v_now
-      );
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        amount = EXCLUDED.amount,
+        status = 'completed',
+        description = EXCLUDED.description,
+        reference_id = EXCLUDED.reference_id,
+        game_name = EXCLUDED.game_name,
+        created_at = EXCLUDED.created_at;
 
       INSERT INTO public.notifications (
         id, user_id, title, message, type, read, link_tab, link_request_id, created_at

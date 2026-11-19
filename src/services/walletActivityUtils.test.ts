@@ -537,3 +537,50 @@ test('buildStaffWithdrawalDraft bypasses deposit lock, computes fees, and suppor
   );
 });
 
+test('mapDbWalletRowToWallet preserves referral_bonus_balance and buildUnifiedWalletActivity renders Welcome Referral Bonus', () => {
+  const mappedWallet = mapDbWalletRowToWallet(
+    {
+      customer_id: 'cust_welcome',
+      balance: '10.00',
+      referral_bonus_balance: '18.50',
+      pending_withdrawal: '0',
+      pending_deposit: '0',
+      total_deposited: '50.00',
+      total_withdrawn: '0',
+      currency: 'USD',
+      updated_at: '2026-11-18T10:00:00.000Z',
+    },
+    undefined,
+    [],
+    { authoritativeTopupsLoaded: true }
+  );
+
+  assert.equal(mappedWallet.availableBalance, 10);
+  assert.equal(mappedWallet.referralBonusBalance, 18.5);
+
+  const unified = buildUnifiedWalletActivity({
+    customerId: 'cust_welcome',
+    topups: [],
+    withdrawals: [],
+    transactions: [
+      {
+        id: 'tx_ref_f_refaw_cust_welcome',
+        customerId: 'cust_welcome',
+        type: 'referral_reward',
+        amount: 18.5,
+        relatedRequestId: 'refaw_cust_welcome',
+        description: 'Welcome Referral Bonus: Qualified under code ALICE1',
+        status: 'completed',
+        createdAt: '2026-11-18T10:00:00.000Z',
+      },
+    ],
+  });
+
+  assert.equal(unified.length, 1);
+  assert.equal(unified[0].category, 'referral');
+  assert.equal(unified[0].title, 'Welcome Referral Bonus');
+  assert.equal(unified[0].direction, 'credit');
+  assert.equal(unified[0].netAmount, 18.5);
+  assert.equal(unified[0].status, 'completed');
+});
+

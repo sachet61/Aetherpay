@@ -215,6 +215,24 @@ class SupabaseAuthService {
             }
           }
           void dataService.hydrateForSession(userProfile);
+          if (mergedVerified && (event === 'SIGNED_IN' || event === 'USER_UPDATED')) {
+            if (isConfirmed && dbUser && !dbUser.email_verified && supabase && isSupabaseConfigured()) {
+              Promise.resolve(
+                supabase
+                  .from('users')
+                  .update({ email_verified: true, updated_at: new Date().toISOString() })
+                  .eq('id', userProfile.id)
+              )
+                .then(() => {
+                  void dataService.triggerServerReferralEvaluation(userProfile.id);
+                })
+                .catch(() => {
+                  void dataService.triggerServerReferralEvaluation(userProfile.id);
+                });
+            } else {
+              void dataService.triggerServerReferralEvaluation(userProfile.id);
+            }
+          }
         }
       });
 
@@ -308,6 +326,24 @@ class SupabaseAuthService {
                 userProfile.emailVerified
               );
               void dataService.hydrateForSession(userProfile);
+              if (mergedVerified) {
+                if (isConfirmed && dbUser && !dbUser.email_verified && supabase && isSupabaseConfigured()) {
+                  Promise.resolve(
+                    supabase
+                      .from('users')
+                      .update({ email_verified: true, updated_at: new Date().toISOString() })
+                      .eq('id', userProfile.id)
+                  )
+                    .then(() => {
+                      void dataService.triggerServerReferralEvaluation(userProfile.id);
+                    })
+                    .catch(() => {
+                      void dataService.triggerServerReferralEvaluation(userProfile.id);
+                    });
+                } else {
+                  void dataService.triggerServerReferralEvaluation(userProfile.id);
+                }
+              }
             }
           }
         })
@@ -412,19 +448,20 @@ class SupabaseAuthService {
 
       // Server-side referral attribution & telemetry capture
       const normalizedRefCode = params.referralCode?.trim().toUpperCase() || undefined;
-      void dataService
-        .attributeSignupReferral({
+      try {
+        const attrRes = await dataService.attributeSignupReferral({
           refereeId: newProfile.id,
           referralCode: normalizedRefCode,
           accessToken: data.session?.access_token,
-        })
-        .then((attrRes) => {
-          if (attrRes?.success) {
-            try {
-              sessionStorage.removeItem('ss_pending_ref_code');
-            } catch {}
-          }
         });
+        if (attrRes?.success) {
+          try {
+            sessionStorage.removeItem('ss_pending_ref_code');
+          } catch {}
+        }
+      } catch (attrErr) {
+        console.warn('Referral attribution notice:', attrErr);
+      }
 
       if (data.session?.access_token) {
         supabaseTokenManager.markTokenValid(data.session.access_token);
@@ -581,6 +618,9 @@ class SupabaseAuthService {
         { authEvent: 'login', accessToken: data.session?.access_token }
       );
       void dataService.hydrateForSession(userProfile, { force: true });
+      if (mergedVerified) {
+        void dataService.triggerServerReferralEvaluation(userProfile.id);
+      }
 
       return { success: true, user: userProfile };
     } catch (err: any) {

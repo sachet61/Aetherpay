@@ -96,12 +96,17 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
       }
     };
     void syncReferralSummary();
+    if (currentUser.emailVerified && currentUser.referredBy) {
+      void dataService.triggerServerReferralEvaluation(currentUser.id);
+    }
 
     const onStateChanged = (e: any) => {
       const key = e?.detail?.key;
       const tables: string[] = Array.isArray(e?.detail?.tables) ? e.detail.tables : [];
       if (
         key === 'referrals_updated' ||
+        key === 'wallet_updated' ||
+        key === 'user_verified' ||
         key === 'initial_compact_load' ||
         key === 'topup_approved' ||
         tables.includes('referral_awards') ||
@@ -118,7 +123,7 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
       cancelled = true;
       window.removeEventListener('aetherpay_state_changed', onStateChanged);
     };
-  }, [currentUser.id]);
+  }, [currentUser.id, currentUser.emailVerified, currentUser.referredBy]);
 
   const welcomeBonus = referralSummary.welcomeBonus;
   const referrerRewardVal = referralSummary.referrerRewardValue ?? referralSummary.rewardPerReferral ?? 25;

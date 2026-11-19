@@ -77,8 +77,11 @@ export const CustomerReferrals: React.FC<CustomerReferralsProps> = ({
       const tables: string[] = Array.isArray(e?.detail?.tables) ? e.detail.tables : [];
       if (
         key === 'referrals_updated' ||
+        key === 'wallet_updated' ||
         key === 'aetherpay_state_changed' ||
         tables.includes('referral_awards') ||
+        tables.includes('wallets') ||
+        tables.includes('transactions') ||
         tables.includes('users') ||
         tables.includes('app_config') ||
         tables.includes('topups')
