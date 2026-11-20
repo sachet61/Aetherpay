@@ -416,21 +416,16 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
         </div>
       )}
 
-      {/* Featured Game Platforms Showcase (Keyhub Solutions Style) */}
-      <div className="space-y-4">
+      {/* Featured Game Platforms Showcase */}
+      <div className="w-full max-w-[1200px] mx-auto space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-1 border-b border-slate-800/80">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg bg-[#131C2E] text-amber-400 border border-amber-500/30 flex items-center justify-center font-bold">
               <Gamepad2 className="w-4 h-4" />
             </div>
-            <div>
-              <h2 className="text-base font-bold text-white">
-                Featured Gaming Platforms
-              </h2>
-              <p className="text-xs text-slate-400">
-                Hover or tap a game image for Web play or Get app, or load and cash out directly.
-              </p>
-            </div>
+            <h2 className="text-base font-bold text-white">
+              Featured Gaming Platforms
+            </h2>
           </div>
 
           <button
@@ -442,8 +437,8 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
           </button>
         </div>
 
-        {/* Game Platforms Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-[10px]">
+        {/* Fluid Game Platforms Grid */}
+        <div className="featured-games-grid">
           {gameCatalog.map((game, index) => (
             <GamePlatformCard
               key={game.id}

@@ -32,31 +32,24 @@ export const GamePlatformCard: React.FC<GamePlatformCardProps> = ({
   return (
     <div
       data-testid={`game-card-${game.id}`}
-      className="rounded-xl border border-slate-800 bg-[#0E1726]/90 hover:border-amber-500/50 transition-colors p-2 sm:p-2.5 flex flex-col gap-2"
+      className="rounded-[12px] border-[0.5px] border-slate-800 hover:border-amber-500/50 bg-[#0E1726]/90 p-[8px] flex flex-col gap-[8px] transition-colors"
     >
-      {/* 1. Game name above logo (14px, medium weight, centered, one line with ellipsis) */}
-      <h3
-        className="w-full text-center text-[14px] leading-[1.3] font-medium text-white truncate"
-        title={game.title}
-      >
-        {game.title}
-      </h3>
-
-      {/* 2. Square game logo frame (96px mobile, 120px desktop, 8px radius, padded dark frame) + 150ms hover/tap overlay */}
+      {/* 1. 1:1 Square full-width logo (10px radius) + 26px bottom name bar + 55% overlay above bar */}
       <div
         data-game-overlay-id={game.id}
+        data-overlay-open={isOverlayOpen ? 'true' : 'false'}
         onMouseLeave={() => {
           if (isOverlayOpen) {
             onCloseOverlay(game.id);
           }
         }}
-        className="group/img relative mx-auto w-[96px] h-[96px] md:w-[120px] md:h-[120px] rounded-[8px] overflow-hidden bg-[#0A0F1D] border border-slate-800/80 p-1.5 sm:p-2 flex items-center justify-center select-none"
+        className="game-card-logo relative w-full aspect-square rounded-[10px] overflow-hidden bg-[#0A0F1D] select-none"
       >
         <img
           src={resolveGameImageUrl(game.iconUrl || game.imageUrl)}
           alt={game.title}
-          width={120}
-          height={120}
+          width={190}
+          height={190}
           loading={prioritizeImage ? 'eager' : 'lazy'}
           decoding="async"
           referrerPolicy="no-referrer"
@@ -66,28 +59,26 @@ export const GamePlatformCard: React.FC<GamePlatformCardProps> = ({
             img.dataset.fallbackApplied = '1';
             img.src = DEFAULT_GAME_ICON;
           }}
-          className="w-full h-full object-contain rounded-[4px]"
+          className="w-full h-full object-cover"
         />
 
+        {/* Tap / keyboard focus trigger covering logo */}
         <button
           type="button"
           onClick={() => onToggleOverlay(game.id)}
-          aria-label={`${isOverlayOpen ? 'Hide' : 'Show'} play options for ${game.title}`}
+          aria-label={`${isOverlayOpen ? 'Hide' : 'Show'} play and download links for ${game.title}`}
           aria-expanded={isOverlayOpen}
           className="absolute inset-0 z-10 w-full h-full cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-inset"
         />
 
+        {/* 55% black overlay above the 26px name bar */}
         <div
           onClick={(e) => {
             if (e.target === e.currentTarget && isOverlayOpen) {
               onToggleOverlay(game.id);
             }
           }}
-          className={`absolute inset-0 z-20 bg-black/55 flex flex-col items-center justify-center gap-0.5 md:gap-1.5 px-1 transition-opacity duration-150 ${
-            isOverlayOpen
-              ? 'opacity-100 pointer-events-auto'
-              : 'opacity-0 pointer-events-none [@media(hover:hover)]:group-hover/img:opacity-100 [@media(hover:hover)]:group-hover/img:pointer-events-auto group-focus-within/img:opacity-100 group-focus-within/img:pointer-events-auto'
-          }`}
+          className="game-card-overlay absolute top-0 left-0 right-0 bottom-[26px] z-20 bg-black/55 flex flex-col items-center justify-center gap-1.5 px-2"
         >
           <a
             href={webPlayUrl}
@@ -98,9 +89,9 @@ export const GamePlatformCard: React.FC<GamePlatformCardProps> = ({
               e.stopPropagation();
               if (!hasWebPlayUrl) e.preventDefault();
             }}
-            className="min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 inline-flex items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+            className="game-card-pill inline-flex items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
           >
-            <span className="inline-flex items-center gap-1 px-2 py-1 md:px-2.5 md:py-1 rounded-full border border-white/80 bg-black/45 hover:bg-white/20 text-white text-[11px] font-medium leading-none whitespace-nowrap transition-colors">
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-white/80 bg-black/45 hover:bg-white/20 text-white text-[11px] font-medium leading-none whitespace-nowrap transition-colors">
               <Play className="w-3 h-3 shrink-0" aria-hidden="true" />
               <span>Web play</span>
             </span>
@@ -110,41 +101,51 @@ export const GamePlatformCard: React.FC<GamePlatformCardProps> = ({
             href={getAppUrl}
             target={hasGetAppUrl ? '_blank' : undefined}
             rel={hasGetAppUrl ? 'noopener noreferrer' : undefined}
-            aria-label={`Get app for ${game.title}`}
+            aria-label={`Download ${game.title}`}
             onClick={(e) => {
               e.stopPropagation();
               if (!hasGetAppUrl) e.preventDefault();
             }}
-            className="min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 inline-flex items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+            className="game-card-pill inline-flex items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
           >
-            <span className="inline-flex items-center gap-1 px-2 py-1 md:px-2.5 md:py-1 rounded-full border border-white/80 bg-black/45 hover:bg-white/20 text-white text-[11px] font-medium leading-none whitespace-nowrap transition-colors">
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-white/80 bg-black/45 hover:bg-white/20 text-white text-[11px] font-medium leading-none whitespace-nowrap transition-colors">
               <Download className="w-3 h-3 shrink-0" aria-hidden="true" />
-              <span>Get app</span>
+              <span>Download</span>
             </span>
           </a>
         </div>
+
+        {/* Always-visible 26px bottom bar with left-aligned 12px medium title */}
+        <div className="absolute inset-x-0 bottom-0 z-30 h-[26px] bg-black/60 px-2 flex items-center pointer-events-none">
+          <h3
+            className="w-full text-left text-[12px] font-medium text-white truncate leading-none"
+            title={game.title}
+          >
+            {game.title}
+          </h3>
+        </div>
       </div>
 
-      {/* 3. Two equal-width compact buttons (32px tall, 12px text, 6px gap) */}
-      <div className="grid grid-cols-2 gap-[6px]">
+      {/* 2. Bottom action row: filled amber "Top up" (flex-1, 30px) + 30x30 Cashout icon button (6px gap) */}
+      <div className="flex items-center gap-[6px]">
         <button
           type="button"
           onClick={() => onTopUp(game.id)}
           aria-label={`Top up ${game.title}`}
-          className="h-[32px] px-1 sm:px-2 rounded-md bg-amber-500 hover:bg-amber-400 active:scale-[0.98] text-slate-950 text-[12px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap"
+          className="relative z-10 flex-1 min-w-0 h-[30px] px-2 rounded-[8px] bg-amber-500 hover:bg-amber-400 active:scale-[0.98] text-slate-950 text-[12px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap"
         >
-          <Download className="w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0" aria-hidden="true" />
+          <Download className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
           <span>Top up</span>
         </button>
 
         <button
           type="button"
           onClick={() => onCashout(game.id)}
-          aria-label={`Cashout ${game.title}`}
-          className="h-[32px] px-1 sm:px-2 rounded-md bg-transparent hover:bg-amber-500/10 active:scale-[0.98] border border-slate-700 hover:border-amber-500/60 text-amber-300 hover:text-amber-200 text-[12px] font-semibold flex items-center justify-center gap-1 transition-colors whitespace-nowrap"
+          aria-label="Cashout"
+          title={`Cashout ${game.title}`}
+          className="touch-hitbox-44 relative w-[30px] h-[30px] shrink-0 rounded-[8px] bg-transparent hover:bg-amber-500/10 active:scale-[0.98] border border-slate-700 hover:border-amber-500/60 text-amber-300 hover:text-amber-200 flex items-center justify-center transition-colors"
         >
-          <Upload className="w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0" aria-hidden="true" />
-          <span>Cashout</span>
+          <Upload className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
         </button>
       </div>
     </div>

@@ -148,3 +148,60 @@
   -webkit-mask-image: linear-gradient(to right, transparent 0%, black 35px, black calc(100% - 35px), transparent 100%);
 }
 
+/* Featured Gaming Platforms fluid grid & card interaction rules */
+.featured-games-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (min-width: 480px) {
+  .featured-games-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px;
+  }
+}
+
+.game-card-overlay {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease;
+}
+
+.game-card-logo:focus-within .game-card-overlay,
+.game-card-logo[data-overlay-open='true'] .game-card-overlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .game-card-logo:hover .game-card-overlay {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .game-card-overlay {
+    transition: none;
+  }
+}
+
+@media (hover: none), (pointer: coarse), (max-width: 479px) {
+  .game-card-pill {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .touch-hitbox-44::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}
