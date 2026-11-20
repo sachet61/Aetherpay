@@ -1,7 +1,7 @@
-# Graph Report - Aetherpay  (2026-11-19)
+# Graph Report - Aetherpay  (2026-11-20)
 
 ## Corpus Check
-- 128 files · ~216,486 words
+- 128 files · ~216,458 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 5 file(s) not represented in the graph (top: .example 1, (none) 1, .lock 1)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `0d06fc02`
+- Built from commit: `784bf0b8`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
