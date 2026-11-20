@@ -1,17 +1,17 @@
 # Graph Report - Aetherpay  (2026-11-20)
 
 ## Corpus Check
-- 128 files · ~216,458 words
+- 131 files · ~219,784 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 5 file(s) not represented in the graph (top: .example 1, (none) 1, .lock 1)
 
 ## Summary
-- 1153 nodes · 3826 edges · 35 communities (32 shown, 3 thin omitted)
+- 1198 nodes · 3911 edges · 41 communities (36 shown, 5 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 20 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `784bf0b8`
+- Built from commit: `baf003ca`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -23,34 +23,40 @@
 - types.ts
 - types/index.ts
 - AuthSessionService
-- types.ts
+- audit.mjs
 - steps
-- assetPreloader.ts
+- pwaAssets.ts
 - AdminConfig.tsx
 - wheelOfLuckUtils.ts
 - compilerOptions
-- react
-- handler
+- CustomerChat
+- GlobalChatNotificationManager.tsx
 - useVerificationResolution.ts
 - dataService
 - WebPushClient
 - AdminAudit.tsx
-- authTokenUtils.ts
+- supabaseAuthService.ts
 - dataService.ts
 - vercel.json
 - sw.js
 - dataService.ts
 - referralHandlers.ts
 - assetPreloader.ts
-- UserWallet
-- TopUpRequest
+- SupabaseAuthService
+- imageUtils.test.ts
 - UserRole
-- CustomerRules.tsx
+- toProxyStorageUrl
+- AdminGameCatalog.tsx
 - api/index.ts
+- supabaseClient.ts
 - pushUtils.ts
 - authSessionService.ts
 - types.ts
 - UserProfile
+- AuthTokenCoordinator
+- chatOrderUtils.ts
+- CustomerChat.tsx
+- NotificationSoundService
 
 ## God Nodes (most connected - your core abstractions)
 1. `DataService` - 202 edges
@@ -69,96 +75,96 @@
   api/referralHandlers.ts → src/utils/referralUtils.ts
 - `computeRefereeRealCashDeposits()` --calls--> `isRealCashTopUpRow()`  [EXTRACTED]
   api/referralHandlers.ts → src/utils/referralUtils.ts
+- `reconcileMissingReferralRewards()` --calls--> `calculateReferralPayouts()`  [EXTRACTED]
+  api/referralHandlers.ts → src/utils/referralUtils.ts
+- `resolveUserByIdentifier()` --calls--> `normalizeReferralCodeInput()`  [EXTRACTED]
+  api/referralHandlers.ts → src/utils/referralUtils.ts
 - `handlePostReferralAttribute()` --calls--> `evaluateReferralFraudSignals()`  [EXTRACTED]
-  api/referralHandlers.ts → src/utils/referralUtils.ts
-- `handlePostReferralEvaluate()` --calls--> `checkReferralBudgetCaps()`  [EXTRACTED]
-  api/referralHandlers.ts → src/utils/referralUtils.ts
-- `handlePostReferralEvaluate()` --calls--> `evaluateReferralFraudSignals()`  [EXTRACTED]
   api/referralHandlers.ts → src/utils/referralUtils.ts
 
 ## Import Cycles
 - 2-file cycle: `src/services/dataService.ts -> src/services/supabaseAuthService.ts -> src/services/dataService.ts`
 
-## Communities (35 total, 3 thin omitted)
+## Communities (41 total, 5 thin omitted)
 
 ### Community 0 - "DataService"
-Cohesion: 0.06
-Nodes (9): DataService, findRequestById(), isSupabaseConfigured(), CashoutFeedItem, ChatMessage, GameAccount, PasswordResetToken, ReferralSummary (+1 more)
+Cohesion: 0.05
+Nodes (8): DataService, findRequestById(), isSupabaseConfigured(), AuditLog, CashoutFeedItem, ChatMessage, PasswordResetToken, SupportConversation
 
 ### Community 1 - "AdminChat.tsx"
-Cohesion: 0.06
-Nodes (72): AdminChatCashoutModal(), AdminChatTopUpModal(), ChatTransactionCard(), AdminChat(), TICKET_STATUS_OPTIONS, CustomerChat(), compareMessagesChronologically(), extractAttachmentMetadata() (+64 more)
+Cohesion: 0.21
+Nodes (21): AdminChatCashoutModal(), AdminChatTopUpModal(), AdminChat(), AdminChatProps, TICKET_STATUS_OPTIONS, storageService, buildGroupedMessages(), CHAT_QUICK_EMOJIS (+13 more)
 
 ### Community 2 - "package.json"
-Cohesion: 0.07
-Nodes (36): dependencies, lucide-react@^1.16.0, react@^19.0.0, @supabase/supabase-js@^2.49.1, tailwindcss@^4.0.0, @tailwindcss/vite@^4.0.0, devDependencies, tsx@^4.19.2 (+28 more)
+Cohesion: 0.06
+Nodes (38): dependencies, lucide-react@^1.16.0, react@^19.0.0, react-dom@^19.0.0, @supabase/supabase-js@^2.49.1, tailwindcss@^4.0.0, @tailwindcss/vite@^4.0.0, devDependencies (+30 more)
 
 ### Community 3 - "App.tsx"
-Cohesion: 0.13
-Nodes (31): App(), LazyEmailVerificationBanner, BackgroundNotificationPrompt(), GlobalChatNotificationManager(), LazyPageFallback(), LegalContent(), SessionTimeoutWarningModal(), CustomerMobileNav() (+23 more)
+Cohesion: 0.10
+Nodes (38): App(), LazyEmailVerificationBanner, BackgroundNotificationPrompt(), LazyPageFallback(), LazyPageFallbackProps, LegalContent(), SessionTimeoutWarningModal(), CustomerMobileNav() (+30 more)
 
 ### Community 4 - "types.ts"
-Cohesion: 0.14
-Nodes (17): AdminReferralGovernancePanel(), AdminReferralGovernancePanelProps, FLAG_LABELS, STATUS_DISPLAY, STATUS_TABS, AdminDashboard(), AdminDashboardProps, AdminUsers() (+9 more)
+Cohesion: 0.12
+Nodes (19): AdminReferralGovernancePanel(), AdminReferralGovernancePanelProps, FLAG_LABELS, STATUS_DISPLAY, STATUS_TABS, BeforeInstallPromptEvent, PWAInstallButton(), PWAInstallButtonProps (+11 more)
 
 ### Community 5 - "types/index.ts"
 Cohesion: 0.05
 Nodes (41): AppConfig, AppNotification, AuditLog, CashoutFeedConfig, ChatMessage, ChatTransactionData, ConversationStatus, GameAccount (+33 more)
 
-### Community 7 - "types.ts"
-Cohesion: 0.20
-Nodes (15): ReferralLedgerEntry, ReferralPayoutTarget, ReferralProgramConfig, checkReferralBudgetCaps(), clampNonNegativeNumber(), computeTopReferrers(), DEFAULT_REFERRAL_CONFIG, evaluateReferralFraudSignals() (+7 more)
+### Community 7 - "audit.mjs"
+Cohesion: 0.08
+Nodes (41): jszip, playwright, sharp, AUDIT_CONFIG, buildComparisonReportHtml(), buildOrderedPngFilename(), classifyRouteStatus(), DEFAULT_APP_CANDIDATES (+33 more)
 
 ### Community 8 - "steps"
 Cohesion: 0.08
 Nodes (23): concurrency, cancel-in-progress, group, jobs, update-graph, name, on, push (+15 more)
 
-### Community 9 - "assetPreloader.ts"
-Cohesion: 0.05
-Nodes (52): GamePlatformCardProps, AdminGameCatalog(), AdminGameCatalogProps, PRESET_GAME_ICONS, CustomerGameAccounts(), CustomerGameAccountsProps, loadAdminGameCatalog(), loadCustomerGameAccounts() (+44 more)
+### Community 9 - "pwaAssets.ts"
+Cohesion: 0.12
+Nodes (17): GlobalChatNotificationManager(), BrowserNotificationEnv, BrowserNotificationResult, claimNotificationAlertId(), dispatchBrowserNotification(), resolveSwRegistration(), APPLE_TOUCH_ICON_URL, DEFAULT_NOTIFICATION_ICON_URL (+9 more)
 
 ### Community 10 - "AdminConfig.tsx"
-Cohesion: 0.06
-Nodes (47): PolicyAndPartnerCmsCard(), TelegramBotConfigCard(), AdminChatTopUpModalProps, TopUpModalMode, AdminConfig(), AdminConfigProps, QrCodeUploadBox(), QrCodeUploadBoxProps (+39 more)
+Cohesion: 0.08
+Nodes (29): PolicyAndPartnerCmsCard(), TelegramBotConfigCard(), AdminConfig(), AdminConfigProps, QrCodeUploadBox(), QrCodeUploadBoxProps, CustomerTopUp(), loadAdminConfig() (+21 more)
 
 ### Community 11 - "wheelOfLuckUtils.ts"
 Cohesion: 0.07
-Nodes (59): dispatchBonusLoadStaffNotification(), handleGetWheelStatus(), handlePostAdminWheelConfig(), handlePostGameCreditTransfer(), handlePostWheelSpin(), isMissingFunctionError(), isMissingTableOrColumnError(), loadAuthoritativeWheelConfig() (+51 more)
+Nodes (60): dispatchBonusLoadStaffNotification(), handleGetWheelStatus(), handlePostAdminWheelConfig(), handlePostGameCreditTransfer(), handlePostWheelSpin(), isMissingFunctionError(), isMissingTableOrColumnError(), loadAuthoritativeWheelConfig() (+52 more)
 
 ### Community 12 - "compilerOptions"
 Cohesion: 0.10
 Nodes (19): compilerOptions, allowImportingTsExtensions, allowJs, experimentalDecorators, isolatedModules, jsx, lib, module (+11 more)
 
-### Community 13 - "react"
-Cohesion: 0.15
-Nodes (17): lucide-react, react, BackgroundNotificationPromptProps, IOSPwaInstallModal(), IOSPwaInstallModalProps, LazyPageFallbackProps, LegalContentProps, BeforeInstallPromptEvent (+9 more)
+### Community 13 - "CustomerChat"
+Cohesion: 0.19
+Nodes (18): CustomerChat(), buildScrollSnapshotKey(), computeDistanceFromBottom(), computePrependScrollTop(), computeRestoredScrollTop(), ConversationScrollSnapshot, countNewlyAppendedMessages(), decideMessageUpdateScrollAction() (+10 more)
 
-### Community 14 - "handler"
-Cohesion: 0.16
-Nodes (20): buildProxyStorageUrl(), deactivateVercelPushSubscription(), enrichMessageRowForClient(), ensureStorageBuckets(), extractStorageLocationFromUrl(), handleGetChatMessages(), handlePostChatSend(), handlePushUnsubscribe() (+12 more)
+### Community 14 - "GlobalChatNotificationManager.tsx"
+Cohesion: 0.15
+Nodes (12): GlobalChatNotificationManagerProps, realtimeChatHub, filterRealtimeRowsForUser(), globalNotificationAlertIds, isRowInternalNote(), PUBLIC_REALTIME_TABLES, resolveCanonicalConversationId(), shouldAcceptIncomingChatMessage() (+4 more)
 
 ### Community 15 - "useVerificationResolution.ts"
-Cohesion: 0.09
-Nodes (23): clearCoordinatorTimers(), coordinator, CoordinatorState, listeners, notifyListeners(), resetVerificationCoordinator(), startResolutionForUser(), useVerificationResolution() (+15 more)
+Cohesion: 0.17
+Nodes (22): clearCoordinatorTimers(), coordinator, CoordinatorState, listeners, notifyListeners(), resetVerificationCoordinator(), startResolutionForUser(), useVerificationResolution() (+14 more)
 
 ### Community 16 - "dataService"
-Cohesion: 0.18
-Nodes (15): react-dom@^19.0.0, react-dom, EmailOtpModal(), EmailOtpModalProps, ForgotPassword(), ForgotPasswordProps, ResetPassword(), ResetPasswordProps (+7 more)
+Cohesion: 0.13
+Nodes (21): lucide-react, react, EmailOtpModal(), EmailOtpModalProps, ForgotPassword(), ForgotPasswordProps, ResetPassword(), ResetPasswordProps (+13 more)
 
 ### Community 17 - "WebPushClient"
-Cohesion: 0.23
-Nodes (3): arrayBufferToBase64(), urlBase64ToUint8Array(), WebPushClient
+Cohesion: 0.12
+Nodes (14): BackgroundNotificationPromptProps, IOSPwaInstallModal(), IOSPwaInstallModalProps, CustomerProfile(), loadCustomerProfile(), arrayBufferToBase64(), DevicePlatform, urlBase64ToUint8Array() (+6 more)
 
 ### Community 18 - "AdminAudit.tsx"
-Cohesion: 0.20
-Nodes (14): AdminAudit(), AdminAuditProps, loadAdminAudit(), AuditLog, AuditEntityFilter, AuditFilterOptions, buildAuditCsv(), escapeCsvCell() (+6 more)
+Cohesion: 0.23
+Nodes (13): AdminAudit(), AdminAuditProps, loadAdminAudit(), AuditEntityFilter, AuditFilterOptions, buildAuditCsv(), escapeCsvCell(), filterAuditLogs() (+5 more)
 
-### Community 19 - "authTokenUtils.ts"
-Cohesion: 0.14
-Nodes (11): AuthSessionResponse, AuthTokenCoordinator, AuthTokenCoordinatorDeps, decodeBase64UrlToUtf8(), decodeJwtExpMs(), decodeJwtPayload(), isJwtExpiredOrExpiring(), isPermanentAuthRefreshError() (+3 more)
+### Community 19 - "supabaseAuthService.ts"
+Cohesion: 0.17
+Nodes (16): AuthSessionResponse, AuthTokenCoordinatorDeps, decodeBase64UrlToUtf8(), decodeJwtExpMs(), decodeJwtPayload(), isJwtExpiredOrExpiring(), isPermanentAuthRefreshError(), MinimalAuthSession (+8 more)
 
 ### Community 20 - "dataService.ts"
-Cohesion: 0.17
+Cohesion: 0.18
 Nodes (18): RealtimeSyncStatus, STORAGE_KEYS, SyncHealthInfo, INITIAL_AUDIT_LOGS, INITIAL_CONFIG, INITIAL_CONVERSATIONS, INITIAL_GAME_ACCOUNTS, INITIAL_GAME_CATALOG (+10 more)
 
 ### Community 21 - "vercel.json"
@@ -166,66 +172,82 @@ Cohesion: 0.40
 Nodes (4): framework, headers, rewrites, version
 
 ### Community 23 - "dataService.ts"
-Cohesion: 0.15
-Nodes (29): CATEGORY_LABELS, CustomerWallet(), loadCustomerWallet(), ActivityStatusMeta, buildStaffTopUpDraft(), buildStaffWithdrawalDraft(), buildUnifiedWalletActivity(), computeCumulativeCompletedDeposits() (+21 more)
+Cohesion: 0.13
+Nodes (33): GamePlatformCard(), CustomerHome(), CATEGORY_LABELS, CustomerWallet(), loadCustomerHome(), loadCustomerWallet(), ActivityStatusMeta, buildStaffTopUpDraft() (+25 more)
 
 ### Community 24 - "referralHandlers.ts"
-Cohesion: 0.22
-Nodes (27): awardReferralAtomically(), computeBudgetUsage(), computeRefereeRealCashDeposits(), creditPlayerWallet(), extractClientIp(), getAwardCreditedStatus(), handleGetAdminReferralLedger(), handleGetReferralSummary() (+19 more)
+Cohesion: 0.13
+Nodes (44): awardReferralAtomically(), computeBudgetUsage(), computeRefereeRealCashDeposits(), creditPlayerWallet(), extractClientIp(), getAwardCreditedStatus(), handleGetAdminReferralLedger(), handleGetReferralSummary() (+36 more)
 
 ### Community 25 - "assetPreloader.ts"
-Cohesion: 0.33
-Nodes (11): SessionHydrationScreen(), StartupSplash(), StartupSplashProps, SwiftSweepsLogo(), SwiftSweepsLogoProps, normalizeAssetUrlList(), preloadAssetPool(), preloadSingleImage() (+3 more)
+Cohesion: 0.25
+Nodes (14): SessionHydrationScreen(), StartupSplash(), StartupSplashProps, SwiftSweepsLogo(), SwiftSweepsLogoProps, isImageCached(), memoryImageCache, normalizeAssetUrlList() (+6 more)
 
-### Community 26 - "UserWallet"
-Cohesion: 0.16
-Nodes (16): LiveCashoutFeedList(), LiveCashoutFeedListProps, AuthenticatedUserMenuProps, GamePlatformCard(), TopNavbarProps, CustomerHome(), CustomerHomeProps, CustomerProfileProps (+8 more)
-
-### Community 27 - "TopUpRequest"
-Cohesion: 0.44
-Nodes (7): mapDbTopupRowToRequest(), mapDbWithdrawalRowToRequest(), mergeTopupRequests(), mergeWithdrawalRequests(), readOptionalString(), StaffTopUpDraftResult, TopUpRequest
+### Community 27 - "imageUtils.test.ts"
+Cohesion: 0.17
+Nodes (16): AdminGameCatalog(), CustomerGameAccounts(), CORE_ASSET_URLS, CRITICAL_ASSET_URLS, DEFERRED_ASSET_URLS, ALIAS_LOOKUP, DEFERRED_GAME_IMAGE_PATHS, findLocalGameAsset() (+8 more)
 
 ### Community 28 - "UserRole"
-Cohesion: 0.23
-Nodes (9): SessionHydrationScreenProps, getPrefetchRouteKeysForRole(), HydrationGateInput, HydrationPhaseLabelInput, resolveHydrationPhaseLabel(), shouldRunSilentBackgroundRefresh(), shouldShowSessionHydrationGate(), SilentRefreshInput (+1 more)
+Cohesion: 0.33
+Nodes (7): prefetchPagesForSession(), getPrefetchRouteKeysForRole(), HydrationGateInput, resolveHydrationPhaseLabel(), shouldRunSilentBackgroundRefresh(), shouldShowSessionHydrationGate(), SilentRefreshInput
+
+### Community 29 - "toProxyStorageUrl"
+Cohesion: 0.31
+Nodes (10): ChatTransactionCard(), ChatTransactionCardProps, StorageUploadResult, buildProxyStorageUrl(), extractStorageLocation(), safeDecodeURIComponent(), StorageLocation, toDirectSupabaseStorageUrl() (+2 more)
+
+### Community 30 - "AdminGameCatalog.tsx"
+Cohesion: 0.24
+Nodes (10): GamePlatformCardProps, AdminGameCatalogProps, PRESET_GAME_ICONS, GameCatalogItem, GameLink, isSafeExternalHttpUrl(), ResolvedGameCardLinks, resolveGameCardLinks() (+2 more)
 
 ### Community 31 - "api/index.ts"
-Cohesion: 0.10
-Nodes (24): ALLOWED_AUDIT_ENTITY_TYPES, decodeJwtPartJson(), DEFAULT_SUPABASE_SERVICE_ROLE_KEY, fetchSupabaseJwksKeys(), handleGetAuditLogs(), handlePostAuditLog(), handlePushSubscribe(), isMissingColumnError() (+16 more)
+Cohesion: 0.08
+Nodes (44): ALLOWED_AUDIT_ENTITY_TYPES, buildProxyStorageUrl(), deactivateVercelPushSubscription(), decodeJwtPartJson(), DEFAULT_SUPABASE_SERVICE_ROLE_KEY, enrichMessageRowForClient(), ensureStorageBuckets(), extractStorageLocationFromUrl() (+36 more)
+
+### Community 32 - "supabaseClient.ts"
+Cohesion: 0.19
+Nodes (13): DEFAULT_SUPABASE_ANON_KEY, DEFAULT_SUPABASE_JWKS_URL, DEFAULT_SUPABASE_SERVICE_ROLE_KEY, DEFAULT_SUPABASE_URL, isPlaceholder(), resolveSupabaseAnonKey(), resolveSupabaseJwksUrl(), resolveSupabaseServiceRoleKey() (+5 more)
 
 ### Community 33 - "pushUtils.ts"
 Cohesion: 0.14
 Nodes (17): getWebPushClient(), handlePushNotify(), handlePushStatus(), sendVercelPushNotification(), deactivatePushSubscriptionsInList(), hashEndpointId(), isStaffRole(), NormalizedPushSubscription (+9 more)
 
 ### Community 34 - "authSessionService.ts"
-Cohesion: 0.22
-Nodes (8): SessionTimeoutWarningModalProps, authSessionService, INACTIVITY_TIMEOUT_MS, INACTIVITY_WARNING_MS, PREDEFINED_ADMINS, SEED_CREDENTIALS, StoredCredential, UserSession
+Cohesion: 0.16
+Nodes (11): SessionHydrationScreenProps, SessionTimeoutWarningModalProps, authSessionService, INACTIVITY_TIMEOUT_MS, INACTIVITY_WARNING_MS, PREDEFINED_ADMINS, SEED_CREDENTIALS, StoredCredential (+3 more)
 
 ### Community 35 - "types.ts"
-Cohesion: 0.11
-Nodes (19): AdminChatCashoutModalProps, CashoutModalTab, PAYOUT_CHANNEL_OPTIONS, ChatTransactionCardProps, AdminRequestsProps, loadAdminRequests(), StaffWithdrawalDraftResult, ChatTransactionData (+11 more)
+Cohesion: 0.13
+Nodes (20): AdminChatCashoutModalProps, CashoutModalTab, PAYOUT_CHANNEL_OPTIONS, AdminRequestsProps, mapDbTopupRowToRequest(), mapDbWithdrawalRowToRequest(), mergeTopupRequests(), mergeWithdrawalRequests() (+12 more)
 
 ### Community 36 - "UserProfile"
-Cohesion: 0.12
-Nodes (16): GlobalChatNotificationManagerProps, PWAInstallButtonProps, CustomerMobileNavProps, StaffMobileNavProps, AdminChatProps, AdminGameCredentialsProps, AuthPageProps, CustomerChatProps (+8 more)
+Cohesion: 0.14
+Nodes (20): AdminChatTopUpModalProps, TopUpModalMode, AuthenticatedUserMenuProps, StaffMobileNavProps, TopNavbarProps, AdminGameCredentialsProps, AuthPageProps, CustomerGameAccountsProps (+12 more)
+
+### Community 38 - "chatOrderUtils.ts"
+Cohesion: 0.41
+Nodes (10): compareMessagesChronologically(), extractAttachmentMetadata(), isBotGreetingMessage(), mapDbMessageRowToChatMessage(), mergeAuthoritativeMessages(), mergeSingleMessage(), normalizeTransactionDataUrls(), resolveCanonicalConversationId() (+2 more)
+
+### Community 39 - "CustomerChat.tsx"
+Cohesion: 0.33
+Nodes (7): CustomerChatProps, notificationSoundService, ComputedChatViewportState, computeVisualViewportState(), resolveFullscreenViewportStyle(), shouldSubmitOnTextareaKeyDown(), VisualViewportMetrics
 
 ## Knowledge Gaps
-- **3 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **5 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `DataService` connect `DataService` to `AdminChat.tsx`, `App.tsx`, `types.ts`, `types.ts`, `UserProfile`, `assetPreloader.ts`, `AdminConfig.tsx`, `wheelOfLuckUtils.ts`, `react`, `useVerificationResolution.ts`, `dataService`, `AdminAudit.tsx`, `dataService.ts`, `dataService.ts`, `UserWallet`, `UserRole`, `CustomerRules.tsx`?**
-  _High betweenness centrality (0.149) - this node is a cross-community bridge._
+- **Why does `DataService` connect `DataService` to `AdminChat.tsx`, `App.tsx`, `types.ts`, `AdminConfig.tsx`, `wheelOfLuckUtils.ts`, `GlobalChatNotificationManager.tsx`, `useVerificationResolution.ts`, `dataService`, `WebPushClient`, `AdminAudit.tsx`, `supabaseAuthService.ts`, `dataService.ts`, `dataService.ts`, `toProxyStorageUrl`, `AdminGameCatalog.tsx`, `authSessionService.ts`, `types.ts`, `UserProfile`, `CustomerChat.tsx`?**
+  _High betweenness centrality (0.144) - this node is a cross-community bridge._
 - **Should `DataService` be split into smaller, more focused modules?**
-  _Cohesion score 0.055136733185513674 - nodes in this community are weakly interconnected._
-- **Why does `UserProfile` connect `UserProfile` to `DataService`, `AdminChat.tsx`, `authSessionService.ts`, `types.ts`, `types.ts`, `AuthSessionService`, `assetPreloader.ts`, `AdminConfig.tsx`, `wheelOfLuckUtils.ts`, `react`, `useVerificationResolution.ts`, `dataService`, `WebPushClient`, `AdminAudit.tsx`, `dataService.ts`, `dataService.ts`, `UserWallet`, `UserRole`?**
-  _High betweenness centrality (0.058) - this node is a cross-community bridge._
-- **Should `AdminChat.tsx` be split into smaller, more focused modules?**
-  _Cohesion score 0.05695644507141598 - nodes in this community are weakly interconnected._
-- **Why does `react` connect `react` to `AdminChat.tsx`, `package.json`, `App.tsx`, `types.ts`, `types.ts`, `authSessionService.ts`, `UserProfile`, `assetPreloader.ts`, `AdminConfig.tsx`, `wheelOfLuckUtils.ts`, `useVerificationResolution.ts`, `dataService`, `AdminAudit.tsx`, `dataService.ts`, `dataService.ts`, `assetPreloader.ts`, `UserWallet`, `CustomerRules.tsx`?**
-  _High betweenness centrality (0.041) - this node is a cross-community bridge._
+  _Cohesion score 0.05374964357000285 - nodes in this community are weakly interconnected._
+- **Why does `UserProfile` connect `UserProfile` to `DataService`, `AdminChat.tsx`, `types.ts`, `AuthSessionService`, `AdminConfig.tsx`, `wheelOfLuckUtils.ts`, `GlobalChatNotificationManager.tsx`, `useVerificationResolution.ts`, `dataService`, `WebPushClient`, `AdminAudit.tsx`, `supabaseAuthService.ts`, `dataService.ts`, `dataService.ts`, `SupabaseAuthService`, `AdminGameCatalog.tsx`, `authSessionService.ts`, `types.ts`, `CustomerChat.tsx`?**
+  _High betweenness centrality (0.056) - this node is a cross-community bridge._
 - **Should `package.json` be split into smaller, more focused modules?**
-  _Cohesion score 0.06666666666666667 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06387921022067364 - nodes in this community are weakly interconnected._
+- **Why does `react` connect `dataService` to `AdminChat.tsx`, `package.json`, `App.tsx`, `types.ts`, `types.ts`, `UserProfile`, `authSessionService.ts`, `CustomerChat.tsx`, `AdminConfig.tsx`, `wheelOfLuckUtils.ts`, `GlobalChatNotificationManager.tsx`, `useVerificationResolution.ts`, `WebPushClient`, `AdminAudit.tsx`, `dataService.ts`, `assetPreloader.ts`, `toProxyStorageUrl`, `AdminGameCatalog.tsx`?**
+  _High betweenness centrality (0.040) - this node is a cross-community bridge._
 - **Should `App.tsx` be split into smaller, more focused modules?**
-  _Cohesion score 0.13445378151260504 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.09523809523809523 - nodes in this community are weakly interconnected._
+- **Should `types.ts` be split into smaller, more focused modules?**
+  _Cohesion score 0.12333333333333334 - nodes in this community are weakly interconnected._
