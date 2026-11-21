@@ -89,7 +89,6 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
         </div>
         <div>
           <h2 className="text-base font-bold text-white tracking-tight">Password Recovery</h2>
-          <p className="text-xs text-slate-400">Secure link dispatched to your verified email</p>
         </div>
       </div>
 
@@ -133,7 +132,7 @@ export const ForgotPassword: React.FC<ForgotPasswordProps> = ({
               </>
             ) : (
               <>
-                <span>Send Password Reset Email</span>
+                <span>Reset Password</span>
                 <ArrowRight className="w-4 h-4" />
               </>
             )}

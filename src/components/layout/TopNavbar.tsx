@@ -25,6 +25,7 @@ import { SwiftSweepsLogo } from '../common/SwiftSweepsLogo';
 import { PWAInstallButton } from '../common/PWAInstallButton';
 import { WheelGlyph } from '../customer/WheelGlyph';
 import { CustomerMobileDrawer } from './CustomerMobileDrawer';
+import { AdminMobileDrawer } from './AdminMobileDrawer';
 import { useWheelAvailability } from '../../hooks/useWheelAvailability';
 
 interface TopNavbarProps {
@@ -661,8 +662,20 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
         />
       )}
 
-      {/* Staff Hamburger Side Drawer (Admin & Agent only) */}
-      {isMobileDrawerOpen && !isCustomer && (
+      {/* Redesigned Admin Mobile Side Drawer (Admin role only) */}
+      {isAdmin && (
+        <AdminMobileDrawer
+          isOpen={isMobileDrawerOpen}
+          onClose={closeMobileDrawer}
+          currentUser={currentUser}
+          activeTab={activeTab}
+          onNavigateTab={onNavigateTab}
+          onLogout={onLogout}
+        />
+      )}
+
+      {/* Agent Hamburger Side Drawer (Agent role only) */}
+      {isMobileDrawerOpen && isAgent && (
         <div className="fixed inset-0 z-50 flex justify-end">
           <div
             className="fixed inset-0 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200"
@@ -707,21 +720,9 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                   </div>
                 </div>
 
-                {isAdmin && (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-950 text-amber-300 border border-amber-800">
-                    Admin
-                  </span>
-                )}
-                {isAgent && (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">
-                    Support
-                  </span>
-                )}
-                {isCustomer && (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
-                    Player
-                  </span>
-                )}
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">
+                  Support
+                </span>
               </div>
             </div>
 
@@ -744,126 +745,8 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
 
             {/* Navigation Items (Scrollable) */}
             <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1">
-              {isAdmin && (
-                <>
-                  <div className="px-2 pt-1 pb-1 text-[10px] font-mono uppercase tracking-wider text-slate-400 font-semibold">
-                    Admin Management
-                  </div>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_dashboard')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_dashboard' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <LayoutDashboard className="w-4 h-4" />
-                    <span>Overview Dashboard</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_users')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_users' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <Users className="w-4 h-4 text-amber-400" />
-                    <span>Users &amp; Roles</span>
-                  </button>
-
-                  {/* Fees & Bonuses Link placed below Users & Roles */}
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_config')}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${
-                      activeTab === 'ops_config'
-                        ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                        : 'bg-amber-950/40 text-amber-300 border border-amber-800/60 hover:bg-amber-900/40'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <Settings className="w-4 h-4 text-amber-400" />
-                      <span>Fees &amp; Bonuses</span>
-                    </div>
-                    <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-200 border border-amber-700/50">
-                      Config
-                    </span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_game_catalog')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_game_catalog' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <Gamepad2 className="w-4 h-4 text-amber-400" />
-                    <span>Game Catalog</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_game_credentials')}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_game_credentials' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <KeyRound className="w-4 h-4" />
-                      <span>Game IDs &amp; Credentials</span>
-                    </div>
-                    {pendingGameRequests > 0 && (
-                      <span className="w-4 h-4 rounded-full bg-amber-600 text-[10px] font-bold text-white flex items-center justify-center">
-                        {pendingGameRequests}
-                      </span>
-                    )}
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_requests')}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_requests' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <Inbox className="w-4 h-4" />
-                      <span>Requests Queue</span>
-                    </div>
-                    {pendingOpsRequests > 0 && (
-                      <span className="px-1.5 py-0.5 rounded-full bg-slate-800 text-[10px] font-bold text-amber-400 border border-amber-700/50">
-                        {pendingOpsRequests}
-                      </span>
-                    )}
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_chat')}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_chat' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <MessageSquare className="w-4 h-4" />
-                      <span>Support Live Inbox</span>
-                    </div>
-                    {unreadStaffMessages > 0 && (
-                      <span className="w-4 h-4 rounded-full bg-amber-500 text-[10px] font-black text-slate-950 flex items-center justify-center">
-                        {unreadStaffMessages}
-                      </span>
-                    )}
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_audit')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_audit' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <Shield className="w-4 h-4 text-amber-400" />
-                    <span>Security Audit Logs</span>
-                  </button>
-                </>
-              )}
-
               {/* AGENT NAVIGATION */}
-              {isAgent && (
-                <>
+              <>
                   <div className="px-2 pt-1 pb-1 text-[10px] font-mono uppercase tracking-wider text-slate-400 font-semibold">
                     Support Operations
                   </div>
@@ -938,11 +821,8 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                     <LayoutDashboard className="w-4 h-4" />
                     <span>Overview Dashboard</span>
                   </button>
-                </>
-              )}
+              </>
             </div>
-
-
           </aside>
         </div>
       )}
