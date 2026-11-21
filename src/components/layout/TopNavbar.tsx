@@ -24,9 +24,9 @@ import {
   Gift,
   FileText,
   ChevronDown,
+  MessageCircle,
 } from 'lucide-react';
 import { SwiftSweepsLogo } from '../common/SwiftSweepsLogo';
-import { RealtimeSyncBadge } from '../common/RealtimeSyncBadge';
 import { PWAInstallButton } from '../common/PWAInstallButton';
 
 interface TopNavbarProps {
@@ -153,7 +153,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   return (
     <>
       <header className="relative z-50 bg-[#0A0F1D]/95 backdrop-blur-md border-b border-slate-800/80 max-w-full">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 xl:gap-6 px-3 sm:px-6 h-16">
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 xl:gap-4 px-3 sm:px-6 h-16">
           {/* Zone 1: Brand Identity & Portal Role Context */}
           <div className="flex items-center gap-2.5 shrink-0 min-w-0">
             <button
@@ -165,12 +165,8 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
               <SwiftSweepsLogo size="sm" />
             </button>
 
-            <div className="hidden xl:block h-5 w-px bg-slate-800 shrink-0" aria-hidden="true" />
-
-            {isCustomer && (
-              <span className="hidden xl:inline-flex items-center text-[11px] font-medium px-2 py-0.5 rounded-md bg-[#131C2E] text-amber-300 border border-amber-500/25 whitespace-nowrap shrink-0">
-                Player Portal
-              </span>
+            {(isAgent || isAdmin) && (
+              <div className="hidden xl:block h-5 w-px bg-slate-800 shrink-0" aria-hidden="true" />
             )}
 
             {isAgent && (
@@ -186,10 +182,6 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                 <span>Admin</span>
               </span>
             )}
-
-            <div className="hidden xl:inline-flex shrink-0">
-              <RealtimeSyncBadge />
-            </div>
           </div>
 
           {/* Zone 2: Primary Navigation Links */}
@@ -240,7 +232,11 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                 <button
                   type="button"
                   onClick={() => handleDesktopNavigate('chat')}
-                  className={customerNavLinkClass(activeTab === 'chat')}
+                  className={
+                    activeTab === 'chat'
+                      ? customerNavLinkClass(true)
+                      : 'px-3 py-1.5 rounded-lg text-xs transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 border bg-[#111A2E] border-slate-700/80 text-slate-200 hover:text-white hover:bg-slate-800/80 hover:border-slate-600 font-medium'
+                  }
                 >
                   <span>Support Chat</span>
                   {unreadCustomerMessages > 0 && (
@@ -507,23 +503,6 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
 
           {/* Zone 3: Notifications, Account Controls & Logout */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {isCustomer && (
-              <button
-                type="button"
-                onClick={() => handleDesktopNavigate('topup')}
-                className="cursor-pointer hidden 2xl:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#0E1726] border border-amber-500/20 hover:border-amber-500/40 transition-colors"
-                title="Latest amount loaded directly to your registered game account"
-              >
-                <Gamepad2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <div className="text-right">
-                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">Latest Top-Up</div>
-                  <div className="text-xs font-bold text-amber-400 font-mono tabular-nums">
-                    ${(wallet.lastTopUpAmount || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </div>
-                </div>
-              </button>
-            )}
-
             {/* PWA App Install (keeps single Bell in navbar; push alerts live in Notifications drawer) */}
             <PWAInstallButton currentUser={currentUser} showPushButton={false} />
 
@@ -974,6 +953,16 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                   >
                     <FileText className="w-4 h-4 text-slate-400" />
                     <span>Sweepstakes Rules</span>
+                  </button>
+
+                  <button
+                    onClick={() => handleDrawerNavigate('official_partners')}
+                    className={`w-full min-h-[44px] flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
+                      activeTab === 'official_partners' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <MessageCircle className="w-4 h-4 text-amber-400" />
+                    <span>Official Partners</span>
                   </button>
                 </>
               )}

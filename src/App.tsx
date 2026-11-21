@@ -32,6 +32,7 @@ import {
   LazyCustomerReferrals,
   LazyCustomerRules,
   LazyCustomerProfile,
+  LazyCustomerOfficialPartners,
   LazyAdminDashboard,
   LazyAdminRequests,
   LazyAdminChat,
@@ -56,6 +57,7 @@ import {
   User,
   X,
   ShieldAlert,
+  MessageCircle,
 } from 'lucide-react';
 
 export default function App() {
@@ -408,12 +410,12 @@ export default function App() {
           isCustomerChatOpen
             ? 'h-viewport-dynamic bg-[#080E1D] overflow-hidden pb-0'
             : isCustomer
-            ? 'min-h-screen bg-[#0A0F1D] pb-36 sm:pb-28'
+            ? 'min-h-screen bg-[#0A0F1D]'
             : isStaffOpsChatTab
             ? isMobileChatActive
               ? 'h-viewport-dynamic bg-[#070D20] overflow-hidden pb-0'
               : 'h-viewport-dynamic bg-[#0A0F1D] overflow-hidden pb-[74px] md:pb-0'
-            : 'min-h-screen bg-[#0A0F1D] pb-24 md:pb-12'
+            : 'min-h-screen bg-[#0A0F1D]'
         }`}
       >
         {/* Session Inactivity Timeout Guard & Live Countdown Warning */}
@@ -580,6 +582,13 @@ export default function App() {
                   onNavigateTab={handleNavigateTab}
                   onSwitchUser={handleSwitchUser}
                   onLogout={logout}
+                />
+              )}
+
+              {activeTab === 'official_partners' && (
+                <LazyCustomerOfficialPartners
+                  currentUser={currentUser}
+                  onNavigateTab={handleNavigateTab}
                 />
               )}
             </>
@@ -773,6 +782,19 @@ export default function App() {
                 <div>
                   <div className="font-semibold text-white">Profile &amp; 2FA</div>
                   <div className="text-[10px] text-slate-400">Security &amp; reset</div>
+                </div>
+              </button>
+              <button
+                onClick={() => {
+                  setShowMobileMoreDrawer(false);
+                  handleNavigateTab('official_partners');
+                }}
+                className="p-3.5 min-h-[44px] rounded-xl bg-[#0A0F1D] border border-amber-500/20 text-left flex items-center gap-3 hover:border-amber-500/50 transition-colors col-span-2"
+              >
+                <MessageCircle className="w-5 h-5 text-amber-400 shrink-0" />
+                <div>
+                  <div className="font-semibold text-white">Official Partners</div>
+                  <div className="text-[11px] text-slate-400">Message verified partner pages anytime</div>
                 </div>
               </button>
             </div>

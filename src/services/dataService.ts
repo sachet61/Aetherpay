@@ -27,6 +27,8 @@ import {
   WheelOfLuckConfig,
   WheelSpinResponse,
   WheelStatusResponse,
+  OfficialPartner,
+  OfficialPartnerInput,
 } from '../types';
 import {
   INITIAL_CONFIG,
@@ -70,6 +72,11 @@ import {
   normalizeWheelConfig,
 } from '../utils/wheelOfLuckUtils';
 import {
+  normalizeOfficialPartnerRow,
+  sortOfficialPartners,
+} from '../utils/officialPartnersUtils';
+import { storageService } from './storageService';
+import {
   mergeVerifiedStatus,
   readVerifiedCache,
   writeVerifiedCache,
@@ -86,6 +93,15 @@ import {
   normalizeTicketStatus,
   type TicketStatusValue,
 } from '../utils/chatPresentationUtils';
+import {
+  formatCashoutChatMessage,
+  formatCredentialsReadyChatMessage,
+  formatGameIdRequestChatMessage,
+  formatGamePasswordResetChatMessage,
+  formatTopUpApprovedChatMessage,
+  formatTopUpSubmittedChatMessage,
+  formatTransactionStatusChatMessage,
+} from '../utils/uiCopyUtils';
 import {
   mergeWithdrawalRequests,
   mergeTopupRequests,
@@ -170,6 +186,7 @@ class DataService {
   private lastHydrationError: string | null = null;
   private authoritativelyLoadedTopupsForUser: Set<string> = new Set();
   private conversationAliasMap: Map<string, string> = new Map();
+  private officialPartnersCache: OfficialPartner[] | null = null;
 
   constructor() {
     this.cleanLegacyStorage();
@@ -467,6 +484,9 @@ class DataService {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'wheel_spins' }, (p) => {
         this.queueRealtimeMutation('wheel_spins', p.eventType, p.new, p.old);
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'official_partners' }, (p) => {
+        this.queueRealtimeMutation('official_partners', p.eventType, p.new, p.old);
+      })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           this.syncStatus = 'connected';
@@ -581,6 +601,11 @@ class DataService {
     }
     if (wheelSpinRows.length) {
       tablesModified.add('wheel_spins');
+    }
+    const hasPartnerEvent = queued.some((item) => item.table === 'official_partners');
+    if (hasPartnerEvent && activeUser) {
+      this.officialPartnersCache = null;
+      tablesModified.add('official_partners');
     }
 
     if (tablesModified.size > 0) {
@@ -1839,7 +1864,11 @@ class DataService {
             senderId: params.reviewerId,
             senderName: params.reviewerName,
             senderRole: 'agent',
-            text: `🔑 Your player credentials for "${params.gameTitle}" are ready!\n\n• Username: "${params.username}"\n• Password: "${params.password}"\n\nYou can access and reveal your credentials anytime in your Gaming IDs portal. Good luck!`,
+            text: formatCredentialsReadyChatMessage({
+              gameTitle: params.gameTitle,
+              username: params.username,
+              password: params.password,
+            }),
             isInternalNote: false,
           });
         }
@@ -3519,13 +3548,6 @@ class DataService {
     cashoutPolicyHtml: string;
     privacyPolicyHtml: string;
     termsPolicyHtml: string;
-    supportedPartners: Array<{
-      id: string;
-      platform: 'facebook' | 'instagram' | 'telegram' | 'whatsapp' | 'other';
-      label: string;
-      url: string;
-      active: boolean;
-    }>;
   } {
     const config = this.getAppConfig();
     const policies = (config as any).policies || {};
@@ -3539,11 +3561,6 @@ class DataService {
       termsPolicyHtml:
         policies.termsPolicyHtml ||
         `<p>Participation in games is restricted to eligible players of legal age in their respective jurisdiction. Wagering and bonus turnover terms apply.</p>`,
-      supportedPartners: (config as any).supportedPartners || [
-        { id: 'p_fb', platform: 'facebook', label: 'Official Facebook Page', url: 'https://facebook.com', active: true },
-        { id: 'p_ig', platform: 'instagram', label: 'Official Instagram Community', url: 'https://instagram.com', active: true },
-        { id: 'p_tg', platform: 'telegram', label: 'Official VIP Telegram Channel', url: 'https://t.me', active: true },
-      ],
     };
   }
 
@@ -3551,18 +3568,18 @@ class DataService {
     cashoutPolicyHtml: string;
     privacyPolicyHtml: string;
     termsPolicyHtml: string;
-    supportedPartners: any[];
   }>): { success: boolean; message: string } {
     const config = this.getAppConfig();
+    const prevPolicies = { ...(config as any).policies };
+    delete prevPolicies.supportedPartners;
     (config as any).policies = {
       ...this.getCmsPolicies(),
+      ...prevPolicies,
       ...updated,
     };
-    if (updated.supportedPartners) {
-      (config as any).supportedPartners = updated.supportedPartners;
-    }
+    delete (config as any).supportedPartners;
     this.save(STORAGE_KEYS.CONFIG, config);
-    return { success: true, message: 'Policy & Partner settings saved successfully!' };
+    return { success: true, message: 'Policy settings saved successfully!' };
   }
 
   public getUserRegisteredMethod(userId: string): {
@@ -4056,7 +4073,13 @@ class DataService {
       senderId: params.customerId,
       senderName: params.customerName,
       senderRole: 'customer',
-      text: `🎮 Top-Up Request #${newReqId.slice(-6)} Submitted:\n• Game: ${params.targetGameName || 'Game'} (User: ${params.targetGameUsername || params.customerName})\n• Amount: $${params.amount.toFixed(2)}${bonusAmount > 0 ? ` + $${bonusAmount.toFixed(2)} Bonus (${bonusPercentage}%)` : ''} = Total $${finalWalletCredit.toFixed(2)} Credit\n• Channel: ${params.methodName}${params.providerRef || params.cryptoTxHash ? ` (Ref: ${params.providerRef || params.cryptoTxHash})` : ''}\n\n⏳ Status: PENDING SUPPORT APPROVAL`,
+      text: formatTopUpSubmittedChatMessage({
+        amount: params.amount,
+        bonusAmount,
+        methodName: params.methodName,
+        gameName: params.targetGameName,
+        isCompleted: initialStatus === 'completed',
+      }),
       attachmentUrl: params.receiptUrl,
       attachmentName: params.receiptName,
       isInternalNote: false,
@@ -4223,7 +4246,14 @@ class DataService {
           senderId: params.reviewerId,
           senderName: params.reviewerName,
           senderRole: 'agent',
-          text: `🎉 Verified Deposit Approved & Loaded!\n\n💵 Deposit Base: $${req.amount.toFixed(2)}${req.bonusAmount > 0 ? ` (+ $${req.bonusAmount.toFixed(2)} bonus = $${req.finalWalletCredit.toFixed(2)} total credits)` : ''}\n🎯 Target Game: ${req.targetGameName || 'Game'}\n\n🔑 Your Active Game Credentials:\nUsername: "${gameAcc.username}"\nPassword: "${gameAcc.password || '•••••'}"\n\nYour game credits have been loaded. Good luck and have fun!`,
+          text: formatTopUpApprovedChatMessage({
+            totalCredit: req.finalWalletCredit,
+            baseAmount: req.amount,
+            bonusAmount: req.bonusAmount,
+            gameName: req.targetGameName,
+            gameUsername: gameAcc.username,
+            hasActiveCredentials: true,
+          }),
           isInternalNote: false,
         });
       } else {
@@ -4232,7 +4262,13 @@ class DataService {
           senderId: params.reviewerId,
           senderName: params.reviewerName,
           senderRole: 'agent',
-          text: `🎉 Verified Deposit Approved & Credited!\n\n💵 Deposit Base: $${req.amount.toFixed(2)}${req.bonusAmount > 0 ? ` (+ $${req.bonusAmount.toFixed(2)} bonus = $${req.finalWalletCredit.toFixed(2)} total credits)` : ''}\n🎯 Target Game: ${req.targetGameName || 'Game'}\n\n⚠️ IMPORTANT ACTION REQUIRED: We noticed you do not have an active Game ID for "${req.targetGameName || 'this game'}" yet.\n👉 Please open your "Game IDs & Passwords" portal and tap "Request Game ID & Password" so our desk can create and provision your credentials right away!`,
+          text: formatTopUpApprovedChatMessage({
+            totalCredit: req.finalWalletCredit,
+            baseAmount: req.amount,
+            bonusAmount: req.bonusAmount,
+            gameName: req.targetGameName,
+            hasActiveCredentials: false,
+          }),
           isInternalNote: false,
         });
       }
@@ -4698,18 +4734,18 @@ class DataService {
 
     if (params.postToChat) {
       const conv = this.getOrCreateConversationForCustomer(params.customerId, params.customerName);
-      const bonusSummary =
-        (newReq.bonusAmount || 0) > 0
-          ? ` + $${(newReq.bonusAmount || 0).toFixed(2)} Bonus (${newReq.bonusPercentage}%) = $${(newReq.finalWalletCredit || newReq.amount).toFixed(2)} Total`
-          : '';
       this.sendChatMessage({
         conversationId: conv.id,
         senderId: params.reviewerId,
         senderName: params.reviewerName,
         senderRole: 'agent',
-        text: isCompleted
-          ? `💳 Verified Deposit Logged (#${newReq.id.slice(-6)}): $${newReq.amount.toFixed(2)}${bonusSummary} via ${newReq.methodName}${newReq.targetGameName ? ` -> ${newReq.targetGameName}` : ''}.`
-          : `🎮 Deposit Request Created (#${newReq.id.slice(-6)}): $${newReq.amount.toFixed(2)}${bonusSummary} via ${newReq.methodName}${newReq.targetGameName ? ` -> ${newReq.targetGameName}` : ''}. Status: PENDING VERIFICATION.`,
+        text: formatTopUpSubmittedChatMessage({
+          amount: newReq.amount,
+          bonusAmount: newReq.bonusAmount,
+          methodName: newReq.methodName,
+          gameName: newReq.targetGameName,
+          isCompleted,
+        }),
         attachmentUrl: newReq.receiptUrl,
         attachmentName: newReq.receiptName,
         isInternalNote: false,
@@ -4928,9 +4964,14 @@ class DataService {
         senderId: params.reviewerId,
         senderName: params.reviewerName,
         senderRole: 'agent',
-        text: isCompleted
-          ? `💸 Cashout Completed (#${newReq.id.slice(-6)}): $${newReq.amount.toFixed(2)} via ${newReq.methodName}${newReq.payoutReference ? ` (Ref: ${newReq.payoutReference})` : ''}.`
-          : `💸 Cashout Request Created (#${newReq.id.slice(-6)}): $${newReq.amount.toFixed(2)} via ${newReq.methodName}. Status: PENDING PAYOUT.`,
+        text: formatCashoutChatMessage({
+          amount: newReq.amount,
+          netPayout: newReq.netPayout,
+          methodName: newReq.methodName,
+          gameName: newReq.sourceGameName,
+          status: isCompleted ? 'completed' : 'submitted',
+          payoutReference: newReq.payoutReference,
+        }),
         isInternalNote: false,
         transactionData: draft.chatTransactionData,
       });
@@ -5082,7 +5123,13 @@ class DataService {
       senderId: params.customerId,
       senderName: params.customerName,
       senderRole: 'customer',
-      text: `💸 Cashout Request #${newReqId.slice(-6)}: I want to cash out $${params.amount.toFixed(2)} from "${params.sourceGameName || 'Game'}".\nLast Top-Up Method Used: ${lastMethodName}${lastMethodDetail}.\n\n⏳ Status: PENDING SUPPORT APPROVAL`,
+      text: formatCashoutChatMessage({
+        amount: params.amount,
+        methodName: lastMethodName,
+        methodDetail: lastMethodDetail,
+        gameName: params.sourceGameName,
+        status: 'submitted',
+      }),
       isInternalNote: false,
       transactionData: {
         transactionType: 'withdrawal',
@@ -5102,7 +5149,7 @@ class DataService {
       senderId: 'usr_admin_1',
       senderName: 'System / Treasury Desk',
       senderRole: 'system',
-      text: `🚨 [Support Notice] New Cashout Request #${newReqId.slice(-6)} from ${params.customerName}:\n• Amount: $${params.amount.toFixed(2)}\n• Game: ${params.sourceGameName || 'Game'}\n• Last Payment Method Used: ${lastMethodName}${lastMethodDetail}\n• Policy: Please check game balance and send funds manually via ${lastMethodName}.`,
+      text: `⏳ Payout Review: $${params.amount.toFixed(2)}\n${params.customerName} • ${lastMethodName}${lastMethodDetail}`,
       isInternalNote: false,
     });
 
@@ -5652,7 +5699,10 @@ class DataService {
       senderId: params.customerId,
       senderName: params.customerName,
       senderRole: 'customer',
-      text: `Hello Customer Support, I would like to request a Game ID and login password for "${game.title}" (${game.platform}).`,
+      text: formatGameIdRequestChatMessage({
+        gameTitle: game.title,
+        platform: game.platform,
+      }),
       isInternalNote: false,
     });
 
@@ -5698,7 +5748,10 @@ class DataService {
       senderId: params.customerId,
       senderName: params.customerName,
       senderRole: 'customer',
-      text: `Hello Customer Support, please update/reset my password credentials for "${acc.gameName}" (Username: ${acc.username}).`,
+      text: formatGamePasswordResetChatMessage({
+        gameTitle: acc.gameName,
+        username: acc.username,
+      }),
       isInternalNote: false,
     });
 
@@ -5802,7 +5855,11 @@ class DataService {
       senderId: params.reviewerId,
       senderName: params.reviewerName,
       senderRole: 'agent',
-      text: `🎮 Credentials Configured for "${gameTitle}" (${platform})!\n• Username: "${params.username.trim()}"\n• Password: "${params.password ? params.password.trim() : '•••••'}"\nYour credentials are active in your Gaming IDs portal.`,
+      text: formatCredentialsReadyChatMessage({
+        gameTitle,
+        username: params.username.trim(),
+        password: params.password ? params.password.trim() : undefined,
+      }),
       isInternalNote: false,
     });
 
@@ -5881,7 +5938,11 @@ class DataService {
       senderId: params.reviewerId,
       senderName: params.reviewerName,
       senderRole: 'agent',
-      text: `Your player credentials for "${acc.gameName}" are ready! Assigned Username: "${acc.username}". You can view and reveal your password anytime in your Gaming IDs portal.`,
+      text: formatCredentialsReadyChatMessage({
+        gameTitle: acc.gameName,
+        username: acc.username,
+        password: acc.password,
+      }),
       isInternalNote: false,
     });
 
@@ -7211,15 +7272,20 @@ class DataService {
       }
       if (targetConvId && txData) {
         const isCompleted = status === 'completed';
-        const typeLabel = txData.transactionType === 'topup' ? 'Top-Up' : 'Cashout';
         this.sendChatMessage({
           conversationId: targetConvId,
           senderId: 'usr_agent_system',
           senderName: 'Customer Support Desk',
           senderRole: 'agent',
-          text: isCompleted
-            ? `✅ Transaction Approved: ${typeLabel} #${requestId.slice(-6)} ($${txData.amount.toFixed(2)}${txData.bonusAmount ? ` + $${txData.bonusAmount.toFixed(2)} bonus` : ''}) has been verified & approved by ${reviewerName}! Status is now COMPLETED.${notes ? ` Note: ${notes}` : ''}`
-            : `❌ Transaction Rejected: ${typeLabel} #${requestId.slice(-6)} was declined by ${reviewerName}.${notes ? ` Reason: ${notes}` : ''}`,
+          text: formatTransactionStatusChatMessage({
+            transactionType: txData.transactionType === 'topup' ? 'topup' : 'withdrawal',
+            status: isCompleted ? 'completed' : 'rejected',
+            amount: Number(txData.amount || 0),
+            bonusAmount: txData.bonusAmount,
+            finalCredit: txData.finalCredit,
+            gameName: txData.gameName,
+            notes,
+          }),
           isInternalNote: false,
         });
       }
@@ -9177,6 +9243,392 @@ class DataService {
         gameAccount: targetAccount,
       };
     }
+  }
+
+  // =========================================================================
+  // OFFICIAL PARTNERS DIRECTORY (Supabase + Admin RBAC Serverless APIs)
+  // =========================================================================
+
+  public getCachedOfficialPartners(): OfficialPartner[] {
+    return this.officialPartnersCache ? [...this.officialPartnersCache] : [];
+  }
+
+  private emitOfficialPartnersChanged(): void {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('aetherpay_state_changed', {
+          detail: { key: 'official_partners_updated', tables: ['official_partners'] },
+        })
+      );
+    }
+  }
+
+  public async fetchOfficialPartners(options?: {
+    includeHidden?: boolean;
+  }): Promise<{
+    success: boolean;
+    partners: OfficialPartner[];
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
+    try {
+      const includeHidden = Boolean(options?.includeHidden);
+      const baseRoute = includeHidden
+        ? '/api/admin/official-partners?includeHidden=1'
+        : '/api/official-partners';
+
+      let attempt = await this.fetchWithAuthTokenRetry(baseRoute, (headers) => ({
+        method: 'GET',
+        headers: {
+          ...headers,
+          'x-api-route': baseRoute,
+        },
+      }));
+
+      if (
+        !attempt.requiresReauth &&
+        !attempt.isTransientError &&
+        isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText })
+      ) {
+        const fallbackUrl = `/api/index?__api_path=${encodeURIComponent(baseRoute)}`;
+        attempt = await this.fetchWithAuthTokenRetry(fallbackUrl, (headers) => ({
+          method: 'GET',
+          headers: {
+            ...headers,
+            'x-api-route': baseRoute,
+          },
+        }));
+      }
+
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success) {
+        return {
+          success: false,
+          partners: [],
+          error:
+            json?.error ||
+            `Unable to load official partners (${attempt.response?.status || 'network error'}).`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
+      }
+
+      const rows: OfficialPartner[] = Array.isArray(json.partners)
+        ? sortOfficialPartners(
+            json.partners
+              .map((r: any) => normalizeOfficialPartnerRow(r))
+              .filter((p: OfficialPartner | null): p is OfficialPartner => Boolean(p))
+          )
+        : [];
+
+      if (!includeHidden) {
+        this.officialPartnersCache = rows.filter((p) => p.isVisible);
+      } else {
+        this.officialPartnersCache = rows.filter((p) => p.isVisible);
+      }
+
+      return { success: true, partners: rows };
+    } catch (err: any) {
+      return {
+        success: false,
+        partners: [],
+        error: err?.message || 'Unable to load official partners.',
+      };
+    }
+  }
+
+  public async createOfficialPartner(input: OfficialPartnerInput): Promise<{
+    success: boolean;
+    partner?: OfficialPartner;
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
+    try {
+      const route = '/api/admin/official-partners';
+      const payload = JSON.stringify(input);
+      let attempt = await this.fetchWithAuthTokenRetry(route, (headers) => ({
+        method: 'POST',
+        headers: {
+          ...headers,
+          'x-api-route': route,
+        },
+        body: payload,
+      }));
+
+      if (
+        !attempt.requiresReauth &&
+        !attempt.isTransientError &&
+        isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText })
+      ) {
+        attempt = await this.fetchWithAuthTokenRetry(
+          `/api/index?__api_path=${encodeURIComponent(route)}`,
+          (headers) => ({
+            method: 'POST',
+            headers: {
+              ...headers,
+              'x-api-route': route,
+            },
+            body: payload,
+          })
+        );
+      }
+
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success || !json?.partner) {
+        return {
+          success: false,
+          error: json?.error || `Failed to create official partner (${attempt.response?.status || 500}).`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
+      }
+
+      const partner = normalizeOfficialPartnerRow(json.partner);
+      if (!partner) {
+        return {
+          success: false,
+          error: 'Received invalid partner record from server.',
+        };
+      }
+      if (this.officialPartnersCache) {
+        const filtered = this.officialPartnersCache.filter((p) => p.id !== partner.id);
+        if (partner.isVisible) {
+          filtered.push(partner);
+        }
+        this.officialPartnersCache = sortOfficialPartners(filtered);
+      }
+      this.emitOfficialPartnersChanged();
+      return { success: true, partner };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Failed to create official partner.',
+      };
+    }
+  }
+
+  public async updateOfficialPartner(
+    id: string,
+    patch: Partial<OfficialPartnerInput>
+  ): Promise<{
+    success: boolean;
+    partner?: OfficialPartner;
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
+    try {
+      const route = `/api/admin/official-partners/${encodeURIComponent(id)}`;
+      const payload = JSON.stringify(patch);
+      let attempt = await this.fetchWithAuthTokenRetry(route, (headers) => ({
+        method: 'PATCH',
+        headers: {
+          ...headers,
+          'x-api-route': route,
+        },
+        body: payload,
+      }));
+
+      if (
+        !attempt.requiresReauth &&
+        !attempt.isTransientError &&
+        isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText })
+      ) {
+        attempt = await this.fetchWithAuthTokenRetry(
+          `/api/index?__api_path=${encodeURIComponent(route)}`,
+          (headers) => ({
+            method: 'PATCH',
+            headers: {
+              ...headers,
+              'x-api-route': route,
+            },
+            body: payload,
+          })
+        );
+      }
+
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success || !json?.partner) {
+        return {
+          success: false,
+          error: json?.error || `Failed to update official partner (${attempt.response?.status || 500}).`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
+      }
+
+      const partner = normalizeOfficialPartnerRow(json.partner);
+      if (!partner) {
+        return {
+          success: false,
+          error: 'Received invalid partner record from server.',
+        };
+      }
+      if (this.officialPartnersCache) {
+        const filtered = this.officialPartnersCache.filter((p) => p.id !== partner.id);
+        if (partner.isVisible) {
+          filtered.push(partner);
+        }
+        this.officialPartnersCache = sortOfficialPartners(filtered);
+      }
+      this.emitOfficialPartnersChanged();
+      return { success: true, partner };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Failed to update official partner.',
+      };
+    }
+  }
+
+  public async reorderOfficialPartners(orderedIds: string[]): Promise<{
+    success: boolean;
+    partners?: OfficialPartner[];
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
+    try {
+      const route = '/api/admin/official-partners/reorder';
+      const payload = JSON.stringify({ orderedIds });
+      let attempt = await this.fetchWithAuthTokenRetry(route, (headers) => ({
+        method: 'POST',
+        headers: {
+          ...headers,
+          'x-api-route': route,
+        },
+        body: payload,
+      }));
+
+      if (
+        !attempt.requiresReauth &&
+        !attempt.isTransientError &&
+        isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText })
+      ) {
+        attempt = await this.fetchWithAuthTokenRetry(
+          `/api/index?__api_path=${encodeURIComponent(route)}`,
+          (headers) => ({
+            method: 'POST',
+            headers: {
+              ...headers,
+              'x-api-route': route,
+            },
+            body: payload,
+          })
+        );
+      }
+
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success) {
+        return {
+          success: false,
+          error: json?.error || `Failed to save partner order (${attempt.response?.status || 500}).`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
+      }
+
+      const partners = Array.isArray(json.partners)
+        ? sortOfficialPartners(
+            json.partners
+              .map((r: any) => normalizeOfficialPartnerRow(r))
+              .filter((p: OfficialPartner | null): p is OfficialPartner => Boolean(p))
+          )
+        : undefined;
+      if (partners) {
+        this.officialPartnersCache = partners.filter((p) => p.isVisible);
+      }
+      this.emitOfficialPartnersChanged();
+      return { success: true, partners };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Failed to save partner order.',
+      };
+    }
+  }
+
+  public async deleteOfficialPartner(id: string): Promise<{
+    success: boolean;
+    error?: string;
+    code?: string;
+    requiresReauth?: boolean;
+  }> {
+    try {
+      const route = `/api/admin/official-partners/${encodeURIComponent(id)}`;
+      let attempt = await this.fetchWithAuthTokenRetry(route, (headers) => ({
+        method: 'DELETE',
+        headers: {
+          ...headers,
+          'x-api-route': route,
+        },
+      }));
+
+      if (
+        !attempt.requiresReauth &&
+        !attempt.isTransientError &&
+        isHtmlFallbackResponse({ contentType: attempt.contentType, rawText: attempt.rawText })
+      ) {
+        attempt = await this.fetchWithAuthTokenRetry(
+          `/api/index?__api_path=${encodeURIComponent(route)}`,
+          (headers) => ({
+            method: 'DELETE',
+            headers: {
+              ...headers,
+              'x-api-route': route,
+            },
+          })
+        );
+      }
+
+      const json = attempt.json || {};
+      if (!attempt.response?.ok || !json?.success) {
+        return {
+          success: false,
+          error: json?.error || `Failed to delete official partner (${attempt.response?.status || 500}).`,
+          code: json?.code,
+          requiresReauth: attempt.requiresReauth,
+        };
+      }
+
+      if (this.officialPartnersCache) {
+        this.officialPartnersCache = this.officialPartnersCache.filter((p) => p.id !== id);
+      }
+      this.emitOfficialPartnersChanged();
+      return { success: true };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Failed to delete official partner.',
+      };
+    }
+  }
+
+  public async uploadOfficialPartnerIcon(file: File): Promise<{
+    success: boolean;
+    url?: string;
+    error?: string;
+  }> {
+    const tokenMeta = await supabaseTokenManager.getAccessToken({ forceRefresh: false });
+    if (tokenMeta.requiresReauth || !tokenMeta.token) {
+      return {
+        success: false,
+        error: tokenMeta.error || SESSION_EXPIRED_USER_MESSAGE,
+      };
+    }
+    let res = await storageService.uploadPartnerIcon(file, tokenMeta.token);
+    if (!res.success && /unauthorized|expired|session/i.test(res.error || '')) {
+      const refreshed = await supabaseTokenManager.getAccessToken({
+        forceRefresh: true,
+        rejectedToken: tokenMeta.token,
+      });
+      if (refreshed.token) {
+        res = await storageService.uploadPartnerIcon(file, refreshed.token);
+      }
+    }
+    return res;
   }
 }
 

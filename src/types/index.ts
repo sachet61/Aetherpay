@@ -486,13 +486,41 @@ export interface AppConfig {
   };
 }
 
+export type PartnerPlatform = 'facebook' | 'instagram' | 'telegram';
+
+export interface OfficialPartner {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+  platform: PartnerPlatform;
+  pageUrl: string;
+  messageLink: string | null;
+  gameId: string | null;
+  note: string | null;
+  isVisible: boolean;
+  sortOrder: number;
+  updatedBy?: string | null;
+  updatedAt: string;
+}
+
+export interface OfficialPartnerInput {
+  name: string;
+  iconUrl?: string | null;
+  platform: PartnerPlatform;
+  pageUrl: string;
+  messageLink?: string | null;
+  gameId?: string | null;
+  note?: string | null;
+  isVisible?: boolean;
+}
+
 export interface AuditLog {
   id: string;
   actorId: string;
   actorName: string;
   actorRole: UserRole;
   action: string;
-  entityType: 'topup' | 'withdrawal' | 'wallet' | 'game_account' | 'settings' | 'user' | 'chat' | 'auth';
+  entityType: 'topup' | 'withdrawal' | 'wallet' | 'game_account' | 'settings' | 'user' | 'chat' | 'auth' | 'official_partner';
   entityId: string;
   details: string;
   timestamp: string;

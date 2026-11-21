@@ -223,10 +223,10 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
   };
 
   return (
-    <div className="space-y-6 max-w-6xl mx-auto pb-12">
+    <div className="space-y-6 max-w-6xl mx-auto pb-24 md:pb-8">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
               <Gamepad2 className="w-6 h-6 text-indigo-400" />
               <span>Master Game Catalog Management</span>
@@ -235,9 +235,6 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
               Admin Exclusive
             </span>
           </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Configure game titles, customize local or remote icons, manage separate Game and Download links, and sync changes to Supabase PostgreSQL database.
-          </p>
         </div>
 
         {isAdmin ? (
@@ -263,9 +260,70 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
         </div>
       )}
 
-      {/* Catalog Table */}
+      {/* Catalog Table & Mobile Cards */}
       <div className="rounded-2xl border border-slate-800 bg-slate-900 overflow-hidden shadow-xl">
-        <div className="overflow-x-auto">
+        {/* Mobile Stacked Cards (< 768px) */}
+        <div className="md:hidden divide-y divide-slate-800/80">
+          {catalog.map((game) => {
+            const iconSrc = resolveGameImageUrl(game.iconUrl || game.imageUrl);
+            return (
+              <div key={game.id} className="p-4 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <img
+                      src={iconSrc}
+                      alt={game.title}
+                      width={40}
+                      height={40}
+                      decoding="async"
+                      onError={(e) => {
+                        const img = e.currentTarget;
+                        if (img.dataset.fallbackApplied) return;
+                        img.dataset.fallbackApplied = '1';
+                        img.src = DEFAULT_GAME_ICON;
+                      }}
+                      className="w-10 h-10 rounded-xl object-cover border border-slate-700 bg-slate-800 shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <div className="font-bold text-white text-sm truncate">{game.title}</div>
+                      <div className="text-[11px] text-slate-400 truncate">{game.platform}</div>
+                    </div>
+                  </div>
+                  <span
+                    className={`shrink-0 px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold border ${
+                      game.enabled
+                        ? 'bg-emerald-950 text-emerald-400 border-emerald-800'
+                        : 'bg-slate-800 text-slate-500 border-slate-700'
+                    }`}
+                  >
+                    {game.enabled ? 'Active' : 'Disabled'}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="font-mono text-indigo-400 truncate">{game.id}</span>
+                  <span className="text-slate-400 font-mono shrink-0">
+                    {(game.links?.length || 1)} link{(game.links?.length || 1) === 1 ? '' : 's'}
+                  </span>
+                </div>
+
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenEditGameModal(game)}
+                    className="w-full py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <Edit2 className="w-3.5 h-3.5" />
+                    <span>Edit Game</span>
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Desktop Table (>= 768px) */}
+        <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-950/70 text-slate-400 uppercase text-[10px] font-semibold tracking-wider font-mono">

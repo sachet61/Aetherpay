@@ -36,10 +36,12 @@ import {
   Check,
   Gift,
   ShieldAlert,
+  MessageCircle,
 } from 'lucide-react';
 import { TelegramBotConfigCard } from '../../components/admin/TelegramBotConfigCard';
 import { PolicyAndPartnerCmsCard } from '../../components/admin/PolicyAndPartnerCmsCard';
 import { WheelOfLuckAdminCard } from '../../components/admin/WheelOfLuckAdminCard';
+import { AdminOfficialPartnersTab } from '../../components/admin/AdminOfficialPartnersTab';
 import { normalizeReferralConfig } from '../../utils/referralUtils';
 import { storageService } from '../../services/storageService';
 import { validateImageFile } from '../../utils/uploadUtils';
@@ -89,7 +91,7 @@ const QrCodeUploadBox: React.FC<QrCodeUploadBoxProps> = ({
         onChange(res.url);
         if (onDirectSave) onDirectSave();
         setStatusMsg({
-          text: 'QR image uploaded and saved to Supabase configuration.',
+          text: 'QR image uploaded and saved.',
           type: 'success',
         });
       } else {
@@ -250,7 +252,7 @@ const QrCodeUploadBox: React.FC<QrCodeUploadBoxProps> = ({
           </div>
 
           <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-800/80 text-[10px] text-slate-400 border border-slate-700/60">
-            <span>Stores in Server Repo Storage & Supabase Database</span>
+            <span>Saved to cloud storage</span>
           </div>
         </div>
       )}
@@ -286,6 +288,7 @@ interface AdminConfigProps {
 }
 
 export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
+  const [settingsTab, setSettingsTab] = useState<'general' | 'official_partners'>('general');
   const [config, setConfig] = useState<AppConfig>(dataService.getAppConfig());
   const [successNote, setSuccessNote] = useState<string | null>(null);
   const [feedNotice, setFeedNotice] = useState<string | null>(null);
@@ -434,24 +437,79 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
   const simBonusAmt = (testAmount * simBonusPct) / 100;
   const simTotalCredited = testAmount + simBonusAmt;
 
+  if (currentUser.role !== 'admin') {
+    return (
+      <div className="p-8 text-center rounded-2xl border border-amber-800 bg-amber-950/30 text-amber-300 space-y-2 max-w-3xl mx-auto">
+        <ShieldAlert className="w-8 h-8 mx-auto text-amber-400" />
+        <h2 className="font-bold text-base">Admin Exclusive Area</h2>
+        <p className="text-sm text-amber-300/90">
+          Only administrators can manage platform configuration and official partners.
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-6 max-w-5xl mx-auto pb-12">
+    <div className="space-y-6 max-w-5xl mx-auto pb-24 md:pb-8">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Payment &amp; Bonus Configuration</h1>
-          <p className="text-xs text-slate-400 mt-1">
-            Configure dynamic promotional deposit bonuses for all 4 top-up channels, manage payment links, manual crypto addresses, and withdrawal rules.
-          </p>
-        </div>
+        <h1 className="text-2xl font-bold text-white tracking-tight">
+          {settingsTab === 'official_partners'
+            ? 'Official Partners Settings'
+            : 'Payment & Bonus Configuration'}
+        </h1>
+
+        {settingsTab === 'general' && (
+          <button
+            onClick={() => handleSaveConfig()}
+            className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-indigo-600/20"
+          >
+            <Save className="w-4 h-4" />
+            <span>Save All Changes</span>
+          </button>
+        )}
+      </div>
+
+      {/* Settings Sub-Tabs */}
+      <div
+        role="tablist"
+        aria-label="Settings sections"
+        className="flex flex-wrap items-center gap-2 border-b border-slate-800 pb-3"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={settingsTab === 'general'}
+          onClick={() => setSettingsTab('general')}
+          className={`min-h-[44px] px-4 py-2 rounded-xl text-sm font-semibold border transition-colors inline-flex items-center gap-2 ${
+            settingsTab === 'general'
+              ? 'bg-amber-500 text-slate-950 border-amber-400'
+              : 'bg-[#0E1726] text-slate-200 border-slate-800 hover:border-slate-600'
+          }`}
+        >
+          <Settings className="w-4 h-4" />
+          <span>General &amp; Payments</span>
+        </button>
 
         <button
-          onClick={() => handleSaveConfig()}
-          className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-indigo-600/20"
+          type="button"
+          role="tab"
+          aria-selected={settingsTab === 'official_partners'}
+          onClick={() => setSettingsTab('official_partners')}
+          className={`min-h-[44px] px-4 py-2 rounded-xl text-sm font-semibold border transition-colors inline-flex items-center gap-2 ${
+            settingsTab === 'official_partners'
+              ? 'bg-amber-500 text-slate-950 border-amber-400'
+              : 'bg-[#0E1726] text-slate-200 border-slate-800 hover:border-slate-600'
+          }`}
         >
-          <Save className="w-4 h-4" />
-          <span>Save All Changes</span>
+          <MessageCircle className="w-4 h-4" />
+          <span>Official Partners</span>
         </button>
       </div>
+
+      {settingsTab === 'official_partners' ? (
+        <AdminOfficialPartnersTab currentUser={currentUser} />
+      ) : (
+        <>
 
       {successNote && (
         <div className="p-3 rounded-lg bg-emerald-950/60 border border-emerald-800 text-emerald-300 text-xs flex items-center gap-2">
@@ -668,7 +726,7 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
                 value={cashAppMethod.qrCodeUrl || ''}
                 placeholder="Leave empty for link-only, or upload CashApp QR from PC/mobile"
                 filePrefix="cashapp_qr"
-                helpText="Upload CashApp QR code image from your PC or mobile phone. It is stored in server repo storage (/images/qr/...) and saved in the Supabase database."
+                helpText="Upload a CashApp QR code image from your PC or mobile phone."
                 onChange={(newUrl) => {
                   const updatedMethods = config.paymentMethods.map((pm) =>
                     pm.id === cashAppMethod.id ? { ...pm, qrCodeUrl: newUrl } : pm
@@ -771,7 +829,7 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
                 value={chimeMethod.chimeQrCodeUrl || ''}
                 placeholder="Leave empty for auto-generated chime:// QR code, or upload from PC/mobile"
                 filePrefix="chime_qr"
-                helpText="Upload a Chime QR code image from your PC or take a photo/choose from gallery on mobile. It is saved to the server repo storage (/images/qr/...) and synced directly to the Supabase database."
+                helpText="Upload a Chime QR code image from your PC or take a photo/choose from gallery on mobile."
                 onChange={(newUrl) => {
                   const updatedMethods = config.paymentMethods.map((pm) =>
                     pm.id === chimeMethod.id ? { ...pm, chimeQrCodeUrl: newUrl } : pm
@@ -1519,6 +1577,8 @@ export const AdminConfig: React.FC<AdminConfigProps> = ({ currentUser }) => {
           <span>Save Configuration</span>
         </button>
       </div>
+        </>
+      )}
     </div>
   );
 };

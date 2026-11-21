@@ -1268,6 +1268,141 @@ BEGIN
 END;
 $$;
 
+-- ====================================================================
+-- Official Partners Directory & Partner Icons Storage
+-- ====================================================================
 
+CREATE OR REPLACE FUNCTION public.is_valid_official_partner_url(
+  p_url TEXT,
+  p_platform TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+  v_trimmed TEXT;
+  v_authority TEXT;
+  v_host TEXT;
+BEGIN
+  v_trimmed := btrim(p_url);
 
+  IF v_trimmed !~* '^https://[^/\s?#]+(?:/[^\s]*)?$' THEN
+    RETURN FALSE;
+  END IF;
 
+  v_authority := split_part(regexp_replace(v_trimmed, '^https://', '', 'i'), '/', 1);
+  v_authority := split_part(v_authority, '?', 1);
+  v_authority := split_part(v_authority, '#', 1);
+
+  IF position('@' IN v_authority) > 0 THEN
+    RETURN FALSE;
+  END IF;
+
+  v_host := lower(split_part(v_authority, ':', 1));
+
+  IF p_platform = 'facebook' THEN
+    RETURN v_host IN ('facebook.com', 'www.facebook.com', 'm.facebook.com', 'fb.com', 'm.me');
+  ELSIF p_platform = 'instagram' THEN
+    RETURN v_host IN ('instagram.com', 'www.instagram.com', 'ig.me');
+  ELSIF p_platform = 'telegram' THEN
+    RETURN v_host IN ('t.me', 'telegram.me');
+  END IF;
+
+  RETURN FALSE;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS public.official_partners (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL CHECK (char_length(btrim(name)) BETWEEN 1 AND 80),
+  icon_url TEXT NULL CHECK (
+    icon_url IS NULL
+    OR (
+      icon_url ~* '^https://[^\s<>"'']+$'
+      AND icon_url !~* '\.svg(\?|#|$)'
+      AND icon_url !~* 'image/svg'
+    )
+  ),
+  platform TEXT NOT NULL CHECK (platform IN ('facebook', 'instagram', 'telegram')),
+  page_url TEXT NOT NULL,
+  message_link TEXT NULL,
+  game_id TEXT NULL,
+  note TEXT NULL CHECK (note IS NULL OR char_length(note) <= 80),
+  is_visible BOOLEAN NOT NULL DEFAULT true,
+  sort_order INT NOT NULL DEFAULT 0,
+  updated_by UUID NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  CONSTRAINT chk_official_partners_page_url
+    CHECK (public.is_valid_official_partner_url(page_url, platform)),
+  CONSTRAINT chk_official_partners_message_link
+    CHECK (message_link IS NULL OR public.is_valid_official_partner_url(message_link, platform))
+);
+
+ALTER TABLE public.official_partners ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Authenticated users read visible official partners" ON public.official_partners;
+CREATE POLICY "Authenticated users read visible official partners"
+  ON public.official_partners
+  FOR SELECT
+  TO authenticated
+  USING (is_visible = true);
+
+DROP POLICY IF EXISTS "Admins insert official partners" ON public.official_partners;
+CREATE POLICY "Admins insert official partners"
+  ON public.official_partners
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.users u
+      WHERE (
+        u.id = auth.uid()::text
+        OR lower(u.email) = lower(coalesce(auth.jwt() ->> 'email', ''))
+      )
+      AND u.role = 'admin'
+    )
+  );
+
+DROP POLICY IF EXISTS "Admins update official partners" ON public.official_partners;
+CREATE POLICY "Admins update official partners"
+  ON public.official_partners
+  FOR UPDATE
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.users u
+      WHERE (
+        u.id = auth.uid()::text
+        OR lower(u.email) = lower(coalesce(auth.jwt() ->> 'email', ''))
+      )
+      AND u.role = 'admin'
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.users u
+      WHERE (
+        u.id = auth.uid()::text
+        OR lower(u.email) = lower(coalesce(auth.jwt() ->> 'email', ''))
+      )
+      AND u.role = 'admin'
+    )
+  );
+
+DROP POLICY IF EXISTS "Admins delete official partners" ON public.official_partners;
+CREATE POLICY "Admins delete official partners"
+  ON public.official_partners
+  FOR DELETE
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.users u
+      WHERE (
+        u.id = auth.uid()::text
+        OR lower(u.email) = lower(coalesce(auth.jwt() ->> 'email', ''))
+      )
+      AND u.role = 'admin'
+    )
+  );

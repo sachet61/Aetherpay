@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ReferralSummary, UserProfile, UserWallet } from '../../types';
+import { OfficialPartner, ReferralSummary, UserProfile, UserWallet } from '../../types';
 import { dataService } from '../../services/dataService';
 import {
   HERO_BANNER_IMAGE,
@@ -8,6 +8,8 @@ import {
 import { LiveCashoutFeedList } from '../../components/common/LiveCashoutFeedList';
 import { GamePlatformCard } from '../../components/customer/GamePlatformCard';
 import { toggleGameCardOverlay } from '../../utils/gameCardUtils';
+import { getMessageLink, sortOfficialPartners } from '../../utils/officialPartnersUtils';
+import { PartnerIcon, PlatformGlyph, getPlatformDisplayName } from '../../components/common/PartnerVisuals';
 import {
   buildUnifiedWalletActivity,
   getActivityStatusMeta,
@@ -78,6 +80,9 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   const gameCatalog = dataService.getGameCatalog().filter((g) => g.enabled);
   const [activeOverlayGameId, setActiveOverlayGameId] = useState<string | null>(null);
   const [serverReferralSummary, setServerReferralSummary] = useState<ReferralSummary | null>(null);
+  const [visiblePartners, setVisiblePartners] = useState<OfficialPartner[]>(() =>
+    sortOfficialPartners(dataService.getCachedOfficialPartners().filter((p) => p.isVisible))
+  );
   const localReferralSummary = dataService.getReferralSummary(currentUser.id);
   const referralSummary = serverReferralSummary || localReferralSummary;
   const conversation = dataService.getConversations().find((c) => c.customerId === currentUser.id);
@@ -125,6 +130,14 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
       void dataService.triggerServerReferralEvaluation(currentUser.id);
     }
 
+    const syncPartners = async () => {
+      const res = await dataService.fetchOfficialPartners();
+      if (!cancelled && res.success) {
+        setVisiblePartners(sortOfficialPartners(res.partners.filter((p) => p.isVisible)));
+      }
+    };
+    void syncPartners();
+
     const onStateChanged = (e: any) => {
       const key = e?.detail?.key;
       const tables: string[] = Array.isArray(e?.detail?.tables) ? e.detail.tables : [];
@@ -141,6 +154,13 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
         tables.includes('app_config')
       ) {
         void syncReferralSummary();
+      }
+      if (
+        key === 'official_partners_updated' ||
+        key === 'delta_sync' ||
+        tables.includes('official_partners')
+      ) {
+        void syncPartners();
       }
     };
     window.addEventListener('aetherpay_state_changed', onStateChanged);
@@ -168,7 +188,7 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   };
 
   return (
-    <div className="space-y-6 max-w-6xl mx-auto pb-12">
+    <div className="space-y-6 max-w-6xl mx-auto pb-24 md:pb-8">
       {/* Hero Welcome Banner - Gaming Portal Theme */}
       <div className="relative rounded-2xl overflow-hidden border border-amber-500/20 bg-gradient-to-r from-[#0A0F1D] via-[#111A2E] to-[#0A0F1D] shadow-2xl">
         <div className="absolute inset-0 z-0">
@@ -193,13 +213,9 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
               <span aria-hidden="true" className="text-slate-600">·</span>
               <span className="text-amber-400 font-bold">+20% to +30% RELOAD BONUSES</span>
             </div>
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight flex items-center gap-2">
-              <span>Welcome back, {currentUser.displayName}</span>
-              <span className="text-xl">🎮</span>
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+              Hi, {(currentUser.displayName || '').trim().split(/\s+/)[0] || 'Player'}
             </h1>
-            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-              Play your favorite sweeps platforms (Orion Stars, Fire Kirin, Game Vault &amp; more). Top-up with up to <strong className="text-amber-300">30% bonus</strong>, request manual support cashouts, and manage your game credentials 24/7.
-            </p>
           </div>
 
           {/* Quick Balance Snapshot Card */}
@@ -248,17 +264,13 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
               )}
             </div>
 
-            <p className="text-[10px] text-slate-400 leading-snug bg-[#0A0F1D]/80 p-2 rounded-lg border border-slate-800/80">
-              Deposits are loaded straight into your chosen game with dynamic bonus applied!
-            </p>
-
             {/* Non-cashable Referral & Free-Play Balance Badges */}
             {(wallet.referralBonusBalance || 0) > 0 && (
               <div className="pt-1">
                 <div className="px-2.5 py-1.5 rounded-lg bg-amber-950/60 border border-amber-500/30 flex items-center justify-between text-xs">
                   <span className="text-amber-300 flex items-center gap-1 text-[11px]">
                     <Sparkles className="w-3 h-3 text-amber-400" />
-                    <span>Referral Bonus (Game Only):</span>
+                    <span>Referral Bonus:</span>
                   </span>
                   <span className="font-mono font-bold text-amber-300">
                     ${(wallet.referralBonusBalance || 0).toFixed(2)}
@@ -538,10 +550,14 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
         </div>
       )}
 
-      {/* 2-Column Section: Recent Transactions & Referral Teaser */}
+      {/* Lower Grid: Recent Transactions, Official Partners & Referral Teaser */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: Recent Transactions Ledger */}
-        <div className="lg:col-span-2 space-y-3">
+        <div
+          className={`order-1 space-y-3 ${
+            visiblePartners.length > 0 ? 'lg:col-span-1' : 'lg:col-span-2'
+          }`}
+        >
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-white flex items-center gap-2">
               <TrendingUp className="w-4 h-4 text-indigo-400" />
@@ -626,8 +642,67 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
           </div>
         </div>
 
-        {/* Right: Referral Program Teaser */}
-        <div className="space-y-3">
+        {/* Official Partners (Under Recent Activity on mobile, 3rd column on desktop) */}
+        {visiblePartners.length > 0 && (
+          <div className="order-2 lg:order-3 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-base font-semibold text-white flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-amber-400" />
+                <span>Official Partners</span>
+              </h2>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('official_partners')}
+                className="text-xs text-amber-400 hover:text-amber-300 font-semibold whitespace-nowrap"
+              >
+                See all ({visiblePartners.length})
+              </button>
+            </div>
+
+            <div className="p-4 rounded-xl border border-slate-800 bg-[#0E1726] space-y-3">
+              <p className="text-sm text-slate-300">Message them anytime.</p>
+
+              <div className="space-y-2.5">
+                {visiblePartners.slice(0, 3).map((partner) => (
+                  <div
+                    key={partner.id}
+                    className="p-2.5 rounded-xl bg-[#0A0F1D] border border-slate-800 flex items-center justify-between gap-2.5"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <PartnerIcon
+                        name={partner.name}
+                        iconUrl={partner.iconUrl}
+                        platform={partner.platform}
+                        size="sm"
+                      />
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-white truncate">
+                          {partner.name}
+                        </div>
+                        <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                          <PlatformGlyph platform={partner.platform} className="w-3.5 h-3.5 shrink-0" />
+                          <span>{getPlatformDisplayName(partner.platform)}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <a
+                      href={getMessageLink(partner)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="min-h-[44px] px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs inline-flex items-center justify-center shrink-0 transition-colors"
+                    >
+                      Message
+                    </a>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Referral Program Teaser */}
+        <div className="order-3 lg:order-2 space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-white flex items-center gap-2">
               <Gift className="w-4 h-4 text-amber-400" />

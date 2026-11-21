@@ -135,7 +135,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
       setIsSubmitting(false);
       if (res.success && res.request) {
         setSuccessMessage(
-          `Cashout Request #${res.request.id.slice(-6)} created for $${parsedAmount.toFixed(2)} from ${selectedGameTitle}! An automated notification has been sent to support about your last deposit method (${lastPaymentMethodName}). Redirecting you to Direct Chat with Support...`
+          `Cashout #${res.request.id.slice(-6)} submitted for $${parsedAmount.toFixed(2)} (${selectedGameTitle}). Opening Live Chat...`
         );
         setSelectedTrackingReq(res.request);
 
@@ -166,59 +166,55 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
   };
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto pb-12">
+    <div className="space-y-6 max-w-5xl mx-auto pb-24 md:pb-8">
       <div>
         <h1 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
           <ArrowUpFromLine className="w-6 h-6 text-emerald-400" />
-          <span>Request Cashout (Withdrawal)</span>
+          <span>Cashout</span>
         </h1>
-        <p className="text-xs text-slate-400 mt-1">
-          Select your Game and Amount. Cashouts are processed manually by customer care specialists in Direct Support Chat.
-        </p>
       </div>
 
-      {/* Detected Last Payment Method Card */}
-      <div className={`p-4 rounded-2xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md ${
-        lastPaymentMethod
-          ? 'bg-[#0E1726] border-amber-500/20 text-slate-200'
-          : 'bg-amber-950/40 border-amber-800 text-amber-200'
-      }`}>
-        <div className="flex items-center gap-3">
-          <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-            lastPaymentMethod ? 'bg-[#131C2E] text-amber-400 border border-amber-500/30' : 'bg-amber-900/60 text-amber-400 border border-amber-700'
-          }`}>
-            <Lock className="w-4 h-4" />
-          </div>
-          <div>
-            <div className="font-bold text-white text-xs flex items-center gap-2">
-              <span>Detected Last Payment Method: {lastPaymentMethodName}</span>
-              {lastPaymentMethod && (
-                <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 font-mono text-[10px] border border-emerald-800">
-                  VERIFIED DEPOSIT
-                </span>
-              )}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-0.5">
-              {lastPaymentMethod ? (
-                <>
-                  Your last deposit was made via <strong className="text-emerald-300">{lastPaymentMethodName}</strong> {registeredInfo.details ? `(${registeredInfo.details})` : ''}. A notice will be sent to the admin so your cashout is returned to this channel.
-                </>
-              ) : (
-                'No previous deposit found. Please make a deposit to establish your cashout channel.'
-              )}
-            </div>
-          </div>
+      {/* Compact Payout Channel Banner */}
+      <div
+        className={`px-4 py-3 rounded-xl border text-xs flex flex-wrap items-center justify-between gap-2.5 ${
+          lastPaymentMethod
+            ? 'bg-[#0E1726] border-amber-500/25 text-slate-200'
+            : 'bg-amber-950/40 border-amber-800 text-amber-200'
+        }`}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          <span className="text-slate-300">
+            Payout channel:{' '}
+            <strong className="text-white">
+              {lastPaymentMethod ? lastPaymentMethodName : 'Not set'}
+            </strong>
+            {lastPaymentMethod ? (
+              <span className="text-slate-400"> (auto-matched to last deposit)</span>
+            ) : (
+              <span className="text-amber-200/90"> (complete a deposit first)</span>
+            )}
+          </span>
         </div>
 
-        {!lastPaymentMethod && (
+        <div className="flex items-center gap-3 shrink-0">
+          {!lastPaymentMethod && (
+            <button
+              type="button"
+              onClick={() => onNavigateTab('topup')}
+              className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-bold text-xs transition-colors shadow-sm"
+            >
+              Deposit First &rarr;
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => onNavigateTab('topup')}
-            className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-bold text-xs transition-colors shrink-0 shadow-sm"
+            onClick={() => onNavigateTab('chat')}
+            className="text-xs font-medium text-amber-400 hover:text-amber-300 transition-colors cursor-pointer"
           >
-            Deposit First &rarr;
+            Need help? Open Live Chat
           </button>
-        )}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -328,14 +324,6 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
               </label>
             </div>
 
-            {/* Support Notice */}
-            <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/30 text-xs text-slate-300 flex items-start gap-2.5">
-              <MessageCircle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
-              <div className="leading-relaxed text-[11px]">
-                <strong className="text-white">Direct Chat Support Redirect:</strong> When you submit, our system will message the admin with your cashout details and last deposit method, and automatically redirect you to Live Chat to finalize your payout!
-              </div>
-            </div>
-
             {/* Email Verification Warning for Cashouts (only shown once confirmed unverified) */}
             {verificationUi.showCashoutWarning && (
               <div className="p-3.5 rounded-xl bg-amber-950/60 border border-amber-800 text-xs text-amber-200 flex items-start gap-2.5">
@@ -379,7 +367,7 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
                     {verificationUi.showCashoutWarning
                       ? 'Verify Email to Request Cashout'
                       : !cashtagAcknowledged
-                      ? 'Confirm Cashtag Warning to Continue'
+                      ? 'Confirm'
                       : isSubmitting
                       ? 'Initiating Support Cashout...'
                       : `Request Cashout ($${parsedAmount.toFixed(2)}) & Open Support Chat`}
@@ -390,33 +378,8 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
           </form>
         </div>
 
-        {/* Right Column: Direct Chat Action & Live Cashouts Feed (5 cols) */}
+        {/* Right Column: Tracking & Live Cashouts Feed (5 cols) */}
         <div className="lg:col-span-5 space-y-5">
-          {/* Direct Support Chat Card */}
-          <div className="p-5 rounded-2xl border border-amber-500/30 bg-[#0E1726] shadow-xl space-y-3">
-            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-              <div className="font-bold text-white text-xs flex items-center gap-1.5">
-                <MessageSquare className="w-4 h-4 text-amber-400" />
-                <span>Direct Chat with Support</span>
-              </div>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800">
-                24/7 ONLINE
-              </span>
-            </div>
-
-            <p className="text-xs text-slate-300 leading-relaxed">
-              Prefer to cash out directly with an agent? Open Live Chat now. Our support operators will verify your game credits on the backend and disburse your funds manually.
-            </p>
-
-            <button
-              type="button"
-              onClick={() => onNavigateTab('chat')}
-              className="w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-500 via-yellow-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 transition-colors shadow-md shadow-amber-500/20"
-            >
-              <MessageCircle className="w-4 h-4" />
-              <span>Open Direct Chat with Support</span>
-            </button>
-          </div>
 
           {/* Active Request Tracking Card */}
           {selectedTrackingReq && (
@@ -471,7 +434,54 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
             <span>Recent Cashout History</span>
           </h2>
 
-          <div className="overflow-x-auto">
+          {/* Mobile Stacked Cards */}
+          <div className="md:hidden space-y-2.5">
+            {withdrawalHistory.slice(0, 5).map((wdr) => (
+              <div
+                key={wdr.id}
+                className="p-3.5 rounded-xl border border-slate-800 bg-slate-950/60 space-y-2.5"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-white truncate">
+                      {wdr.sourceGameName || 'Game'}
+                    </div>
+                    <div className="text-xs text-slate-400 truncate">{wdr.methodName || wdr.method}</div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-md text-xs font-mono font-bold text-white bg-slate-800/90 border border-slate-700 shrink-0 tabular-nums">
+                    ${wdr.amount.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      {new Date(wdr.createdAt).toLocaleDateString()}
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[10px] font-sans font-semibold ${
+                        wdr.status === 'completed'
+                          ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                          : wdr.status === 'rejected' || wdr.status === 'cancelled'
+                          ? 'bg-rose-950 text-rose-400 border border-rose-800'
+                          : 'bg-amber-950 text-amber-400 border border-amber-800'
+                      }`}
+                    >
+                      {wdr.status.replace('_', ' ')}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedTrackingReq(wdr)}
+                    className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 text-xs font-semibold border border-slate-700"
+                  >
+                    Track
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-xs text-left">
               <thead className="text-[11px] text-slate-400 border-b border-slate-800 font-mono">
                 <tr>

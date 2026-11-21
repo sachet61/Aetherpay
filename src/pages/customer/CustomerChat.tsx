@@ -1028,7 +1028,43 @@ export const CustomerChat: React.FC<CustomerChatProps> = ({
                                   }`
                             }`}
                           >
-                            {msg.text && <p className="break-words [overflow-wrap:anywhere]">{msg.text}</p>}
+                            {msg.text && (() => {
+                              const ctaTokens = ['Request Game ID ->', 'View in Gaming IDs ->'] as const;
+                              const lines = msg.text.split('\n');
+                              const lastLine = lines[lines.length - 1]?.trim();
+                              const matchedCta = ctaTokens.find((token) => lastLine === token);
+
+                              if (!matchedCta) {
+                                return <p className="break-words [overflow-wrap:anywhere]">{msg.text}</p>;
+                              }
+
+                              const bodyText = lines.slice(0, -1).join('\n');
+                              return (
+                                <div className="space-y-1.5">
+                                  {bodyText && (
+                                    <p className="break-words [overflow-wrap:anywhere]">{bodyText}</p>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (matchedCta === 'Request Game ID ->') {
+                                        if (gameCatalog.length > 0) setSelectedGameId(gameCatalog[0].id);
+                                        setShowGameRequestModal(true);
+                                      } else {
+                                        onNavigateTab('game_accounts');
+                                      }
+                                    }}
+                                    className={`inline-flex items-center gap-1 text-xs font-semibold underline underline-offset-4 transition-colors ${
+                                      isMe
+                                        ? 'text-white/90 hover:text-white'
+                                        : 'text-indigo-300 hover:text-white'
+                                    }`}
+                                  >
+                                    <span>{matchedCta}</span>
+                                  </button>
+                                </div>
+                              );
+                            })()}
 
                           {/* Forwarded Transaction Card */}
                           {msg.transactionData && msg.transactionData.transactionType && (

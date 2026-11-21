@@ -297,8 +297,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
               <h1 className="text-2xl sm:text-3xl lg:text-4xl font-black tracking-tight text-white leading-tight">
                 Play Top Sweepstakes Games
               </h1>
-              <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-xl">
-                Hover over any game platform and click <strong className="text-amber-400">Play Now</strong> to load credits and start spinning.
+              <p className="text-xs sm:text-sm text-slate-400">
+                Select a game and click <strong className="text-amber-400">Play Now</strong> to begin.
               </p>
             </div>
 

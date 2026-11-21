@@ -7,6 +7,7 @@ import {
   filterAuditLogs,
   mergeAuditLogs,
 } from '../../utils/auditLogUtils';
+import { formatShortUuid } from '../../utils/uiCopyUtils';
 import {
   ShieldAlert,
   Search,
@@ -15,6 +16,8 @@ import {
   AlertCircle,
   Loader2,
   Calendar,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 interface AdminAuditProps {
@@ -38,6 +41,16 @@ export const AdminAudit: React.FC<AdminAuditProps> = ({ currentUser }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [errorRequiresReauth, setErrorRequiresReauth] = useState(false);
+  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
+  const [copiedEntityKey, setCopiedEntityKey] = useState<string | null>(null);
+
+  const handleCopyEntityId = (value: string, key: string) => {
+    navigator.clipboard.writeText(value);
+    setCopiedEntityKey(key);
+    window.setTimeout(() => {
+      setCopiedEntityKey((prev) => (prev === key ? null : prev));
+    }, 2000);
+  };
 
   const activeFiltersRef = useRef({
     entityFilter,
@@ -179,13 +192,10 @@ export const AdminAudit: React.FC<AdminAuditProps> = ({ currentUser }) => {
   };
 
   return (
-    <div className="space-y-6 max-w-6xl mx-auto pb-12">
+    <div className="space-y-6 max-w-6xl mx-auto pb-24 md:pb-8">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Audit Logs &amp; Operational Reports</h1>
-          <p className="text-xs text-slate-400 mt-1">
-            Immutable server-recorded audit trail for authentication events, staff overrides, treasury approvals, and system mutations.
-          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -227,6 +237,7 @@ export const AdminAudit: React.FC<AdminAuditProps> = ({ currentUser }) => {
             <option value="withdrawal">Withdrawals</option>
             <option value="wallet">Wallet Balances</option>
             <option value="game_account">Gaming IDs</option>
+            <option value="official_partner">Official Partners</option>
             <option value="settings">Settings &amp; Rules</option>
             <option value="chat">Support Chat</option>
           </select>
@@ -292,55 +303,145 @@ export const AdminAudit: React.FC<AdminAuditProps> = ({ currentUser }) => {
         ) : logs.length === 0 ? (
           <div className="p-12 text-center text-xs text-slate-500">No audit records found.</div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead>
-                <tr className="border-b border-slate-800 bg-slate-950/70 text-slate-400 uppercase text-[10px] font-semibold tracking-wider">
-                  <th className="py-3 px-4">Timestamp &amp; ID</th>
-                  <th className="py-3 px-4">Actor</th>
-                  <th className="py-3 px-4">Action</th>
-                  <th className="py-3 px-4">Target Entity</th>
-                  <th className="py-3 px-4">Details</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {logs.map((log) => (
-                  <tr key={log.id} className="hover:bg-slate-800/40">
-                    <td className="py-3.5 px-4 font-mono">
-                      <div className="text-slate-300">
+          <>
+            {/* Mobile Stacked Cards (< 768px) */}
+            <div className="md:hidden divide-y divide-slate-800/80">
+              {logs.map((log) => {
+                const isExpanded = expandedLogId === log.id;
+                return (
+                  <div key={log.id} className="p-4 space-y-2.5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-mono font-bold text-slate-100 text-xs truncate">
+                          {log.action}
+                        </div>
+                        <div className="text-xs text-slate-300 mt-0.5 truncate">{log.actorName}</div>
+                      </div>
+                      <span className="shrink-0 px-2 py-0.5 rounded-md text-[10px] font-mono capitalize bg-indigo-950/60 text-indigo-300 border border-indigo-800/50">
+                        {log.actorRole}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="font-mono text-slate-400">
                         {new Date(log.timestamp).toLocaleDateString([], {
                           month: 'short',
                           day: 'numeric',
-                          year: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
                         })}
+                      </span>
+                      <span className="text-[10px] font-mono capitalize px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+                        {log.entityType}
+                      </span>
+                    </div>
+
+                    {isExpanded && (
+                      <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-300 leading-relaxed space-y-1">
+                        {log.entityId && (
+                          <div className="font-mono text-[10px] text-slate-400 flex items-center gap-1.5">
+                            <span title={log.entityId}>ID: {formatShortUuid(log.entityId)}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleCopyEntityId(log.entityId!, `mob_${log.id}`)}
+                              className="p-1 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 transition-colors"
+                              title="Copy full ID"
+                              aria-label="Copy full entity ID"
+                            >
+                              {copiedEntityKey === `mob_${log.id}` ? (
+                                <Check className="w-3 h-3 text-emerald-400" />
+                              ) : (
+                                <Copy className="w-3 h-3" />
+                              )}
+                            </button>
+                          </div>
+                        )}
+                        <div>{log.details}</div>
                       </div>
-                      <div className="text-[10px] text-slate-500">
-                        {new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                      </div>
-                    </td>
+                    )}
 
-                    <td className="py-3.5 px-4">
-                      <div className="font-semibold text-white">{log.actorName}</div>
-                      <div className="text-[10px] font-mono text-indigo-400 capitalize">{log.actorRole}</div>
-                    </td>
+                    <button
+                      type="button"
+                      onClick={() => setExpandedLogId(isExpanded ? null : log.id)}
+                      className="w-full py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs transition-colors"
+                    >
+                      {isExpanded ? 'Hide Details' : 'Inspect Details'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
 
-                    <td className="py-3.5 px-4 font-mono font-bold text-slate-200 text-[11px]">
-                      {log.action}
-                    </td>
-
-                    <td className="py-3.5 px-4 font-mono text-[11px] text-slate-400">
-                      <span className="capitalize text-slate-300 font-medium">{log.entityType}</span>
-                      {log.entityId ? `: ${log.entityId}` : ''}
-                    </td>
-
-                    <td className="py-3.5 px-4 text-slate-300 leading-relaxed max-w-md">
-                      {log.details}
-                    </td>
+            {/* Desktop Table (>= 768px) */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-950/70 text-slate-400 uppercase text-[10px] font-semibold tracking-wider">
+                    <th className="py-3 px-4">Timestamp &amp; ID</th>
+                    <th className="py-3 px-4">Actor</th>
+                    <th className="py-3 px-4">Action</th>
+                    <th className="py-3 px-4">Target Entity</th>
+                    <th className="py-3 px-4">Details</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {logs.map((log) => (
+                    <tr key={log.id} className="hover:bg-slate-800/40">
+                      <td className="py-3.5 px-4 font-mono">
+                        <div className="text-slate-300">
+                          {new Date(log.timestamp).toLocaleDateString([], {
+                            month: 'short',
+                            day: 'numeric',
+                            year: 'numeric',
+                          })}
+                        </div>
+                        <div className="text-[10px] text-slate-500">
+                          {new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                        </div>
+                      </td>
+
+                      <td className="py-3.5 px-4">
+                        <div className="font-semibold text-white">{log.actorName}</div>
+                        <div className="text-[10px] font-mono text-indigo-400 capitalize">{log.actorRole}</div>
+                      </td>
+
+                      <td className="py-3.5 px-4 font-mono font-bold text-slate-200 text-[11px]">
+                        {log.action}
+                      </td>
+
+                      <td className="py-3.5 px-4 font-mono text-[11px] text-slate-400">
+                        <div className="inline-flex items-center gap-1.5 flex-wrap">
+                          <span className="capitalize text-slate-300 font-medium">{log.entityType}</span>
+                          {log.entityId && (
+                            <>
+                              <span title={log.entityId}>: {formatShortUuid(log.entityId)}</span>
+                              <button
+                                type="button"
+                                onClick={() => handleCopyEntityId(log.entityId!, `desk_${log.id}`)}
+                                className="p-1 rounded bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 transition-colors"
+                                title="Copy full ID"
+                                aria-label="Copy full entity ID"
+                              >
+                                {copiedEntityKey === `desk_${log.id}` ? (
+                                  <Check className="w-3 h-3 text-emerald-400" />
+                                ) : (
+                                  <Copy className="w-3 h-3" />
+                                )}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="py-3.5 px-4 text-slate-300 leading-relaxed max-w-md">
+                        {log.details}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
 
         {hasMore && nextCursor && (

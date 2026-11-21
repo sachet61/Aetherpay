@@ -16,6 +16,7 @@ import type {
   WithdrawalRequest,
 } from '../../types';
 import { dataService } from '../../services/dataService';
+import { formatCashoutChatMessage } from '../../utils/uiCopyUtils';
 
 interface AdminChatCashoutModalProps {
   customerId: string;
@@ -178,7 +179,14 @@ export const AdminChatCashoutModal: React.FC<AdminChatCashoutModalProps> = ({
         senderId: currentUser.id,
         senderName: currentUser.displayName,
         senderRole: 'agent',
-        text: `💸 Cashout Approved! Your withdrawal request #${req.id.slice(-6)} for $${req.amount.toFixed(2)} (${req.methodName}) has been processed and marked completed.`,
+        text: formatCashoutChatMessage({
+          amount: req.amount,
+          netPayout: req.netPayout,
+          methodName: req.methodName,
+          gameName: req.sourceGameName,
+          status: 'completed',
+          payoutReference: refCode,
+        }),
         isInternalNote: false,
       });
 
@@ -249,7 +257,7 @@ export const AdminChatCashoutModal: React.FC<AdminChatCashoutModalProps> = ({
       senderId: currentUser.id,
       senderName: currentUser.displayName,
       senderRole: 'agent',
-      text: `You have $${(customerWallet?.availableBalance || 0).toFixed(2)} available in your wallet or can request a game cashout anytime. Would you like to submit a CashApp, Chime, or Crypto cashout request?`,
+      text: `💸 Ready to Cash Out? Available: $${(customerWallet?.availableBalance || 0).toFixed(2)}\nOpen Request Cashout to submit.`,
       isInternalNote: false,
     });
     onSuccess('Cashout inquiry sent to player.');

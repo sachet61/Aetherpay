@@ -405,11 +405,11 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
   });
 
   return (
-    <div className="space-y-6 max-w-6xl mx-auto pb-12">
+    <div className="space-y-6 max-w-6xl mx-auto pb-24 md:pb-8">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-2xl font-bold text-white tracking-tight">User Directory &amp; Staff Governance</h1>
             <span
               className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold flex items-center gap-1 ${
@@ -419,14 +419,9 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
               }`}
             >
               {isAdmin ? <Shield className="w-3 h-3 text-amber-400" /> : <Headphones className="w-3 h-3 text-cyan-400" />}
-              <span>{isAdmin ? 'Admin Authority: Full Role Management' : 'Agent Authority: Read-Only Profile View'}</span>
+              <span>{isAdmin ? 'Admin Authority' : 'Agent Read-Only'}</span>
             </span>
           </div>
-          <p className="text-xs text-slate-400 mt-1">
-            {isAdmin
-              ? 'Promote players to agents or administrators. Primary platform creator is permanently protected as Super Admin.'
-              : 'View complete player profiles, active game accounts, balances, and chat channels. Role changes are restricted to Admins.'}
-          </p>
         </div>
 
         <div className="flex items-center gap-2 text-xs flex-wrap">
@@ -516,253 +511,316 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
         </div>
       </div>
 
-      {/* Users Table */}
+      {/* Users List / Table */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="border-b border-slate-800 bg-slate-950/50 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                <th className="py-3.5 px-4">User / Handle</th>
-                <th className="py-3.5 px-4">Role &amp; Governance</th>
-                <th className="py-3.5 px-4">Wallet Balance</th>
-                <th className="py-3.5 px-4">Active Games</th>
-                <th className="py-3.5 px-4">Verification</th>
-                <th className="py-3.5 px-4 text-center">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60 text-slate-300">
-              {isLoading ? (
-                <tr>
-                  <td colSpan={6} className="py-16 text-center text-slate-400">
-                    <div className="flex flex-col items-center justify-center gap-2.5">
-                      <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
-                      <span className="text-xs font-medium">Loading live user directory from PostgreSQL database...</span>
-                    </div>
-                  </td>
-                </tr>
-              ) : fetchError ? (
-                <tr>
-                  <td colSpan={6} className="py-12 text-center text-rose-300">
-                    <div className="flex flex-col items-center justify-center gap-2 max-w-md mx-auto">
-                      <AlertCircle className="w-6 h-6 text-rose-400" />
-                      <span className="text-xs font-semibold">{fetchError}</span>
-                      <button
-                        type="button"
-                        onClick={() => loadUsersLive(true)}
-                        className="mt-2 px-3 py-1.5 rounded-lg bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-200 text-xs font-semibold cursor-pointer"
-                      >
-                        Retry Database Query
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ) : filteredUsers.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="py-12 text-center text-slate-500">
-                    No users matching the selected filters.
-                  </td>
-                </tr>
-              ) : (
-                filteredUsers.map((u) => {
-                  const wallet = (u as any).wallet || dataService.getWallet(u.id);
-                  const gameAccounts = (u as any).gameAccounts || dataService.getGameAccounts(u.id);
-                  const isParentAdmin =
-                    u.role === 'admin' &&
-                    (dataService.isProtectedParentAdmin(u.email, u) ||
-                      dataService.isProtectedParentAdmin(u.id, u) ||
-                      Boolean(u.isParentAdmin));
+        {isLoading ? (
+          <div className="py-16 px-4 text-center text-slate-400">
+            <div className="flex flex-col items-center justify-center gap-2.5">
+              <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
+              <span className="text-xs font-medium">Loading live user directory...</span>
+            </div>
+          </div>
+        ) : fetchError ? (
+          <div className="py-12 px-4 text-center text-rose-300">
+            <div className="flex flex-col items-center justify-center gap-2 max-w-md mx-auto">
+              <AlertCircle className="w-6 h-6 text-rose-400" />
+              <span className="text-xs font-semibold">{fetchError}</span>
+              <button
+                type="button"
+                onClick={() => loadUsersLive(true)}
+                className="mt-2 px-3 py-1.5 rounded-lg bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-200 text-xs font-semibold cursor-pointer"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        ) : filteredUsers.length === 0 ? (
+          <div className="py-12 px-4 text-center text-xs text-slate-500">
+            No users matching the selected filters.
+          </div>
+        ) : (
+          <>
+            {/* Mobile Stacked Cards (< 768px) */}
+            <div className="md:hidden divide-y divide-slate-800/80">
+              {filteredUsers.map((u) => {
+                const wallet = (u as any).wallet || dataService.getWallet(u.id);
+                const isParentAdmin =
+                  u.role === 'admin' &&
+                  (dataService.isProtectedParentAdmin(u.email, u) ||
+                    dataService.isProtectedParentAdmin(u.id, u) ||
+                    Boolean(u.isParentAdmin));
 
-                  return (
-                    <tr
-                      key={u.id}
-                      className="hover:bg-slate-800/40 transition-colors cursor-pointer"
-                      onClick={(e) => {
-                        // Prevent triggering row click when interacting with select or action buttons
-                        const target = e.target as HTMLElement;
-                        if (target.closest('select') || target.closest('button')) return;
-                        setSelectedUser(u);
-                        setModalFeedback(null);
-                      }}
+                return (
+                  <div key={u.id} className="p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-bold text-white text-sm flex items-center gap-1.5 truncate">
+                          <span className="truncate">{u.displayName}</span>
+                          {isParentAdmin && <Shield className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
+                        </div>
+                        <div className="text-[11px] text-slate-400 font-mono truncate">{u.email}</div>
+                      </div>
+                      <span
+                        className={`shrink-0 px-2 py-0.5 rounded-md text-[10px] font-mono font-bold capitalize border ${
+                          u.role === 'admin'
+                            ? 'bg-amber-950/60 text-amber-300 border-amber-800/60'
+                            : u.role === 'agent'
+                            ? 'bg-cyan-950/60 text-cyan-300 border-cyan-800/60'
+                            : 'bg-indigo-950/60 text-indigo-300 border-indigo-800/60'
+                        }`}
+                      >
+                        {isParentAdmin ? 'Super Admin' : u.role}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <div className="font-mono text-slate-300">
+                        <span className="text-slate-500">Bal: </span>
+                        <span className="font-bold text-white">${(wallet?.availableBalance || 0).toFixed(2)}</span>
+                        {u.createdAt && (
+                          <span className="text-[10px] text-slate-500 ml-2">
+                            {new Date(u.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                          </span>
+                        )}
+                      </div>
+                      {u.emailVerified ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-2 py-0.5 rounded-full">
+                          <CheckCircle2 className="w-3 h-3" /> Verified
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-mono text-amber-400 bg-amber-950/60 border border-amber-800/40 px-2 py-0.5 rounded-full">
+                          <Clock className="w-3 h-3" /> Unverified
+                        </span>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => openUserInspector(u)}
+                      className="w-full py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors"
                     >
-                      {/* User Info */}
-                      <td className="py-3.5 px-4">
-                        <div className="flex items-center gap-3">
-                          <div
-                            className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs uppercase shadow-inner overflow-hidden shrink-0 ${
-                              u.role === 'admin'
-                                ? 'bg-amber-950 text-amber-300 border border-amber-800/60'
-                                : u.role === 'agent'
-                                ? 'bg-cyan-950 text-cyan-300 border border-cyan-800/60'
-                                : 'bg-indigo-950 text-indigo-300 border border-indigo-800/60'
-                            }`}
-                          >
-                            {u.avatarUrl ? (
-                              <img
-                                src={u.avatarUrl}
-                                alt={u.displayName}
-                                className="w-full h-full object-cover"
-                                referrerPolicy="no-referrer"
-                              />
-                            ) : (
-                              u.displayName.charAt(0)
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <div className="font-bold text-white flex items-center gap-1.5 truncate">
-                              <span>{u.displayName}</span>
-                              {isParentAdmin && (
-                                <span title="Protected Parent Super Admin (Cannot be demoted)">
-                                  <Shield className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                                </span>
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Manage Profile</span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Desktop Table (>= 768px) */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-950/50 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                    <th className="py-3.5 px-4">User / Handle</th>
+                    <th className="py-3.5 px-4">Role &amp; Governance</th>
+                    <th className="py-3.5 px-4">Wallet Balance</th>
+                    <th className="py-3.5 px-4">Active Games</th>
+                    <th className="py-3.5 px-4">Verification</th>
+                    <th className="py-3.5 px-4 text-center">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                  {filteredUsers.map((u) => {
+                    const wallet = (u as any).wallet || dataService.getWallet(u.id);
+                    const gameAccounts = (u as any).gameAccounts || dataService.getGameAccounts(u.id);
+                    const isParentAdmin =
+                      u.role === 'admin' &&
+                      (dataService.isProtectedParentAdmin(u.email, u) ||
+                        dataService.isProtectedParentAdmin(u.id, u) ||
+                        Boolean(u.isParentAdmin));
+
+                    return (
+                      <tr
+                        key={u.id}
+                        className="hover:bg-slate-800/40 transition-colors cursor-pointer"
+                        onClick={(e) => {
+                          const target = e.target as HTMLElement;
+                          if (target.closest('select') || target.closest('button')) return;
+                          setSelectedUser(u);
+                          setModalFeedback(null);
+                        }}
+                      >
+                        {/* User Info */}
+                        <td className="py-3.5 px-4">
+                          <div className="flex items-center gap-3">
+                            <div
+                              className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs uppercase shadow-inner overflow-hidden shrink-0 ${
+                                u.role === 'admin'
+                                  ? 'bg-amber-950 text-amber-300 border border-amber-800/60'
+                                  : u.role === 'agent'
+                                  ? 'bg-cyan-950 text-cyan-300 border border-cyan-800/60'
+                                  : 'bg-indigo-950 text-indigo-300 border border-indigo-800/60'
+                              }`}
+                            >
+                              {u.avatarUrl ? (
+                                <img
+                                  src={u.avatarUrl}
+                                  alt={u.displayName}
+                                  className="w-full h-full object-cover"
+                                  referrerPolicy="no-referrer"
+                                />
+                              ) : (
+                                u.displayName.charAt(0)
                               )}
                             </div>
-                            <div className="text-[11px] text-slate-400 font-mono truncate">{u.email}</div>
+                            <div className="min-w-0">
+                              <div className="font-bold text-white flex items-center gap-1.5 truncate">
+                                <span>{u.displayName}</span>
+                                {isParentAdmin && (
+                                  <span title="Protected Parent Super Admin (Cannot be demoted)">
+                                    <Shield className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-slate-400 font-mono truncate">{u.email}</div>
+                            </div>
                           </div>
-                        </div>
-                      </td>
+                        </td>
 
-                      {/* Role & Governance Selector */}
-                      <td className="py-3.5 px-4">
-                        {isParentAdmin ? (
-                          <div
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 text-amber-300 border border-amber-500/30 text-[11px] font-bold"
-                            title="Protected Parent Super Admin: Cannot be altered or demoted by other administrators"
-                          >
-                            <Lock className="w-3 h-3 text-amber-400 shrink-0" />
-                            <span>Parent Super Admin</span>
-                          </div>
-                        ) : isAdmin ? (
-                          <div className="flex items-center gap-2">
-                            <select
-                              value={u.role}
-                              disabled={isUpdating === u.id}
-                              onChange={(e) => handleRoleChange(u, e.target.value as UserRole)}
-                              className={`bg-slate-950 border rounded-lg px-2.5 py-1 text-xs font-semibold focus:outline-none transition-colors cursor-pointer ${
-                                u.role === 'admin'
-                                  ? 'border-amber-700/80 text-amber-300'
-                                  : u.role === 'agent'
-                                  ? 'border-cyan-700/80 text-cyan-300'
-                                  : 'border-slate-700 text-slate-300'
-                              } ${isUpdating === u.id ? 'opacity-50 cursor-wait' : ''}`}
+                        {/* Role & Governance Selector */}
+                        <td className="py-3.5 px-4">
+                          {isParentAdmin ? (
+                            <div
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 text-amber-300 border border-amber-500/30 text-[11px] font-bold"
+                              title="Protected Parent Super Admin: Cannot be altered or demoted by other administrators"
                             >
-                              <option value="customer">Player (Customer)</option>
-                              <option value="agent">Support Agent</option>
-                              <option value="admin">Administrator</option>
-                            </select>
-                            {isUpdating === u.id && (
-                              <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />
+                              <Lock className="w-3 h-3 text-amber-400 shrink-0" />
+                              <span>Parent Super Admin</span>
+                            </div>
+                          ) : isAdmin ? (
+                            <div className="flex items-center gap-2">
+                              <select
+                                value={u.role}
+                                disabled={isUpdating === u.id}
+                                onChange={(e) => handleRoleChange(u, e.target.value as UserRole)}
+                                className={`bg-slate-950 border rounded-lg px-2.5 py-1 text-xs font-semibold focus:outline-none transition-colors cursor-pointer ${
+                                  u.role === 'admin'
+                                    ? 'border-amber-700/80 text-amber-300'
+                                    : u.role === 'agent'
+                                    ? 'border-cyan-700/80 text-cyan-300'
+                                    : 'border-slate-700 text-slate-300'
+                                } ${isUpdating === u.id ? 'opacity-50 cursor-wait' : ''}`}
+                              >
+                                <option value="customer">Player (Customer)</option>
+                                <option value="agent">Support Agent</option>
+                                <option value="admin">Administrator</option>
+                              </select>
+                              {isUpdating === u.id && (
+                                <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />
+                              )}
+                            </div>
+                          ) : (
+                            <span
+                              className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold capitalize ${
+                                u.role === 'admin'
+                                  ? 'bg-amber-950/60 text-amber-300 border border-amber-800/60'
+                                  : u.role === 'agent'
+                                  ? 'bg-cyan-950/60 text-cyan-300 border border-cyan-800/60'
+                                  : 'bg-slate-800 text-slate-300'
+                              }`}
+                              title="Agent View: Read-only access"
+                            >
+                              {u.role}
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Wallet Balance */}
+                        <td className="py-3.5 px-4">
+                          <div className="font-mono font-bold text-white">
+                            ${(wallet?.availableBalance || 0).toFixed(2)}
+                          </div>
+                          {(wallet?.reservedBalance || 0) > 0 && (
+                            <div className="text-[10px] text-amber-400 font-mono">
+                              ${wallet.reservedBalance.toFixed(2)} in vault
+                            </div>
+                          )}
+                        </td>
+
+                        {/* Active Games */}
+                        <td className="py-3.5 px-4">
+                          <span className="font-mono text-slate-300">
+                            {(() => {
+                              const activeCount = gameAccounts.filter((g) => g.status === 'active').length;
+                              return `${activeCount} active game${activeCount === 1 ? '' : 's'}`;
+                            })()}
+                          </span>
+                        </td>
+
+                        {/* Verification Status */}
+                        <td className="py-3.5 px-4">
+                          {u.emailVerified ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-2 py-0.5 rounded-full">
+                              <CheckCircle2 className="w-3 h-3" /> Verified
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-mono text-amber-400 bg-amber-950/60 border border-amber-800/40 px-2 py-0.5 rounded-full">
+                              <Clock className="w-3 h-3" /> Unverified
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Actions */}
+                        <td className="py-3.5 px-4 text-center">
+                          <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                            <button
+                              onClick={() => openUserInspector(u)}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-medium text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                              title="View individual profile"
+                            >
+                              <Eye className="w-3 h-3" />
+                              <span>Profile</span>
+                            </button>
+
+                            <button
+                              onClick={() => {
+                                const conv = dataService.getOrCreateConversationForCustomer(u.id, u.displayName);
+                                onNavigateTab('ops_chat', { highlightConvId: conv.id });
+                              }}
+                              className="p-1 rounded-lg bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-800/60 text-indigo-300 transition-colors cursor-pointer"
+                              title="Chat with user"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                            </button>
+
+                            {isAdmin && (
+                              isParentAdmin ? (
+                                <span
+                                  className="px-2 py-1 rounded-lg bg-amber-950/40 border border-amber-800/40 text-amber-400/70 text-[10px] font-mono flex items-center gap-1 cursor-not-allowed"
+                                  title="Parent Administrator account is permanently protected from deletion"
+                                >
+                                  <Lock className="w-2.5 h-2.5" />
+                                  <span>Protected</span>
+                                </span>
+                              ) : currentUser.id === u.id ? (
+                                <span
+                                  className="px-2 py-1 rounded-lg bg-slate-800/50 text-slate-500 text-[10px] font-mono italic"
+                                  title="Active session"
+                                >
+                                  (You)
+                                </span>
+                              ) : (
+                                <button
+                                  onClick={() => setUserToDelete(u)}
+                                  className="px-2 py-1 rounded-lg bg-rose-950/50 hover:bg-rose-900/80 border border-rose-800/60 text-rose-300 font-medium text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                                  title={`Permanently delete ${u.displayName} account`}
+                                >
+                                  <Trash2 className="w-3 h-3 text-rose-400" />
+                                  <span>Delete</span>
+                                </button>
+                              )
                             )}
                           </div>
-                        ) : (
-                          <span
-                            className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold capitalize ${
-                              u.role === 'admin'
-                                ? 'bg-amber-950/60 text-amber-300 border border-amber-800/60'
-                                : u.role === 'agent'
-                                ? 'bg-cyan-950/60 text-cyan-300 border border-cyan-800/60'
-                                : 'bg-slate-800 text-slate-300'
-                            }`}
-                            title="Agent View: Read-only access"
-                          >
-                            {u.role}
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Wallet Balance */}
-                      <td className="py-3.5 px-4">
-                        <div className="font-mono font-bold text-white">
-                          ${(wallet?.availableBalance || 0).toFixed(2)}
-                        </div>
-                        {(wallet?.reservedBalance || 0) > 0 && (
-                          <div className="text-[10px] text-amber-400 font-mono">
-                            ${wallet.reservedBalance.toFixed(2)} in vault
-                          </div>
-                        )}
-                      </td>
-
-                      {/* Active Games */}
-                      <td className="py-3.5 px-4">
-                        <span className="font-mono text-slate-300">
-                          {(() => {
-                            const activeCount = gameAccounts.filter((g) => g.status === 'active').length;
-                            return `${activeCount} active game${activeCount === 1 ? '' : 's'}`;
-                          })()}
-                        </span>
-                      </td>
-
-                      {/* Verification Status */}
-                      <td className="py-3.5 px-4">
-                        {u.emailVerified ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-2 py-0.5 rounded-full">
-                            <CheckCircle2 className="w-3 h-3" /> Verified
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-mono text-amber-400 bg-amber-950/60 border border-amber-800/40 px-2 py-0.5 rounded-full">
-                            <Clock className="w-3 h-3" /> Unverified
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Actions */}
-                      <td className="py-3.5 px-4 text-center">
-                        <div className="flex items-center justify-center gap-1.5 flex-wrap">
-                          <button
-                            onClick={() => openUserInspector(u)}
-                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-medium text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
-                            title="View individual profile"
-                          >
-                            <Eye className="w-3 h-3" />
-                            <span>Profile</span>
-                          </button>
-
-                          <button
-                            onClick={() => {
-                              const conv = dataService.getOrCreateConversationForCustomer(u.id, u.displayName);
-                              onNavigateTab('ops_chat', { highlightConvId: conv.id });
-                            }}
-                            className="p-1 rounded-lg bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-800/60 text-indigo-300 transition-colors cursor-pointer"
-                            title="Chat with user"
-                          >
-                            <MessageSquare className="w-3.5 h-3.5" />
-                          </button>
-
-                          {isAdmin && (
-                            isParentAdmin ? (
-                              <span
-                                className="px-2 py-1 rounded-lg bg-amber-950/40 border border-amber-800/40 text-amber-400/70 text-[10px] font-mono flex items-center gap-1 cursor-not-allowed"
-                                title="Parent Administrator account is permanently protected from deletion"
-                              >
-                                <Lock className="w-2.5 h-2.5" />
-                                <span>Protected</span>
-                              </span>
-                            ) : currentUser.id === u.id ? (
-                              <span
-                                className="px-2 py-1 rounded-lg bg-slate-800/50 text-slate-500 text-[10px] font-mono italic"
-                                title="Active session"
-                              >
-                                (You)
-                              </span>
-                            ) : (
-                              <button
-                                onClick={() => setUserToDelete(u)}
-                                className="px-2 py-1 rounded-lg bg-rose-950/50 hover:bg-rose-900/80 border border-rose-800/60 text-rose-300 font-medium text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
-                                title={`Permanently delete ${u.displayName} account`}
-                              >
-                                <Trash2 className="w-3 h-3 text-rose-400" />
-                                <span>Delete</span>
-                              </button>
-                            )
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </div>
 
       {/* User Profile Detail Modal */}
@@ -1727,7 +1785,7 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                 You are about to completely delete <strong className="text-white">{userToDelete.displayName}</strong> (<span className="font-mono text-rose-300">{userToDelete.email}</span>).
               </p>
               <ul className="list-disc list-inside space-y-1 text-slate-300 text-[11px]">
-                <li>Purges user from Supabase Auth &amp; database</li>
+                <li>Removes user login &amp; profile records</li>
                 <li>Deletes wallet balance, transactions &amp; cashouts</li>
                 <li>Cleans provisioned game IDs and chat records</li>
               </ul>

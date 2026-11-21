@@ -343,15 +343,11 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
   };
 
   return (
-    <div className="space-y-6 max-w-6xl mx-auto pb-12">
+    <div className="space-y-6 max-w-6xl mx-auto pb-24 md:pb-8">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Unified Operations Request Queue</h1>
-          <p className="text-xs text-slate-400 mt-1">
-            Review, approve, and process player deposits, treasury cashouts, and assign game IDs &amp; credentials.
-          </p>
         </div>
-
       </div>
 
       {feedbackMsg && (
@@ -447,138 +443,246 @@ export const AdminRequests: React.FC<AdminRequestsProps> = ({
             No requests found matching your filters.
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead>
-                <tr className="border-b border-slate-800 bg-slate-950/70 text-slate-400 uppercase text-[10px] font-semibold tracking-wider">
-                  <th className="py-3 px-4">Request / Time</th>
-                  <th className="py-3 px-4">Player</th>
-                  <th className="py-3 px-4">Category</th>
-                  <th className="py-3 px-4">Details / Game</th>
-                  <th className="py-3 px-4 text-right">Value / ID</th>
-                  <th className="py-3 px-4 text-center">Status</th>
-                  <th className="py-3 px-4 text-center">Staff Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {filteredList.map((item) => {
-                  const isTopUp = item.type === 'topup';
-                  const isWithdrawal = item.type === 'withdrawal';
-                  const isGameAccount = item.type === 'game_account';
-                  const isHighlighted = item.id === highlightId;
+          <>
+            {/* Mobile Stacked Cards (< 768px) */}
+            <div className="md:hidden divide-y divide-slate-800/80">
+              {filteredList.map((item) => {
+                const isTopUp = item.type === 'topup';
+                const isWithdrawal = item.type === 'withdrawal';
+                const isGameAccount = item.type === 'game_account';
+                const isHighlighted = item.id === highlightId;
 
-                  return (
-                    <tr
-                      key={item.id}
-                      className={`transition-colors ${
-                        isHighlighted ? 'bg-indigo-950/40 border-l-2 border-indigo-500' : 'hover:bg-slate-800/40'
-                      }`}
-                    >
-                      <td className="py-3.5 px-4 font-mono">
-                        <div className="text-slate-300 font-semibold">{item.id}</div>
-                        <div className="text-[10px] text-slate-500">
-                          {new Date(item.createdAt).toLocaleDateString([], {
-                            month: 'short',
-                            day: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
+                return (
+                  <div
+                    key={item.id}
+                    className={`p-4 space-y-3 ${
+                      isHighlighted ? 'bg-indigo-950/40 border-l-2 border-indigo-500' : ''
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-semibold text-white text-sm truncate">
+                          {item.customerName}
                         </div>
-                      </td>
+                        <div className="text-xs text-slate-400 truncate mt-0.5">{item.methodName}</div>
+                      </div>
+                      <span
+                        className={`shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono font-bold border ${
+                          isTopUp
+                            ? 'text-indigo-300 bg-indigo-950/60 border-indigo-700/50'
+                            : isWithdrawal
+                            ? 'text-amber-300 bg-amber-950/60 border-amber-700/50'
+                            : 'text-cyan-300 bg-cyan-950/60 border-cyan-700/50'
+                        }`}
+                      >
+                        {item.amount !== undefined
+                          ? `$${item.amount.toFixed(2)}`
+                          : isGameAccount
+                          ? 'Game ID'
+                          : '—'}
+                      </span>
+                    </div>
 
-                      <td className="py-3.5 px-4 font-medium text-white">{item.customerName}</td>
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="font-mono text-slate-400">
+                        {new Date(item.createdAt).toLocaleDateString([], {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                      <span
+                        className={`text-[10px] font-mono capitalize px-2 py-0.5 rounded-full ${
+                          item.status === 'completed' || item.status === 'active'
+                            ? 'text-emerald-400 bg-emerald-950/60 border border-emerald-800/40'
+                            : item.status === 'rejected' || item.status === 'cancelled'
+                            ? 'text-rose-400 bg-rose-950/60 border border-rose-800/40'
+                            : 'text-amber-400 bg-amber-950/60 border border-amber-800/40'
+                        }`}
+                      >
+                        {item.status.replace('_', ' ')}
+                      </span>
+                    </div>
 
-                      <td className="py-3.5 px-4">
-                        <span
-                          className={`font-semibold flex items-center gap-1 ${
-                            isTopUp
-                              ? 'text-indigo-400'
-                              : isWithdrawal
-                              ? 'text-amber-400'
-                              : 'text-cyan-400'
-                          }`}
+                    <div className="pt-1 flex justify-end">
+                      {isTopUp ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const r = item.original as TopUpRequest;
+                            setActionTopUp(r);
+                            setVerifiedAmount(r.amount ? String(r.amount) : '');
+                            setRejectReason('');
+                            setInternalNote('');
+                          }}
+                          className="w-full py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors"
                         >
-                          {isTopUp ? (
-                            <ArrowDownToLine className="w-3.5 h-3.5" />
-                          ) : isWithdrawal ? (
-                            <ArrowUpFromLine className="w-3.5 h-3.5" />
-                          ) : (
-                            <Gamepad2 className="w-3.5 h-3.5" />
-                          )}
-                          <span>{isTopUp ? 'Deposit' : isWithdrawal ? 'Cashout' : 'Game ID'}</span>
-                        </span>
-                      </td>
+                          Review
+                        </button>
+                      ) : isWithdrawal ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActionWithdrawal(item.original as WithdrawalRequest);
+                            setRejectReason('');
+                            setPayoutRef('');
+                            setInternalNote('');
+                          }}
+                          className="w-full py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition-colors"
+                        >
+                          Process
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenAssignModal(item.original as GameAccount)}
+                          className="w-full py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors"
+                        >
+                          <KeyRound className="w-3.5 h-3.5" />
+                          <span>Assign / Update</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
 
-                      <td className="py-3.5 px-4 text-slate-300">{item.methodName}</td>
+            {/* Desktop Table (>= 768px) */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-950/70 text-slate-400 uppercase text-[10px] font-semibold tracking-wider">
+                    <th className="py-3 px-4">Request / Time</th>
+                    <th className="py-3 px-4">Player</th>
+                    <th className="py-3 px-4">Category</th>
+                    <th className="py-3 px-4">Details / Game</th>
+                    <th className="py-3 px-4 text-right">Value / ID</th>
+                    <th className="py-3 px-4 text-center">Status</th>
+                    <th className="py-3 px-4 text-center">Staff Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {filteredList.map((item) => {
+                    const isTopUp = item.type === 'topup';
+                    const isWithdrawal = item.type === 'withdrawal';
+                    const isGameAccount = item.type === 'game_account';
+                    const isHighlighted = item.id === highlightId;
 
-                      <td className="py-3.5 px-4 text-right font-mono font-bold tabular-nums text-white">
-                        {item.amount !== undefined ? (
-                          `$${item.amount.toFixed(2)}`
-                        ) : isGameAccount ? (
-                          <span className="text-[11px] font-mono text-slate-400">
-                            {(item.original as GameAccount).username}
+                    return (
+                      <tr
+                        key={item.id}
+                        className={`transition-colors ${
+                          isHighlighted ? 'bg-indigo-950/40 border-l-2 border-indigo-500' : 'hover:bg-slate-800/40'
+                        }`}
+                      >
+                        <td className="py-3.5 px-4 font-mono">
+                          <div className="text-slate-300 font-semibold">{item.id}</div>
+                          <div className="text-[10px] text-slate-500">
+                            {new Date(item.createdAt).toLocaleDateString([], {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </div>
+                        </td>
+
+                        <td className="py-3.5 px-4 font-medium text-white">{item.customerName}</td>
+
+                        <td className="py-3.5 px-4">
+                          <span
+                            className={`font-semibold flex items-center gap-1 ${
+                              isTopUp
+                                ? 'text-indigo-400'
+                                : isWithdrawal
+                                ? 'text-amber-400'
+                                : 'text-cyan-400'
+                            }`}
+                          >
+                            {isTopUp ? (
+                              <ArrowDownToLine className="w-3.5 h-3.5" />
+                            ) : isWithdrawal ? (
+                              <ArrowUpFromLine className="w-3.5 h-3.5" />
+                            ) : (
+                              <Gamepad2 className="w-3.5 h-3.5" />
+                            )}
+                            <span>{isTopUp ? 'Deposit' : isWithdrawal ? 'Cashout' : 'Game ID'}</span>
                           </span>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
+                        </td>
 
-                      <td className="py-3.5 px-4 text-center">
-                        <span
-                          className={`text-[10px] font-mono capitalize px-2 py-0.5 rounded-full ${
-                            item.status === 'completed' || item.status === 'active'
-                              ? 'text-emerald-400 bg-emerald-950/60 border border-emerald-800/40'
-                              : item.status === 'rejected' || item.status === 'cancelled'
-                              ? 'text-rose-400 bg-rose-950/60 border border-rose-800/40'
-                              : 'text-amber-400 bg-amber-950/60 border border-amber-800/40'
-                          }`}
-                        >
-                          {item.status.replace('_', ' ')}
-                        </span>
-                      </td>
+                        <td className="py-3.5 px-4 text-slate-300">{item.methodName}</td>
 
-                      <td className="py-3.5 px-4 text-center">
-                        {isTopUp ? (
-                          <button
-                            onClick={() => {
-                              const r = item.original as TopUpRequest;
-                              setActionTopUp(r);
-                              setVerifiedAmount(r.amount ? String(r.amount) : '');
-                              setRejectReason('');
-                              setInternalNote('');
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-[11px]"
+                        <td className="py-3.5 px-4 text-right font-mono font-bold tabular-nums text-white">
+                          {item.amount !== undefined ? (
+                            `$${item.amount.toFixed(2)}`
+                          ) : isGameAccount ? (
+                            <span className="text-[11px] font-mono text-slate-400">
+                              {(item.original as GameAccount).username}
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+
+                        <td className="py-3.5 px-4 text-center">
+                          <span
+                            className={`text-[10px] font-mono capitalize px-2 py-0.5 rounded-full ${
+                              item.status === 'completed' || item.status === 'active'
+                                ? 'text-emerald-400 bg-emerald-950/60 border border-emerald-800/40'
+                                : item.status === 'rejected' || item.status === 'cancelled'
+                                ? 'text-rose-400 bg-rose-950/60 border border-rose-800/40'
+                                : 'text-amber-400 bg-amber-950/60 border border-amber-800/40'
+                            }`}
                           >
-                            Review
-                          </button>
-                        ) : isWithdrawal ? (
-                          <button
-                            onClick={() => {
-                              setActionWithdrawal(item.original as WithdrawalRequest);
-                              setRejectReason('');
-                              setPayoutRef('');
-                              setInternalNote('');
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px]"
-                          >
-                            Process
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => handleOpenAssignModal(item.original as GameAccount)}
-                            className="px-2.5 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-[11px] flex items-center gap-1 mx-auto"
-                          >
-                            <KeyRound className="w-3 h-3" />
-                            <span>Assign / Update</span>
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                            {item.status.replace('_', ' ')}
+                          </span>
+                        </td>
+
+                        <td className="py-3.5 px-4 text-center">
+                          {isTopUp ? (
+                            <button
+                              onClick={() => {
+                                const r = item.original as TopUpRequest;
+                                setActionTopUp(r);
+                                setVerifiedAmount(r.amount ? String(r.amount) : '');
+                                setRejectReason('');
+                                setInternalNote('');
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-[11px]"
+                            >
+                              Review
+                            </button>
+                          ) : isWithdrawal ? (
+                            <button
+                              onClick={() => {
+                                setActionWithdrawal(item.original as WithdrawalRequest);
+                                setRejectReason('');
+                                setPayoutRef('');
+                                setInternalNote('');
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px]"
+                            >
+                              Process
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => handleOpenAssignModal(item.original as GameAccount)}
+                              className="px-2.5 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-[11px] flex items-center gap-1 mx-auto"
+                            >
+                              <KeyRound className="w-3 h-3" />
+                              <span>Assign / Update</span>
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
 
         {(hasMoreTopups || hasMoreWithdrawals) && (

@@ -1,17 +1,21 @@
 import React, { useState } from 'react';
-import { UserProfile, GameCatalogItem, GameAccount, UserWallet } from '../../types';
+import { UserProfile, GameCatalogItem, GameAccount, UserWallet, OfficialPartner } from '../../types';
 import { dataService } from '../../services/dataService';
 import {
   DEFAULT_GAME_ICON,
   TOP_PRIORITY_GAME_COUNT,
   resolveGameImageUrl,
 } from '../../utils/imageUtils';
+import { isSafeExternalHttpUrl } from '../../utils/gameCardUtils';
+import { getMessageLink, sortOfficialPartners } from '../../utils/officialPartnersUtils';
+import { PlatformGlyph } from '../../components/common/PartnerVisuals';
 import {
   Gamepad2,
   ExternalLink,
   KeyRound,
   CheckCircle2,
   Lock,
+  User,
   Eye,
   EyeOff,
   Copy,
@@ -22,38 +26,61 @@ import {
   ShieldCheck,
   Send,
   ArrowDownToLine,
-  ArrowUpFromLine,
-  Wallet,
-  Coins,
+  MoreHorizontal,
 } from 'lucide-react';
 
 interface CustomerGameAccountsProps {
   currentUser: UserProfile;
   wallet?: UserWallet;
-  onNavigateTab: (tab: string) => void;
+  onNavigateTab: (tab: string, meta?: any) => void;
 }
 
 export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
   currentUser,
-  wallet: propWallet,
   onNavigateTab,
 }) => {
-  const wallet = propWallet || dataService.getWallet(currentUser.id);
   const catalog = dataService.getGameCatalog().filter((g) => g.enabled);
   const [playerAccounts, setPlayerAccounts] = useState<GameAccount[]>(() =>
     dataService.getGameAccounts(currentUser.id)
   );
+  const [visiblePartners, setVisiblePartners] = useState<OfficialPartner[]>(() =>
+    sortOfficialPartners(dataService.getCachedOfficialPartners().filter((p) => p.isVisible))
+  );
+
+  const [isHydrating, setIsHydrating] = useState<boolean>(true);
 
   React.useEffect(() => {
+    let mounted = true;
     // 1. Initial on-demand hydration from database
-    dataService.fetchGameAccountsFromDb(currentUser.id).then((accs) => {
-      if (accs) setPlayerAccounts(accs);
-    });
+    dataService
+      .fetchGameAccountsFromDb(currentUser.id)
+      .then((accs) => {
+        if (!mounted) return;
+        if (accs) setPlayerAccounts(accs);
+        setIsHydrating(false);
+      })
+      .catch(() => {
+        if (mounted) setIsHydrating(false);
+      });
+
+    const loadPartners = () => {
+      void dataService.fetchOfficialPartners().then((res) => {
+        if (mounted && res.success) {
+          setVisiblePartners(sortOfficialPartners(res.partners.filter((p) => p.isVisible)));
+        }
+      });
+    };
+    loadPartners();
 
     // 2. Realtime state listeners
     const handleSync = (e?: any) => {
-      if (!e?.detail?.key || e.detail.key === 'aetherpay_game_accounts' || e.detail.key === 'game_credentials_assigned' || e.detail.key === 'delta_sync') {
+      const key = e?.detail?.key;
+      const tables: string[] = Array.isArray(e?.detail?.tables) ? e.detail.tables : [];
+      if (!key || key === 'aetherpay_game_accounts' || key === 'game_credentials_assigned' || key === 'delta_sync') {
         setPlayerAccounts(dataService.getGameAccounts(currentUser.id));
+      }
+      if (key === 'official_partners_updated' || key === 'delta_sync' || tables.includes('official_partners')) {
+        loadPartners();
       }
     };
 
@@ -61,6 +88,7 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
     window.addEventListener('storage', handleSync);
 
     return () => {
+      mounted = false;
       window.removeEventListener('aetherpay_state_changed', handleSync);
       window.removeEventListener('storage', handleSync);
     };
@@ -71,41 +99,28 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
   const [notificationMsg, setNotificationMsg] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
   const [showRequestConfirmModal, setShowRequestConfirmModal] = useState<GameCatalogItem | null>(null);
   const [showResetConfirmModal, setShowResetConfirmModal] = useState<GameAccount | null>(null);
-  const [loadFundsAccount, setLoadFundsAccount] = useState<GameAccount | null>(null);
-  const [loadAmount, setLoadAmount] = useState<string>('50');
-  const [fundingSource, setFundingSource] = useState<'free_play' | 'referral_bonus' | 'wallet_cash'>(() =>
-    (wallet.freePlayBalance || 0) > 0
-      ? 'free_play'
-      : (wallet.referralBonusBalance || 0) > 0
-      ? 'referral_bonus'
-      : 'wallet_cash'
-  );
-  const [unloadAccount, setUnloadAccount] = useState<GameAccount | null>(null);
-  const [unloadAmount, setUnloadAmount] = useState<string>('0');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [openMenuGameId, setOpenMenuGameId] = useState<string | null>(null);
+  const [openMenuUpward, setOpenMenuUpward] = useState(false);
 
-  const openLoadFundsModal = (account: GameAccount) => {
-    const defaultSource: 'free_play' | 'referral_bonus' | 'wallet_cash' =
-      (wallet.freePlayBalance || 0) > 0
-        ? 'free_play'
-        : (wallet.referralBonusBalance || 0) > 0
-        ? 'referral_bonus'
-        : 'wallet_cash';
-    const defaultAvail =
-      defaultSource === 'free_play'
-        ? wallet.freePlayBalance || 0
-        : defaultSource === 'referral_bonus'
-        ? wallet.referralBonusBalance || 0
-        : wallet.availableBalance;
-    setFundingSource(defaultSource);
-    setLoadAmount(defaultAvail > 0 ? String(Math.min(defaultAvail, 50)) : '10');
-    setLoadFundsAccount(account);
-  };
-
-  const openUnloadModal = (account: GameAccount) => {
-    setUnloadAccount(account);
-    setUnloadAmount(String(Number((account.balance || 0).toFixed(2))));
-  };
+  React.useEffect(() => {
+    if (!openMenuGameId) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-game-card-menu]')) {
+        setOpenMenuGameId(null);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenMenuGameId(null);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [openMenuGameId]);
 
   const togglePasswordVisibility = (accountId: string) => {
     setRevealedPasswords((prev) => ({
@@ -114,8 +129,28 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
     }));
   };
 
-  const handleCopy = (text: string, fieldId: string) => {
-    navigator.clipboard.writeText(text);
+  const handleCopy = async (text: string, fieldId: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        throw new Error('Clipboard API unavailable');
+      }
+    } catch {
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      } catch {
+        return;
+      }
+    }
     setCopiedField(fieldId);
     setTimeout(() => setCopiedField(null), 2000);
   };
@@ -172,117 +207,19 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
     }, 400);
   };
 
-  const handleConfirmLoadFunds = async () => {
-    if (!loadFundsAccount) return;
-    const parsedAmt = Number((parseFloat(loadAmount) || 0).toFixed(2));
-    if (parsedAmt <= 0) {
-      setNotificationMsg({ text: 'Please enter a valid amount greater than $0.00 to load to game.', type: 'error' });
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      const res = await dataService.transferGameCreditsAsync({
-        gameAccountId: loadFundsAccount.id,
-        gameCatalogId: loadFundsAccount.gameCatalogId,
-        direction: 'load',
-        source: fundingSource,
-        amount: parsedAmt,
-      });
-
-      setPlayerAccounts(dataService.getGameAccounts(currentUser.id));
-
-      if (res.success) {
-        setLoadFundsAccount(null);
-        setNotificationMsg({ text: res.message, type: 'success' });
-        setTimeout(() => setNotificationMsg(null), 5500);
-      } else {
-        setNotificationMsg({ text: res.message, type: 'error' });
-      }
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleConfirmUnloadFunds = async () => {
-    if (!unloadAccount) return;
-    const parsedAmt = Number((parseFloat(unloadAmount) || 0).toFixed(2));
-    if (parsedAmt <= 0) {
-      setNotificationMsg({ text: 'Please enter a valid amount greater than $0.00 to unload.', type: 'error' });
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      const res = await dataService.transferGameCreditsAsync({
-        gameAccountId: unloadAccount.id,
-        gameCatalogId: unloadAccount.gameCatalogId,
-        direction: 'unload',
-        amount: parsedAmt,
-      });
-
-      setPlayerAccounts(dataService.getGameAccounts(currentUser.id));
-
-      if (res.success) {
-        setUnloadAccount(null);
-        setNotificationMsg({ text: res.message, type: 'success' });
-        setTimeout(() => setNotificationMsg(null), 6000);
-      } else {
-        setNotificationMsg({ text: res.message, type: 'error' });
-      }
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
   return (
-    <div className="space-y-6 max-w-5xl mx-auto pb-12">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div className="space-y-4 max-w-5xl mx-auto pb-[calc(env(safe-area-inset-bottom,0px)+9.5rem)] md:pb-24">
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
         <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Gaming IDs &amp; Game Balances</h1>
+          <h1 className="text-2xl font-bold text-white tracking-tight">Gaming IDs</h1>
           <p className="text-xs text-slate-400 mt-1">
-            Official games catalog managed by Admin. Load Wheel Free-Play, referral bonuses, or wallet cash directly to your Game IDs.
+            Active logins appear first. Request an ID for any game to play.
           </p>
         </div>
-
-        <button
-          onClick={() => onNavigateTab('chat')}
-          className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 font-medium text-xs flex items-center gap-1.5 border border-indigo-700/40 transition-colors"
-        >
-          <Send className="w-3.5 h-3.5" />
-          <span>Message Customer Support</span>
-        </button>
+        {isHydrating && playerAccounts.length === 0 && (
+          <span className="text-[11px] text-slate-400 font-medium">Checking saved IDs...</span>
+        )}
       </div>
-
-      {((wallet.freePlayBalance || 0) > 0 || (wallet.referralBonusBalance || 0) > 0) && (
-        <div className="p-4 rounded-2xl border border-amber-500/30 bg-gradient-to-r from-amber-950/40 via-slate-900 to-indigo-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300 shrink-0">
-              <Sparkles className="w-4 h-4" />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-white">Promotional Free-Play &amp; Bonus Credits Available</div>
-              <p className="text-[11px] text-slate-300 mt-0.5">
-                Load your non-cashable promotional credits into any active Gaming ID below. Tracked Free-Play credits return to your Free-Play Balance when unloaded.
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3 shrink-0 flex-wrap">
-            {(wallet.freePlayBalance || 0) > 0 && (
-              <div className="px-3 py-1.5 rounded-xl bg-slate-950/90 border border-amber-500/30">
-                <div className="text-[10px] text-amber-300 font-semibold uppercase tracking-wider">Free-Play (Wheel)</div>
-                <div className="text-sm font-bold font-mono text-white tabular-nums">${(wallet.freePlayBalance || 0).toFixed(2)}</div>
-              </div>
-            )}
-            {(wallet.referralBonusBalance || 0) > 0 && (
-              <div className="px-3 py-1.5 rounded-xl bg-slate-950/90 border border-indigo-500/30">
-                <div className="text-[10px] text-indigo-300 font-semibold uppercase tracking-wider">Referral Bonus</div>
-                <div className="text-sm font-bold font-mono text-white tabular-nums">${(wallet.referralBonusBalance || 0).toFixed(2)}</div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {notificationMsg && (
         <div
@@ -318,284 +255,332 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
           return a.title.localeCompare(b.title);
         });
 
+        if (sortedCatalog.length === 0) {
+          return (
+            <div className="p-6 rounded-2xl border border-slate-800 bg-slate-900/70 text-center space-y-1.5">
+              <Gamepad2 className="w-6 h-6 text-slate-500 mx-auto" />
+              <div className="text-sm font-semibold text-white">No games available right now</div>
+              <p className="text-xs text-slate-400">Enabled platforms will appear here once configured.</p>
+            </div>
+          );
+        }
+
         return (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 items-start gap-3.5 sm:gap-4">
             {sortedCatalog.map((game, index) => {
-              // Find matching account for current player
               const account = playerAccounts.find(
                 (a) => a.gameCatalogId === game.id || a.gameName.toLowerCase() === game.title.toLowerCase()
               );
 
-          const isRevealed = account ? !!revealedPasswords[account.id] : false;
-          const hasActiveCredentials = account && account.status === 'active';
-          const isPendingAssignment = account && account.status === 'pending_assignment';
-          const isPendingReset = account && account.status === 'pending_reset';
+              const isRevealed = account ? !!revealedPasswords[account.id] : false;
+              const hasActiveCredentials = Boolean(account && account.status === 'active');
+              const isPendingAssignment = Boolean(account && account.status === 'pending_assignment');
+              const isPendingReset = Boolean(account && account.status === 'pending_reset');
+              const hasDownloadLink = isSafeExternalHttpUrl(game.downloadUrl);
+              const hasResetAction = Boolean(hasActiveCredentials && account);
+              const hasMenuActions = hasDownloadLink || hasResetAction;
+              const isMenuOpen = openMenuGameId === game.id;
+              const linkedPartner = visiblePartners.find((p) => p.gameId === game.id);
 
-          return (
-            <div
-              key={game.id}
-              className={`p-5 rounded-2xl border bg-slate-900 shadow-xl space-y-4 transition-all flex flex-col justify-between ${
-                hasActiveCredentials
-                  ? 'border-slate-800 hover:border-slate-700'
-                  : isPendingAssignment || isPendingReset
-                  ? 'border-amber-700/60 bg-amber-950/20'
-                  : 'border-slate-800/80 bg-slate-900/60'
-              }`}
-            >
-              <div className="space-y-3">
-                {/* Header Lockup */}
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 rounded-xl bg-indigo-950 border border-indigo-700/50 flex items-center justify-center shrink-0 overflow-hidden shadow-md">
-                      <img
-                        src={resolveGameImageUrl(game.imageUrl || game.iconUrl)}
-                        alt={game.title}
-                        width={48}
-                        height={48}
-                        loading={index < TOP_PRIORITY_GAME_COUNT ? 'eager' : 'lazy'}
-                        decoding="async"
-                        className="w-full h-full object-cover"
-                        onError={(e) => {
-                          const img = e.currentTarget;
-                          if (img.dataset.fallbackApplied) return;
-                          img.dataset.fallbackApplied = '1';
-                          img.src = DEFAULT_GAME_ICON;
-                        }}
-                      />
+              return (
+                <div
+                  key={game.id}
+                  data-testid={`gaming-id-card-${game.id}`}
+                  data-account-state={
+                    hasActiveCredentials
+                      ? 'active'
+                      : isPendingAssignment
+                      ? 'pending_assignment'
+                      : isPendingReset
+                      ? 'pending_reset'
+                      : 'unrequested'
+                  }
+                  className={`p-3.5 sm:p-4 rounded-2xl border shadow-lg transition-colors flex flex-col justify-between gap-3 ${
+                    isMenuOpen ? 'relative z-30' : 'relative'
+                  } ${
+                    hasActiveCredentials
+                      ? 'bg-slate-900 border-emerald-500/25 hover:border-emerald-500/45'
+                      : isPendingAssignment || isPendingReset
+                      ? 'bg-amber-950/15 border-amber-700/50'
+                      : 'bg-slate-900/70 border-slate-800/90 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="space-y-3">
+                    {/* Consistent Header Lockup with Status Attached Next to Game Name */}
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-11 h-11 rounded-xl bg-indigo-950 border border-indigo-700/50 flex items-center justify-center shrink-0 overflow-hidden shadow-md">
+                        <img
+                          src={resolveGameImageUrl(game.imageUrl || game.iconUrl)}
+                          alt={game.title}
+                          width={44}
+                          height={44}
+                          loading={index < TOP_PRIORITY_GAME_COUNT ? 'eager' : 'lazy'}
+                          decoding="async"
+                          className="w-full h-full object-cover"
+                          onError={(e) => {
+                            const img = e.currentTarget;
+                            if (img.dataset.fallbackApplied) return;
+                            img.dataset.fallbackApplied = '1';
+                            img.src = DEFAULT_GAME_ICON;
+                          }}
+                        />
+                      </div>
+
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <h3 className="text-sm font-bold text-white leading-tight truncate">
+                            {game.title}
+                          </h3>
+
+                          {hasActiveCredentials ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 whitespace-nowrap">
+                              <ShieldCheck className="w-3 h-3 shrink-0" />
+                              <span>Ready to Play</span>
+                            </span>
+                          ) : isPendingAssignment ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30 whitespace-nowrap">
+                              <Clock className="w-3 h-3 shrink-0" />
+                              <span>Setup Pending</span>
+                            </span>
+                          ) : isPendingReset ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 whitespace-nowrap">
+                              <Clock className="w-3 h-3 shrink-0" />
+                              <span>Password Resetting</span>
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold bg-slate-800/90 text-slate-300 border border-slate-700/80 whitespace-nowrap">
+                              No ID Yet
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between gap-2 mt-0.5">
+                          <div className="text-[11px] text-indigo-400 font-medium truncate">
+                            {game.platform}
+                          </div>
+                          {linkedPartner && (
+                            <a
+                              href={getMessageLink(linkedPartner)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-xs font-semibold text-amber-400 hover:text-amber-300 whitespace-nowrap shrink-0 transition-colors"
+                              title={`Message ${linkedPartner.name}`}
+                            >
+                              <PlatformGlyph platform={linkedPartner.platform} className="w-3 h-3 shrink-0" />
+                              <span>Message partner</span>
+                            </a>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <h3 className="text-sm font-bold text-white leading-snug">{game.title}</h3>
-                      <div className="text-[11px] text-indigo-400 font-medium">{game.platform}</div>
-                    </div>
+
+                    {/* Credentials or Compact Pending Strip (Omitted cleanly for unrequested games) */}
+                    {hasActiveCredentials && account && (
+                      <div className="px-3 py-1 rounded-xl bg-slate-950/90 border border-slate-800/90 divide-y divide-slate-800/80 text-xs">
+                        <div className="py-2 grid grid-cols-[88px_minmax(0,1fr)_auto] items-center gap-2 min-w-0">
+                          <span className="text-slate-300 font-medium flex items-center gap-1.5">
+                            <User className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                            <span>Username</span>
+                          </span>
+                          <span className="font-mono font-semibold text-white select-all truncate">
+                            {account.username}
+                          </span>
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleCopy(account.username, `user_${account.id}`)}
+                              className="w-8 h-8 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/90 inline-flex items-center justify-center transition-colors"
+                              title="Copy Username"
+                              aria-label={`Copy username for ${game.title}`}
+                            >
+                              {copiedField === `user_${account.id}` ? (
+                                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="py-2 grid grid-cols-[88px_minmax(0,1fr)_auto] items-center gap-2 min-w-0">
+                          <span className="text-slate-300 font-medium flex items-center gap-1.5">
+                            <Lock className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                            <span>Password</span>
+                          </span>
+
+                          <span className="font-mono text-xs select-all truncate">
+                            {isRevealed ? (
+                              <span className="text-emerald-400 font-semibold tracking-wider">
+                                {account.password || 'Pass#Default'}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 tracking-wider">••••••••</span>
+                            )}
+                          </span>
+
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              type="button"
+                              onClick={() => togglePasswordVisibility(account.id)}
+                              className="w-8 h-8 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/90 inline-flex items-center justify-center transition-colors"
+                              title={isRevealed ? 'Hide Password' : 'Show Password'}
+                              aria-label={`${isRevealed ? 'Hide' : 'Show'} password for ${game.title}`}
+                            >
+                              {isRevealed ? (
+                                <EyeOff className="w-3.5 h-3.5 text-slate-200" />
+                              ) : (
+                                <Eye className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleCopy(account.password || 'Pass#Default', `pass_${account.id}`)}
+                              className="w-8 h-8 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/90 inline-flex items-center justify-center transition-colors"
+                              title="Copy Password"
+                              aria-label={`Copy password for ${game.title}`}
+                            >
+                              {copiedField === `pass_${account.id}` ? (
+                                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {isPendingAssignment && (
+                      <div className="px-3 py-2 rounded-xl bg-amber-950/35 border border-amber-700/40 text-[11px] text-amber-200 flex items-center gap-2">
+                        <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        <span>Support is preparing your login credentials.</span>
+                      </div>
+                    )}
+
+                    {isPendingReset && (
+                      <div className="px-3 py-2 rounded-xl bg-cyan-950/35 border border-cyan-700/40 text-[11px] text-cyan-200 flex items-center gap-2">
+                        <Clock className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                        <span>Support is issuing your new password.</span>
+                      </div>
+                    )}
                   </div>
 
-                  {/* Status Badge */}
-                  {hasActiveCredentials ? (
-                    <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/70 border border-emerald-800/50 px-2 py-0.5 rounded-full flex items-center gap-1">
-                      <ShieldCheck className="w-3 h-3" /> Active ID
-                    </span>
-                  ) : isPendingAssignment ? (
-                    <span className="text-[10px] font-mono text-amber-400 bg-amber-950/70 border border-amber-800/50 px-2 py-0.5 rounded-full flex items-center gap-1">
-                      <Clock className="w-3 h-3" /> Support Reviewing
-                    </span>
-                  ) : isPendingReset ? (
-                    <span className="text-[10px] font-mono text-cyan-400 bg-cyan-950/70 border border-cyan-800/50 px-2 py-0.5 rounded-full flex items-center gap-1">
-                      <Clock className="w-3 h-3" /> Resetting Pass
-                    </span>
-                  ) : (
-                    <span className="text-[10px] font-mono text-slate-400 bg-slate-950 border border-slate-800 px-2 py-0.5 rounded-full">
-                      Not Requested
-                    </span>
-                  )}
-                </div>
-
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  {game.description}
-                </p>
-
-                {/* Player Credentials Display (When Assigned) */}
-                {hasActiveCredentials && account ? (
-                  <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5 text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Assigned Username:</span>
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono font-bold text-white select-all">{account.username}</span>
-                        <button
-                          onClick={() => handleCopy(account.username, `user_${account.id}`)}
-                          className="p-1 rounded text-slate-400 hover:text-white transition-colors"
-                          title="Copy Username"
+                  {/* Consistent Action Hierarchy: Proportional Primary / Secondary / Overflow Menu */}
+                  <div className="flex items-center gap-2 pt-2.5 border-t border-slate-800/80">
+                    {hasActiveCredentials && account ? (
+                      <>
+                        <a
+                          href={game.gameUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex-1 min-w-0 h-10 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700/80 text-slate-100 text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
                         >
-                          {copiedField === `user_${account.id}` ? (
-                            <Check className="w-3 h-3 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-3 h-3" />
-                          )}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-800/80">
-                      <span className="text-slate-400 flex items-center gap-1">
-                        <Lock className="w-3 h-3 text-indigo-400" />
-                        <span>Login Password:</span>
-                      </span>
-
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs select-all">
-                          {isRevealed ? (
-                            <span className="text-emerald-400 font-bold tracking-wider">{account.password || 'Pass#Default'}</span>
-                          ) : (
-                            <span className="text-slate-500 font-mono">••••••••••••</span>
-                          )}
-                        </span>
+                          <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                          <span>Launch Game</span>
+                        </a>
 
                         <button
-                          onClick={() => togglePasswordVisibility(account.id)}
-                          className="p-1 rounded text-slate-400 hover:text-white transition-colors"
-                          title={isRevealed ? 'Hide Password' : 'Show Password'}
+                          type="button"
+                          onClick={() => onNavigateTab('topup', { gameCatalogId: game.id })}
+                          className="flex-1 min-w-0 h-10 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors shadow-sm shadow-indigo-600/25 whitespace-nowrap"
                         >
-                          {isRevealed ? <EyeOff className="w-3.5 h-3.5 text-slate-300" /> : <Eye className="w-3.5 h-3.5" />}
+                          <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
+                          <span>Top-Up</span>
                         </button>
-
+                      </>
+                    ) : isPendingAssignment || isPendingReset ? (
+                      <>
+                        <div className="flex-1" aria-hidden="true" />
                         <button
-                          onClick={() => handleCopy(account.password || 'Pass#Default', `pass_${account.id}`)}
-                          className="p-1 rounded text-slate-400 hover:text-white transition-colors"
-                          title="Copy Password"
+                          type="button"
+                          onClick={() => onNavigateTab('chat')}
+                          className="flex-1 min-w-[136px] h-10 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700/80 text-indigo-300 text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
                         >
-                          {copiedField === `pass_${account.id}` ? (
-                            <Check className="w-3 h-3 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-3 h-3" />
-                          )}
+                          <Send className="w-3.5 h-3.5 shrink-0" />
+                          <span>View Ticket</span>
                         </button>
-                      </div>
-                    </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex-1" aria-hidden="true" />
+                        <button
+                          type="button"
+                          onClick={() => setShowRequestConfirmModal(game)}
+                          className="flex-1 min-w-[136px] h-10 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors shadow-sm shadow-indigo-600/25 whitespace-nowrap"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                          <span>Request ID</span>
+                        </button>
+                      </>
+                    )}
 
-                    {/* Game Account Balance Display */}
-                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80 bg-slate-900/60 -mx-3.5 -mb-3.5 p-3 rounded-b-xl">
-                      <div>
-                        <div className="flex items-center gap-1.5 text-slate-300">
-                          <Coins className="w-3.5 h-3.5 text-amber-400" />
-                          <span>Game Credits:</span>
-                          <span className="font-mono font-bold text-amber-400 text-sm tabular-nums">
-                            ${(account.balance || 0).toFixed(2)}
-                          </span>
-                        </div>
-                        {(account.freePlayBalance || 0) > 0 && (
-                          <div className="text-[10px] font-mono text-amber-300/90 mt-0.5">
-                            Includes Free-Play: ${(account.freePlayBalance || 0).toFixed(2)}
+                    {hasMenuActions && (
+                      <div className="relative shrink-0" data-game-card-menu>
+                        <button
+                          type="button"
+                          aria-label={`More actions for ${game.title}`}
+                          aria-expanded={isMenuOpen}
+                          aria-haspopup="menu"
+                          onClick={(e) => {
+                            if (isMenuOpen) {
+                              setOpenMenuGameId(null);
+                              return;
+                            }
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setOpenMenuUpward(window.innerHeight - rect.bottom < 140);
+                            setOpenMenuGameId(game.id);
+                          }}
+                          className="w-10 h-10 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white inline-flex items-center justify-center transition-colors"
+                        >
+                          <MoreHorizontal className="w-4 h-4" />
+                        </button>
+
+                        {isMenuOpen && (
+                          <div
+                            role="menu"
+                            aria-label={`${game.title} secondary actions`}
+                            className={`absolute right-0 w-44 rounded-xl bg-[#0E1726] border border-slate-700 shadow-2xl p-1.5 z-40 space-y-0.5 ${
+                              openMenuUpward ? 'bottom-full mb-1.5' : 'top-full mt-1.5'
+                            }`}
+                          >
+                            {hasDownloadLink && (
+                              <a
+                                role="menuitem"
+                                href={game.downloadUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={() => setOpenMenuGameId(null)}
+                                className="w-full px-2.5 py-2 rounded-lg text-xs text-emerald-400 hover:bg-slate-800 flex items-center gap-2 transition-colors"
+                              >
+                                <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
+                                <span>Download App</span>
+                              </a>
+                            )}
+                            {hasResetAction && account && (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => {
+                                  setOpenMenuGameId(null);
+                                  setShowResetConfirmModal(account);
+                                }}
+                                className="w-full text-left px-2.5 py-2 rounded-lg text-xs text-amber-400 hover:bg-slate-800 flex items-center gap-2 transition-colors"
+                              >
+                                <KeyRound className="w-3.5 h-3.5 shrink-0" />
+                                <span>Reset Password</span>
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          onClick={() => openLoadFundsModal(account)}
-                          className="px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-[11px] flex items-center gap-1 shadow-sm"
-                        >
-                          <ArrowDownToLine className="w-3 h-3" />
-                          <span>Load Funds</span>
-                        </button>
-                        {(account.balance || 0) > 0 && (
-                          <button
-                            onClick={() => openUnloadModal(account)}
-                            className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 font-medium text-[11px] flex items-center gap-1 shadow-sm"
-                          >
-                            <ArrowUpFromLine className="w-3 h-3" />
-                            <span>Unload</span>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="text-[10px] text-slate-500 pt-1 flex items-center justify-between">
-                      <span>Assigned By: {account.assignedByAgentName || 'Customer Support Specialist'}</span>
-                    </div>
-                  </div>
-                ) : isPendingAssignment ? (
-                  <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-800/50 space-y-1 text-xs">
-                    <div className="font-semibold text-amber-300 flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Forwarded to Customer Support</span>
-                    </div>
-                    <p className="text-[11px] text-amber-200/80 leading-relaxed">
-                      A customer support specialist is generating and configuring your tournament ID and password. You will receive an in-app alert when ready.
-                    </p>
-                  </div>
-                ) : isPendingReset ? (
-                  <div className="p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-800/50 space-y-1 text-xs">
-                    <div className="font-semibold text-cyan-300 flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-cyan-400" />
-                      <span>Password Reset in Progress</span>
-                    </div>
-                    <p className="text-[11px] text-cyan-200/80 leading-relaxed">
-                      Customer support is issuing fresh credentials. Please monitor your support chat.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800/80 space-y-1 text-xs">
-                    <div className="font-medium text-slate-400">No account credentials configured yet.</div>
-                    <p className="text-[11px] text-slate-500">
-                      Request player login details below. Our customer care desk will assign your credentials directly.
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              {/* Action Buttons */}
-              <div className="flex items-center justify-between pt-2 gap-2 border-t border-slate-800/80 flex-wrap">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <a
-                    href={game.gameUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition-colors"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    <span>Launch Game</span>
-                  </a>
-                  {game.downloadUrl && (
-                    <a
-                      href={game.downloadUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-emerald-400 text-xs font-medium flex items-center gap-1.5 transition-colors"
-                    >
-                      <ArrowDownToLine className="w-3.5 h-3.5" />
-                      <span>Download</span>
-                    </a>
-                  )}
-                </div>
-
-                {hasActiveCredentials && account ? (
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <button
-                      onClick={() => openLoadFundsModal(account)}
-                      className="px-2.5 py-1.5 rounded-lg bg-indigo-600/90 hover:bg-indigo-600 text-white text-xs font-semibold flex items-center gap-1 transition-colors"
-                    >
-                      <ArrowDownToLine className="w-3.5 h-3.5" />
-                      <span>Top-Up Game</span>
-                    </button>
-                    {(account.balance || 0) > 0 && (
-                      <button
-                        onClick={() => openUnloadModal(account)}
-                        className="px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-emerald-300 border border-emerald-800/50 text-xs font-semibold flex items-center gap-1 transition-colors"
-                      >
-                        <ArrowUpFromLine className="w-3.5 h-3.5" />
-                        <span>Unload</span>
-                      </button>
                     )}
-                    <button
-                      onClick={() => setShowResetConfirmModal(account)}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-amber-400 border border-slate-800 text-xs font-medium flex items-center gap-1 transition-colors"
-                    >
-                      <KeyRound className="w-3.5 h-3.5" />
-                      <span>Reset Pass</span>
-                    </button>
                   </div>
-                ) : isPendingAssignment || isPendingReset ? (
-                  <button
-                    onClick={() => onNavigateTab('chat')}
-                    className="px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-indigo-300 border border-slate-800 text-xs font-medium flex items-center gap-1.5 transition-colors"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    <span>View Ticket</span>
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => setShowRequestConfirmModal(game)}
-                    className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-indigo-600/20"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>Request Game ID &amp; Password</span>
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    );
-  })()}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {/* Confirmation Modal for Requesting New Game ID */}
       {showRequestConfirmModal && (
@@ -703,250 +688,6 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
         </div>
       )}
 
-      {/* Confirmation Modal for Loading Funds to Game */}
-      {loadFundsAccount && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => !isSubmitting && setLoadFundsAccount(null)}
-          />
-          <div className="relative w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-base font-bold text-white flex items-center gap-2">
-                <ArrowDownToLine className="w-4 h-4 text-emerald-400" />
-                <span>Load Funds to {loadFundsAccount.gameName}</span>
-              </h3>
-              <button
-                onClick={() => !isSubmitting && setLoadFundsAccount(null)}
-                className="text-xs text-slate-400 hover:text-white"
-              >
-                Cancel
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-300 leading-relaxed">
-              Transfer funds directly into your player game credentials for{' '}
-              <strong className="text-white font-mono">{loadFundsAccount.username}</strong>.
-            </p>
-
-            {/* Funding Source Selector */}
-            <div className="space-y-2">
-              <label className="text-xs font-semibold text-slate-300">Choose Funding Source</label>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFundingSource('free_play');
-                    if ((wallet.freePlayBalance || 0) > 0) {
-                      setLoadAmount(String(wallet.freePlayBalance || 0));
-                    }
-                  }}
-                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all ${
-                    fundingSource === 'free_play'
-                      ? 'bg-amber-950/70 border-amber-500 text-white'
-                      : 'bg-slate-950/60 border-slate-800 text-slate-400'
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 font-semibold text-amber-300">
-                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Free-Play (Wheel)</span>
-                  </div>
-                  <div className="text-[11px] font-mono text-emerald-400 font-bold mt-1">
-                    Avail: ${(wallet.freePlayBalance || 0).toFixed(2)}
-                  </div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">Game-only promotional</div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFundingSource('referral_bonus');
-                    if ((wallet.referralBonusBalance || 0) > 0) {
-                      setLoadAmount(String(wallet.referralBonusBalance || 0));
-                    }
-                  }}
-                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all ${
-                    fundingSource === 'referral_bonus'
-                      ? 'bg-indigo-950/80 border-indigo-500 text-white'
-                      : 'bg-slate-950/60 border-slate-800 text-slate-400'
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 font-semibold text-indigo-300">
-                    <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-                    <span>Referral Bonus</span>
-                  </div>
-                  <div className="text-[11px] font-mono text-emerald-400 font-bold mt-1">
-                    Avail: ${(wallet.referralBonusBalance || 0).toFixed(2)}
-                  </div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">Non-cashable credit</div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setFundingSource('wallet_cash')}
-                  className={`p-3 rounded-xl border text-left flex flex-col justify-between transition-all ${
-                    fundingSource === 'wallet_cash'
-                      ? 'bg-indigo-950/80 border-indigo-500 text-white'
-                      : 'bg-slate-950/60 border-slate-800 text-slate-400'
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 font-semibold text-slate-200">
-                    <Wallet className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Wallet Cash</span>
-                  </div>
-                  <div className="text-[11px] font-mono text-emerald-400 font-bold mt-1">
-                    Avail: ${wallet.availableBalance.toFixed(2)}
-                  </div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">Withdrawable balance</div>
-                </button>
-              </div>
-            </div>
-
-            {/* Amount Input */}
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs">
-                <label className="font-semibold text-slate-300">Amount to Load ($ USD)</label>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const max =
-                      fundingSource === 'free_play'
-                        ? wallet.freePlayBalance || 0
-                        : fundingSource === 'referral_bonus'
-                        ? wallet.referralBonusBalance || 0
-                        : wallet.availableBalance;
-                    setLoadAmount(String(max));
-                  }}
-                  className="text-[11px] text-indigo-400 hover:text-indigo-300 font-mono font-medium"
-                >
-                  Max Available
-                </button>
-              </div>
-
-              <div className="relative">
-                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-400">$</span>
-                <input
-                  type="number"
-                  min="1"
-                  step="any"
-                  value={loadAmount}
-                  onChange={(e) => setLoadAmount(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-2.5 text-sm font-bold text-white font-mono focus:outline-none focus:border-indigo-500"
-                  required
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3 pt-2">
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={() => setLoadFundsAccount(null)}
-                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={handleConfirmLoadFunds}
-                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs transition-colors shadow-lg shadow-emerald-600/20"
-              >
-                {isSubmitting ? 'Loading Game...' : `Load $${(parseFloat(loadAmount) || 0).toFixed(2)} to Game`}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Confirmation Modal for Unloading Credits from Game */}
-      {unloadAccount && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => !isSubmitting && setUnloadAccount(null)}
-          />
-          <div className="relative w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl z-10 space-y-4 animate-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-base font-bold text-white flex items-center gap-2">
-                <ArrowUpFromLine className="w-4 h-4 text-emerald-400" />
-                <span>Unload Credits from {unloadAccount.gameName}</span>
-              </h3>
-              <button
-                onClick={() => !isSubmitting && setUnloadAccount(null)}
-                className="text-xs text-slate-400 hover:text-white"
-              >
-                Cancel
-              </button>
-            </div>
-
-            <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400">Game Account:</span>
-                <span className="font-mono font-bold text-white">{unloadAccount.username}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400">Current Game Credits:</span>
-                <span className="font-mono font-bold text-amber-400 tabular-nums">${(unloadAccount.balance || 0).toFixed(2)}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400">Tracked Free-Play Portion:</span>
-                <span className="font-mono font-bold text-amber-300 tabular-nums">${(unloadAccount.freePlayBalance || 0).toFixed(2)}</span>
-              </div>
-            </div>
-
-            <p className="text-[11px] text-slate-300 leading-relaxed">
-              Tracked promotional Free-Play credits return to your <strong className="text-amber-300">Free-Play Balance</strong> first before any remaining cashable credits return to your <strong className="text-emerald-300">Wallet Cash</strong>.
-            </p>
-
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs">
-                <label className="font-semibold text-slate-300">Amount to Unload ($ USD)</label>
-                <button
-                  type="button"
-                  onClick={() => setUnloadAmount(String(Number((unloadAccount.balance || 0).toFixed(2))))}
-                  className="text-[11px] text-indigo-400 hover:text-indigo-300 font-mono font-medium"
-                >
-                  Max (${(unloadAccount.balance || 0).toFixed(2)})
-                </button>
-              </div>
-
-              <div className="relative">
-                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-400">$</span>
-                <input
-                  type="number"
-                  min="0.01"
-                  max={unloadAccount.balance || 0}
-                  step="any"
-                  value={unloadAmount}
-                  onChange={(e) => setUnloadAmount(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-4 py-2.5 text-sm font-bold text-white font-mono focus:outline-none focus:border-emerald-500"
-                  required
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3 pt-2">
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={() => setUnloadAccount(null)}
-                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={handleConfirmUnloadFunds}
-                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs transition-colors shadow-lg shadow-emerald-600/20"
-              >
-                {isSubmitting ? 'Unloading...' : `Unload $${(parseFloat(unloadAmount) || 0).toFixed(2)}`}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

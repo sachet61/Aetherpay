@@ -26,6 +26,15 @@ import {
   handlePostWheelSpin,
   type WheelHandlerDeps,
 } from './wheelHandlers.js';
+import {
+  handleCreateOfficialPartner,
+  handleDeleteOfficialPartner,
+  handleGetOfficialPartners,
+  handleReorderOfficialPartners,
+  handleUpdateOfficialPartner,
+  handleUploadOfficialPartnerIcon,
+  type OfficialPartnerHandlerDeps,
+} from './officialPartnerHandlers.js';
 
 const DEFAULT_SUPABASE_URL = 'https://fsykihwprqdptrqapxxg.supabase.co';
 const DEFAULT_SUPABASE_SERVICE_ROLE_KEY = ['sb_secret', 'RlSK7HlbIF7slBFyLi6Yfg_o1rhaSLU'].join('_');
@@ -174,8 +183,9 @@ async function ensureStorageBuckets(adminClient: any) {
   if (!adminClient?.storage) return;
   const allowedMimeTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
   const targetBuckets = [
-    { name: 'avatars', limit: 10485760 },
-    { name: 'chat_attachments', limit: 15728640 },
+    { name: 'avatars', limit: 10485760, mimes: allowedMimeTypes },
+    { name: 'chat_attachments', limit: 15728640, mimes: allowedMimeTypes },
+    { name: 'partner-icons', limit: 524288, mimes: ['image/png', 'image/jpeg', 'image/webp'] },
   ];
   try {
     const { data: existingBuckets, error } = await adminClient.storage.listBuckets();
@@ -190,13 +200,13 @@ async function ensureStorageBuckets(adminClient: any) {
         await adminClient.storage.createBucket(b.name, {
           public: true,
           fileSizeLimit: b.limit,
-          allowedMimeTypes,
+          allowedMimeTypes: b.mimes,
         }).catch(() => {});
       } else if (existing.public === false && typeof adminClient.storage.updateBucket === 'function') {
         await adminClient.storage.updateBucket(b.name, {
           public: true,
           fileSizeLimit: b.limit,
-          allowedMimeTypes,
+          allowedMimeTypes: b.mimes,
         }).catch(() => {});
       }
     }
@@ -1459,16 +1469,35 @@ export async function handleUpdateConversationStatus(adminClient: any, body: any
   }
 }
 
-export async function handleStorageUpload(adminClient: any, body: any, res: any) {
+export async function handleStorageUpload(adminClient: any, body: any, res: any, req?: any) {
   try {
     const { bucket, path: filePath, fileBase64, contentType, userId } = body || {};
     if (!bucket || !filePath || !fileBase64) {
       return res.status(400).json({ error: 'bucket, path, and fileBase64 are required' });
     }
 
+    if (bucket === 'partner-icons') {
+      const caller = await resolveVerifiedCallerProfile(adminClient, {
+        headers: req?.headers,
+        viewerUserId: userId,
+      });
+      if (caller.jwtRejected || caller.role !== 'admin') {
+        return res.status(caller.jwtRejected ? 401 : 403).json({
+          error: 'Only Platform Administrators can upload partner icons.',
+        });
+      }
+      const normType = String(contentType || '').trim().toLowerCase();
+      if (!['image/png', 'image/jpeg', 'image/webp'].includes(normType)) {
+        return res.status(400).json({ error: 'Only PNG, JPG, and WebP icons are allowed.' });
+      }
+    }
+
     await ensureStorageBuckets(adminClient);
 
     const buffer = Buffer.from(fileBase64, 'base64');
+    if (bucket === 'partner-icons' && buffer.length > 524288) {
+      return res.status(400).json({ error: 'Partner icon exceeds 512 KB limit.' });
+    }
     const { data, error } = await adminClient.storage
       .from(bucket)
       .upload(filePath, buffer, {
@@ -1571,6 +1600,7 @@ const ALLOWED_AUDIT_ENTITY_TYPES = new Set([
   'user',
   'chat',
   'auth',
+  'official_partner',
 ]);
 
 function isMissingColumnError(err: any): boolean {
@@ -2552,7 +2582,7 @@ export default async function handler(req: any, res: any) {
   // 5. Storage Fallback Upload Endpoint (Uses Service Role for Production Serverless)
   if (url.includes('/api/storage/upload') && req.method === 'POST') {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    return handleStorageUpload(supabaseAdmin, body, res);
+    return handleStorageUpload(supabaseAdmin, body, res, req);
   }
 
   // 5b. Stateless QR & Catalog Icon Upload to Supabase Storage
@@ -3057,6 +3087,50 @@ export default async function handler(req: any, res: any) {
   }
   if (url.includes('/api/game-accounts/transfer') && req.method === 'POST') {
     return handlePostGameCreditTransfer(wheelDeps, getBody(req), res, req);
+  }
+
+  // 9d. Official Partners Directory Routes
+  const partnerDeps: OfficialPartnerHandlerDeps = {
+    adminClient: supabaseAdmin,
+    resolveCaller: resolveVerifiedCallerProfile,
+    writeAudit: writeServerAuditLog,
+  };
+
+  if (url.startsWith('/api/official-partners') && req.method === 'GET') {
+    return handleGetOfficialPartners(partnerDeps, parsedUrl, res, req);
+  }
+  if (url.startsWith('/api/admin/official-partners/reorder') && req.method === 'POST') {
+    return handleReorderOfficialPartners(partnerDeps, getBody(req), res, req);
+  }
+  if (url.startsWith('/api/admin/official-partners/icon') && req.method === 'POST') {
+    return handleUploadOfficialPartnerIcon(partnerDeps, getBody(req), res, req);
+  }
+  if (url === '/api/admin/official-partners' && req.method === 'GET') {
+    const adminListUrl = new URL(parsedUrl.toString());
+    adminListUrl.searchParams.set('includeHidden', '1');
+    return handleGetOfficialPartners(partnerDeps, adminListUrl, res, req);
+  }
+  if (url === '/api/admin/official-partners' && req.method === 'POST') {
+    return handleCreateOfficialPartner(partnerDeps, getBody(req), res, req);
+  }
+  const partnerItemMatch = url.match(/^\/api\/admin\/official-partners\/([^/?#]+)$/);
+  if (partnerItemMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
+    return handleUpdateOfficialPartner(
+      partnerDeps,
+      decodeURIComponent(partnerItemMatch[1]),
+      getBody(req),
+      res,
+      req
+    );
+  }
+  if (partnerItemMatch && req.method === 'DELETE') {
+    return handleDeleteOfficialPartner(
+      partnerDeps,
+      decodeURIComponent(partnerItemMatch[1]),
+      getBody(req),
+      res,
+      req
+    );
   }
 
   // 10. Health & Status

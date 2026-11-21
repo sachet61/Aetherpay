@@ -278,21 +278,16 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
   return (
-    <div className="space-y-6 max-w-6xl mx-auto pb-12">
+    <div className="space-y-6 max-w-6xl mx-auto pb-24 md:pb-8">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-white tracking-tight">
-              Player Game IDs &amp; Credentials Desk
-            </h1>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950/60 text-cyan-400 border border-cyan-800/60 font-semibold">
-              Customer Support Operation
-            </span>
-          </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Customer Support specialists assign usernames &amp; passwords for games requested by players.
-          </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-bold text-white tracking-tight">
+            Player Game IDs &amp; Credentials Desk
+          </h1>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950/60 text-cyan-400 border border-cyan-800/60 font-semibold">
+            Credentials Desk
+          </span>
         </div>
 
         <div className="flex items-center gap-3">
@@ -398,122 +393,47 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
         </div>
       </div>
 
-      {/* Main Table */}
+      {/* Main List (Mobile Cards + Desktop Table) */}
       <div className="rounded-xl border border-slate-800 bg-slate-900 overflow-hidden shadow-xl">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="border-b border-slate-800 bg-slate-950/70 text-slate-400 uppercase text-[10px] font-semibold tracking-wider">
-                <th className="py-3 px-4">Player Customer</th>
-                <th className="py-3 px-4">Game Title &amp; Platform</th>
-                <th className="py-3 px-4">Username &amp; Credentials</th>
-                <th className="py-3 px-4 text-center">Support Status</th>
-                <th className="py-3 px-4 text-right">Support Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60">
-              {filteredAccounts.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="py-12 text-center text-slate-500 text-xs">
-                    {filterType === 'pending'
-                      ? 'No pending game ID requests from players right now. All caught up!'
-                      : 'No accounts match the current filters.'}
-                  </td>
-                </tr>
-              ) : (
-                filteredAccounts.map((acc) => {
-                  const player = users.find((u) => u.id === acc.customerId);
-                  const isRevealed = !!revealedPasswords[acc.id];
-                  const isPending =
-                    acc.status === 'pending_assignment' || acc.status === 'pending_reset';
+        {filteredAccounts.length === 0 ? (
+          <div className="py-12 px-4 text-center text-slate-500 text-xs">
+            {filterType === 'pending'
+              ? 'No pending game ID requests from players right now. All caught up!'
+              : 'No accounts match the current filters.'}
+          </div>
+        ) : (
+          <>
+            {/* Mobile Stacked Cards */}
+            <div className="md:hidden divide-y divide-slate-800/70">
+              {filteredAccounts.map((acc) => {
+                const player = users.find((u) => u.id === acc.customerId);
+                const isPending =
+                  acc.status === 'pending_assignment' || acc.status === 'pending_reset';
 
-                  return (
-                    <tr
-                      key={acc.id}
-                      className={`hover:bg-slate-800/40 transition-colors ${
-                        isPending ? 'bg-amber-950/15' : ''
-                      }`}
-                    >
-                      {/* Player column */}
-                      <td className="py-3.5 px-4">
-                        <div className="font-semibold text-white flex items-center gap-1.5">
-                          <User className="w-3.5 h-3.5 text-indigo-400" />
-                          <span>{player?.displayName || 'Player'}</span>
+                return (
+                  <div
+                    key={acc.id}
+                    className={`p-4 space-y-2.5 ${isPending ? 'bg-amber-950/15' : ''}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-white truncate">
+                          {player?.displayName || 'Player'}
                         </div>
-                        <div className="text-[10px] text-slate-400 font-mono">
-                          {player?.email || acc.customerId}
+                        <div className="text-xs text-slate-400 truncate">
+                          {acc.gameName} · {acc.platformName}
                         </div>
-                      </td>
+                      </div>
+                      <span className="px-2 py-0.5 rounded-md text-[11px] font-mono font-semibold text-slate-200 bg-slate-800/90 border border-slate-700 shrink-0 max-w-[140px] truncate">
+                        {acc.status === 'active' ? acc.username : 'Pending ID'}
+                      </span>
+                    </div>
 
-                      {/* Game column */}
-                      <td className="py-3.5 px-4">
-                        <div className="font-bold text-slate-200">{acc.gameName}</div>
-                        <div className="text-[10px] text-indigo-400 font-medium">
-                          {acc.platformName}
-                        </div>
-                      </td>
-
-                      {/* Credentials column */}
-                      <td className="py-3.5 px-4 font-mono">
-                        {acc.status === 'active' ? (
-                          <div className="space-y-1">
-                            <div className="flex items-center gap-1.5 text-xs text-white">
-                              <span className="text-[11px] text-slate-400">User:</span>
-                              <span className="font-bold">{acc.username}</span>
-                              <button
-                                onClick={() => handleCopy(acc.username, `user_${acc.id}`)}
-                                className="p-0.5 text-slate-400 hover:text-white"
-                                title="Copy Username"
-                              >
-                                {copiedField === `user_${acc.id}` ? (
-                                  <Check className="w-3 h-3 text-emerald-400" />
-                                ) : (
-                                  <Copy className="w-3 h-3" />
-                                )}
-                              </button>
-                            </div>
-
-                            <div className="flex items-center gap-1.5 text-xs text-slate-300">
-                              <span className="text-[11px] text-slate-400">Pass:</span>
-                              {isRevealed ? (
-                                <span className="font-bold text-emerald-400">{acc.password || 'N/A'}</span>
-                              ) : (
-                                <span className="text-slate-500 font-mono">••••••••</span>
-                              )}
-                              <button
-                                onClick={() => togglePasswordVisibility(acc.id)}
-                                className="p-0.5 text-slate-400 hover:text-white"
-                                title={isRevealed ? 'Hide Password' : 'Show Password'}
-                              >
-                                {isRevealed ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                              </button>
-                              <button
-                                onClick={() => handleCopy(acc.password || '', `pass_${acc.id}`)}
-                                className="p-0.5 text-slate-400 hover:text-white"
-                                title="Copy Password"
-                              >
-                                {copiedField === `pass_${acc.id}` ? (
-                                  <Check className="w-3 h-3 text-emerald-400" />
-                                ) : (
-                                  <Copy className="w-3 h-3" />
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="text-amber-400 font-sans text-xs italic flex items-center gap-1">
-                            <Clock className="w-3 h-3" />
-                            <span>
-                              {acc.status === 'pending_assignment'
-                                ? 'Requested New Game ID & Password'
-                                : 'Requested Password Reset'}
-                            </span>
-                          </div>
-                        )}
-                      </td>
-
-                      {/* Status column */}
-                      <td className="py-3.5 px-4 text-center">
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-mono text-slate-400">
+                          {new Date(acc.updatedAt).toLocaleDateString()}
+                        </span>
                         {acc.status === 'active' ? (
                           <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-950/60 text-emerald-400 border border-emerald-800/40">
                             Active
@@ -527,38 +447,178 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
                             Awaiting Reset
                           </span>
                         )}
-                      </td>
+                      </div>
 
-                      {/* Action column */}
-                      <td className="py-3.5 px-4 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => handleOpenEditModal(acc)}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${
-                              isPending
-                                ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                                : 'bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700'
-                            }`}
-                          >
-                            <KeyRound className="w-3.5 h-3.5" />
-                            <span>{isPending ? 'Assign & Notify' : 'Update Credentials'}</span>
-                          </button>
-                          <button
-                            onClick={() => handleDeleteAccount(acc)}
-                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/60 text-slate-400 hover:text-rose-300 border border-slate-700 transition cursor-pointer"
-                            title="Delete game account"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEditModal(acc)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors inline-flex items-center gap-1.5 shrink-0 ${
+                          isPending
+                            ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold'
+                            : 'bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700'
+                        }`}
+                      >
+                        <KeyRound className="w-3.5 h-3.5" />
+                        <span>{isPending ? 'Assign' : 'Update'}</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Desktop Table */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-950/70 text-slate-400 uppercase text-[10px] font-semibold tracking-wider">
+                    <th className="py-3 px-4">Player Customer</th>
+                    <th className="py-3 px-4">Game Title &amp; Platform</th>
+                    <th className="py-3 px-4">Username &amp; Credentials</th>
+                    <th className="py-3 px-4 text-center">Support Status</th>
+                    <th className="py-3 px-4 text-right">Support Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {filteredAccounts.map((acc) => {
+                    const player = users.find((u) => u.id === acc.customerId);
+                    const isRevealed = !!revealedPasswords[acc.id];
+                    const isPending =
+                      acc.status === 'pending_assignment' || acc.status === 'pending_reset';
+
+                    return (
+                      <tr
+                        key={acc.id}
+                        className={`hover:bg-slate-800/40 transition-colors ${
+                          isPending ? 'bg-amber-950/15' : ''
+                        }`}
+                      >
+                        {/* Player column */}
+                        <td className="py-3.5 px-4">
+                          <div className="font-semibold text-white flex items-center gap-1.5">
+                            <User className="w-3.5 h-3.5 text-indigo-400" />
+                            <span>{player?.displayName || 'Player'}</span>
+                          </div>
+                          <div className="text-[10px] text-slate-400 font-mono">
+                            {player?.email || acc.customerId}
+                          </div>
+                        </td>
+
+                        {/* Game column */}
+                        <td className="py-3.5 px-4">
+                          <div className="font-bold text-slate-200">{acc.gameName}</div>
+                          <div className="text-[10px] text-indigo-400 font-medium">
+                            {acc.platformName}
+                          </div>
+                        </td>
+
+                        {/* Credentials column */}
+                        <td className="py-3.5 px-4 font-mono">
+                          {acc.status === 'active' ? (
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-1.5 text-xs text-white">
+                                <span className="text-[11px] text-slate-400">User:</span>
+                                <span className="font-bold">{acc.username}</span>
+                                <button
+                                  onClick={() => handleCopy(acc.username, `user_${acc.id}`)}
+                                  className="p-0.5 text-slate-400 hover:text-white"
+                                  title="Copy Username"
+                                >
+                                  {copiedField === `user_${acc.id}` ? (
+                                    <Check className="w-3 h-3 text-emerald-400" />
+                                  ) : (
+                                    <Copy className="w-3 h-3" />
+                                  )}
+                                </button>
+                              </div>
+
+                              <div className="flex items-center gap-1.5 text-xs text-slate-300">
+                                <span className="text-[11px] text-slate-400">Pass:</span>
+                                {isRevealed ? (
+                                  <span className="font-bold text-emerald-400">{acc.password || 'N/A'}</span>
+                                ) : (
+                                  <span className="text-slate-500 font-mono">••••••••</span>
+                                )}
+                                <button
+                                  onClick={() => togglePasswordVisibility(acc.id)}
+                                  className="p-0.5 text-slate-400 hover:text-white"
+                                  title={isRevealed ? 'Hide Password' : 'Show Password'}
+                                >
+                                  {isRevealed ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                                </button>
+                                <button
+                                  onClick={() => handleCopy(acc.password || '', `pass_${acc.id}`)}
+                                  className="p-0.5 text-slate-400 hover:text-white"
+                                  title="Copy Password"
+                                >
+                                  {copiedField === `pass_${acc.id}` ? (
+                                    <Check className="w-3 h-3 text-emerald-400" />
+                                  ) : (
+                                    <Copy className="w-3 h-3" />
+                                  )}
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-amber-400 font-sans text-xs italic flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              <span>
+                                {acc.status === 'pending_assignment'
+                                  ? 'Requested New Game ID & Password'
+                                  : 'Requested Password Reset'}
+                              </span>
+                            </div>
+                          )}
+                        </td>
+
+                        {/* Status column */}
+                        <td className="py-3.5 px-4 text-center">
+                          {acc.status === 'active' ? (
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-950/60 text-emerald-400 border border-emerald-800/40">
+                              Active
+                            </span>
+                          ) : acc.status === 'pending_assignment' ? (
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-950/70 text-amber-300 border border-amber-800/50">
+                              Awaiting ID
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cyan-950/70 text-cyan-300 border border-cyan-800/50">
+                              Awaiting Reset
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Action column */}
+                        <td className="py-3.5 px-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => handleOpenEditModal(acc)}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${
+                                isPending
+                                  ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold shadow-md shadow-amber-500/20'
+                                  : 'bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700'
+                              }`}
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                              <span>{isPending ? 'Assign & Notify' : 'Update Credentials'}</span>
+                            </button>
+                            <button
+                              onClick={() => handleDeleteAccount(acc)}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/60 text-slate-400 hover:text-rose-300 border border-slate-700 transition cursor-pointer"
+                              title="Delete game account"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Modal for Assigning / Updating Credentials */}
@@ -706,7 +766,7 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
                 <div>
                   <h3 className="text-base font-bold text-white">Create Gaming ID for Player</h3>
                   <div className="text-[11px] text-slate-400">
-                    Direct assignment with instant Supabase sync &amp; in-app alert
+                    Direct assignment with instant player sync &amp; in-app alert
                   </div>
                 </div>
               </div>
@@ -839,7 +899,7 @@ export const AdminGameCredentials: React.FC<AdminGameCredentialsProps> = ({ curr
             </div>
 
             <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-800/40 text-[11px] text-amber-200/90 leading-relaxed">
-              <strong>Live PostgreSQL Persistence:</strong> Submitting immediately stores this account in Supabase PostgreSQL, pushes it to the player's Gaming IDs page in real time, and logs an audit trail entry.
+              <strong>Instant Sync:</strong> Saving immediately assigns this Gaming ID to the player&apos;s account and sends an in-app notification.
             </div>
 
             <div className="flex items-center gap-3 pt-2">

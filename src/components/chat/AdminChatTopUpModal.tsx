@@ -208,7 +208,7 @@ export const AdminChatTopUpModal: React.FC<AdminChatTopUpModalProps> = ({
         senderId: currentUser.id,
         senderName: currentUser.displayName,
         senderRole: 'agent',
-        text: `Here is the expedited Top-Up link for $${parsedAmount.toFixed(2)}${selectedGame ? ` on ${selectedGame.gameName}` : ''}. Please click below to complete your deposit.`,
+        text: `💳 Deposit Link Ready: $${parsedAmount.toFixed(2)}\n${selectedGame ? selectedGame.gameName : 'Select a payment method below'}`,
         isInternalNote: false,
       });
       onSuccess(`Deposit link prompt for $${parsedAmount.toFixed(2)} sent to chat.`);

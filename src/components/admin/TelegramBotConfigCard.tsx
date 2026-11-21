@@ -121,7 +121,7 @@ export const TelegramBotConfigCard: React.FC = () => {
     }
 
     setIsSaving(true);
-    setFeedback({ type: 'info', text: 'Saving configuration to Supabase database (table: app_config)...' });
+    setFeedback({ type: 'info', text: 'Saving Telegram alert settings...' });
 
     try {
       const res = await telegramService.saveConfig(effectiveToken, effectiveChannel, isEnabled);
@@ -134,7 +134,7 @@ export const TelegramBotConfigCard: React.FC = () => {
         }
         setFeedback({
           type: 'success',
-          text: 'Configuration successfully persisted to PostgreSQL database (app_config) and server storage!',
+          text: 'Telegram alert settings saved!',
         });
       } else {
         setFeedback({ type: 'error', text: res.error || 'Failed to update Telegram Bot configuration.' });
@@ -195,21 +195,21 @@ export const TelegramBotConfigCard: React.FC = () => {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-bold text-white">Telegram Customer Alerts (Zero-Egress Mode)</h2>
+              <h2 className="text-base font-bold text-white">Telegram Instant Alerts</h2>
               {isConnected ? (
                 <span className="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  ACTIVE • ZERO EGRESS
+                  ACTIVE
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30">
                   <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                  CONFIG PENDING
+                  SETUP NEEDED
                 </span>
               )}
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Event-driven notifications only. Server polling loop is disabled to eliminate 100% of background data egress. Whenever a customer posts a message in chat, an instant alert with their name is sent directly to your Telegram channel.
+              Send real-time customer message alerts directly to your Telegram channel.
             </p>
           </div>
         </div>
@@ -220,10 +220,10 @@ export const TelegramBotConfigCard: React.FC = () => {
             onClick={refreshAll}
             disabled={isLoadingStatus}
             className="text-xs text-slate-300 hover:text-white font-semibold flex items-center gap-1.5 transition-colors bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700 shadow-sm cursor-pointer disabled:opacity-50"
-            title="Reload configuration from database"
+            title="Reload saved settings"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoadingStatus ? 'animate-spin text-sky-400' : ''}`} />
-            <span>Sync DB</span>
+            <span>Refresh</span>
           </button>
 
           <button
@@ -254,39 +254,39 @@ export const TelegramBotConfigCard: React.FC = () => {
         </div>
 
         <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800">
-          <span className="text-[11px] text-slate-400">Delivery Architecture</span>
+          <span className="text-[11px] text-slate-400">Delivery Mode</span>
           <div className="text-sm font-mono font-bold text-emerald-400 mt-1">
-            Zero-Egress Push
+            Instant Push
           </div>
         </div>
 
         <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800">
-          <span className="text-[11px] text-slate-400">Polling Loop</span>
+          <span className="text-[11px] text-slate-400">Alert Status</span>
           <div className="text-xs font-bold text-emerald-400 mt-1 flex items-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Disabled (0 Egress)</span>
+            <span>{isEnabled ? 'Alerts Enabled' : 'Alerts Paused'}</span>
           </div>
         </div>
       </div>
 
       {/* Form Controls */}
       <form onSubmit={handleSave} className="space-y-4">
-        {/* Database Persistence Verified Banner */}
+        {/* Configuration Verified Banner */}
         {status?.tokenConfigured && (
           <div className="flex items-center justify-between p-3 rounded-xl bg-slate-950/90 border border-emerald-900/50 text-emerald-300 text-xs">
             <div className="flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
               <div>
-                <span className="font-semibold text-white">Database Stored:</span> Persistent in PostgreSQL table <code className="text-emerald-400 font-mono">app_config</code>.
+                <span className="font-semibold text-white">Channel Connected:</span> Ready to dispatch instant support alerts.
                 {lastSavedTime && (
                   <span className="text-[10px] text-slate-400 block font-mono mt-0.5">
-                    Database timestamp: {new Date(lastSavedTime).toLocaleString()}
+                    Last updated: {new Date(lastSavedTime).toLocaleString()}
                   </span>
                 )}
               </div>
             </div>
             <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-mono">
-              PERSISTED IN DB
+              SAVED
             </span>
           </div>
         )}
@@ -536,14 +536,14 @@ export const TelegramBotConfigCard: React.FC = () => {
                 </div>
               </div>
 
-              {/* Step 4: Zero-Egress Notifications */}
+              {/* Step 4: Instant Customer Notifications */}
               <div className="p-3.5 rounded-xl bg-sky-950/30 border border-sky-800/40 space-y-1 text-slate-300">
                 <div className="font-bold text-white flex items-center gap-1.5">
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  <span>Zero-Egress Customer Notifications:</span>
+                  <span>Instant Customer Notifications:</span>
                 </div>
                 <p className="text-[11px] text-slate-300/90 leading-relaxed pl-5">
-                  Continuous polling has been removed to conserve server bandwidth. Whenever a customer sends a message in support chat, a minimal alert with their name (<code>💬 New message from [Customer Name]</code>) is immediately dispatched to your Telegram channel.
+                  Whenever a customer sends a message in support chat, an instant alert with their name (<code>💬 New message from [Customer Name]</code>) is sent directly to your Telegram channel.
                 </p>
               </div>
             </div>

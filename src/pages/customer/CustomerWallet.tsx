@@ -148,14 +148,11 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
   };
 
   return (
-    <div className="space-y-6 max-w-6xl mx-auto pb-12">
+    <div className="space-y-6 max-w-6xl mx-auto pb-24 md:pb-8">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Wallet &amp; Activity History</h1>
-          <p className="text-xs text-slate-400 mt-1">
-            Unified record of all deposits, withdrawals, referral rewards, and staff review status.
-          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -350,104 +347,29 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
             )}
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs border-collapse">
-              <thead>
-                <tr className="border-b border-slate-800 bg-slate-950/70 text-slate-400 uppercase text-[10px] font-semibold tracking-wider">
-                  <th className="py-3 px-4">Date &amp; Ref</th>
-                  <th className="py-3 px-4">Category</th>
-                  <th className="py-3 px-4">Details &amp; Notes</th>
-                  <th className="py-3 px-4 text-right">Base</th>
-                  <th className="py-3 px-4 text-right">Bonus / Fee</th>
-                  <th className="py-3 px-4 text-right">Final / Net</th>
-                  <th className="py-3 px-4 text-center">Status</th>
-                  <th className="py-3 px-3 text-right">Audit</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {filteredItems.slice(0, visibleCount).map((item) => {
-                  const statusMeta = getActivityStatusMeta(item.status);
-                  const isRejectedOrCancelled =
-                    item.status === 'rejected' || item.status === 'cancelled';
+          <>
+            {/* Mobile Stacked Cards (< 768px) */}
+            <div className="md:hidden divide-y divide-slate-800/80">
+              {filteredItems.slice(0, visibleCount).map((item) => {
+                const statusMeta = getActivityStatusMeta(item.status);
+                const isRejectedOrCancelled =
+                  item.status === 'rejected' || item.status === 'cancelled';
 
-                  const categoryTextClass =
-                    item.category === 'deposit'
-                      ? 'text-emerald-400 border-emerald-500/30 bg-emerald-950/30'
-                      : item.category === 'withdrawal'
-                      ? 'text-cyan-400 border-cyan-500/30 bg-cyan-950/30'
-                      : item.category === 'referral'
-                      ? 'text-amber-300 border-amber-500/30 bg-amber-950/30'
-                      : 'text-slate-300 border-slate-700 bg-slate-950';
-
-                  return (
-                    <tr
-                      key={`${item.sourceType}_${item.id}`}
-                      onClick={() => setSelectedItem(item)}
-                      className="hover:bg-slate-800/40 cursor-pointer transition-colors"
-                    >
-                      <td className="py-3.5 px-4 whitespace-nowrap">
-                        <div className="font-mono text-slate-200">
-                          {new Date(item.createdAt).toLocaleDateString([], {
-                            month: 'short',
-                            day: 'numeric',
-                            year: 'numeric',
-                          })}
-                        </div>
-                        <div className="text-[10px] font-mono text-slate-500">
-                          {new Date(item.createdAt).toLocaleTimeString([], {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </div>
-                        <div className="text-[10px] font-mono text-slate-500 truncate max-w-[140px]">
-                          {item.id}
-                        </div>
-                      </td>
-
-                      <td className="py-3.5 px-4 whitespace-nowrap">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded border text-[10px] font-mono font-semibold uppercase tracking-wide ${categoryTextClass}`}
-                        >
+                return (
+                  <div
+                    key={`${item.sourceType}_${item.id}_mobile`}
+                    className="p-4 space-y-2.5"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-semibold text-white text-sm truncate">{item.title}</div>
+                        <div className="text-xs text-slate-400 truncate mt-0.5">
                           {CATEGORY_LABELS[item.category]}
-                        </span>
-                      </td>
-
-                      <td className="py-3.5 px-4 text-slate-200 min-w-[210px]">
-                        <div className="font-semibold text-white">{item.title}</div>
-                        <div className="text-[11px] text-slate-400 mt-0.5">{item.description}</div>
-                        {(item.payoutReference || (item.referenceId && item.referenceId !== item.id)) && (
-                          <div className="text-[10px] font-mono text-cyan-400 mt-0.5">
-                            Ref: {item.payoutReference || item.referenceId}
-                          </div>
-                        )}
-                        {item.reviewNotes && (
-                          <div
-                            className={`text-[10px] mt-1 flex items-start gap-1 ${
-                              isRejectedOrCancelled ? 'text-rose-300' : 'text-slate-400'
-                            }`}
-                          >
-                            <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
-                            <span className="line-clamp-1">{item.reviewNotes}</span>
-                          </div>
-                        )}
-                      </td>
-
-                      <td className="py-3.5 px-4 text-right font-mono tabular-nums text-slate-300 whitespace-nowrap">
-                        ${item.baseAmount.toFixed(2)}
-                      </td>
-
-                      <td className="py-3.5 px-4 text-right font-mono tabular-nums whitespace-nowrap">
-                        {item.bonusAmount > 0 ? (
-                          <span className="text-amber-300">+${item.bonusAmount.toFixed(2)} bonus</span>
-                        ) : item.feeAmount > 0 ? (
-                          <span className="text-rose-300">-${item.feeAmount.toFixed(2)} fee</span>
-                        ) : (
-                          <span className="text-slate-500">—</span>
-                        )}
-                      </td>
-
-                      <td
-                        className={`py-3.5 px-4 text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                          {item.targetGameName ? ` · ${item.targetGameName}` : ''}
+                        </div>
+                      </div>
+                      <span
+                        className={`shrink-0 font-mono text-xs font-bold tabular-nums px-2 py-0.5 rounded-md border border-slate-800 bg-slate-950 ${
                           isRejectedOrCancelled
                             ? 'text-slate-500 line-through'
                             : item.direction === 'credit'
@@ -460,35 +382,179 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
                         {item.direction === 'credit' && !isRejectedOrCancelled ? '+' : ''}
                         {item.direction === 'debit' && !isRejectedOrCancelled ? '-' : ''}$
                         {item.netAmount.toFixed(2)}
-                      </td>
+                      </span>
+                    </div>
 
-                      <td className="py-3.5 px-4 text-center whitespace-nowrap">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded border text-[10px] font-mono font-semibold ${statusMeta.badgeClass}`}
-                        >
-                          {statusMeta.label}
-                        </span>
-                      </td>
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="font-mono text-slate-400">
+                        {new Date(item.createdAt).toLocaleDateString([], {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                      <span
+                        className={`inline-block px-2 py-0.5 rounded border text-[10px] font-mono font-semibold ${statusMeta.badgeClass}`}
+                      >
+                        {statusMeta.label}
+                      </span>
+                    </div>
 
-                      <td className="py-3.5 px-3 text-right whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedItem(item);
-                          }}
-                          aria-label={`View details for ${item.title} ${item.id}`}
-                          className="p-1.5 rounded-lg border border-slate-800 bg-slate-950 text-slate-400 hover:text-amber-300 hover:border-amber-500/40 transition-colors"
+                    <button
+                      type="button"
+                      onClick={() => setSelectedItem(item)}
+                      className="w-full py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <Eye className="w-3.5 h-3.5 text-amber-400" />
+                      <span>View Receipt</span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Desktop Table (>= 768px) */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-950/70 text-slate-400 uppercase text-[10px] font-semibold tracking-wider">
+                    <th className="py-3 px-4">Date &amp; Ref</th>
+                    <th className="py-3 px-4">Category</th>
+                    <th className="py-3 px-4">Details &amp; Notes</th>
+                    <th className="py-3 px-4 text-right">Base</th>
+                    <th className="py-3 px-4 text-right">Bonus / Fee</th>
+                    <th className="py-3 px-4 text-right">Final / Net</th>
+                    <th className="py-3 px-4 text-center">Status</th>
+                    <th className="py-3 px-3 text-right">Audit</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {filteredItems.slice(0, visibleCount).map((item) => {
+                    const statusMeta = getActivityStatusMeta(item.status);
+                    const isRejectedOrCancelled =
+                      item.status === 'rejected' || item.status === 'cancelled';
+
+                    const categoryTextClass =
+                      item.category === 'deposit'
+                        ? 'text-emerald-400 border-emerald-500/30 bg-emerald-950/30'
+                        : item.category === 'withdrawal'
+                        ? 'text-cyan-400 border-cyan-500/30 bg-cyan-950/30'
+                        : item.category === 'referral'
+                        ? 'text-amber-300 border-amber-500/30 bg-amber-950/30'
+                        : 'text-slate-300 border-slate-700 bg-slate-950';
+
+                    return (
+                      <tr
+                        key={`${item.sourceType}_${item.id}`}
+                        onClick={() => setSelectedItem(item)}
+                        className="hover:bg-slate-800/40 cursor-pointer transition-colors"
+                      >
+                        <td className="py-3.5 px-4 whitespace-nowrap">
+                          <div className="font-mono text-slate-200">
+                            {new Date(item.createdAt).toLocaleDateString([], {
+                              month: 'short',
+                              day: 'numeric',
+                              year: 'numeric',
+                            })}
+                          </div>
+                          <div className="text-[10px] font-mono text-slate-500">
+                            {new Date(item.createdAt).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </div>
+                          <div className="text-[10px] font-mono text-slate-500 truncate max-w-[140px]">
+                            {item.id}
+                          </div>
+                        </td>
+
+                        <td className="py-3.5 px-4 whitespace-nowrap">
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded border text-[10px] font-mono font-semibold uppercase tracking-wide ${categoryTextClass}`}
+                          >
+                            {CATEGORY_LABELS[item.category]}
+                          </span>
+                        </td>
+
+                        <td className="py-3.5 px-4 text-slate-200 min-w-[210px]">
+                          <div className="font-semibold text-white">{item.title}</div>
+                          <div className="text-[11px] text-slate-400 mt-0.5">{item.description}</div>
+                          {(item.payoutReference || (item.referenceId && item.referenceId !== item.id)) && (
+                            <div className="text-[10px] font-mono text-cyan-400 mt-0.5">
+                              Ref: {item.payoutReference || item.referenceId}
+                            </div>
+                          )}
+                          {item.reviewNotes && (
+                            <div
+                              className={`text-[10px] mt-1 flex items-start gap-1 ${
+                                isRejectedOrCancelled ? 'text-rose-300' : 'text-slate-400'
+                              }`}
+                            >
+                              <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+                              <span className="line-clamp-1">{item.reviewNotes}</span>
+                            </div>
+                          )}
+                        </td>
+
+                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-slate-300 whitespace-nowrap">
+                          ${item.baseAmount.toFixed(2)}
+                        </td>
+
+                        <td className="py-3.5 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                          {item.bonusAmount > 0 ? (
+                            <span className="text-amber-300">+${item.bonusAmount.toFixed(2)} bonus</span>
+                          ) : item.feeAmount > 0 ? (
+                            <span className="text-rose-300">-${item.feeAmount.toFixed(2)} fee</span>
+                          ) : (
+                            <span className="text-slate-500">—</span>
+                          )}
+                        </td>
+
+                        <td
+                          className={`py-3.5 px-4 text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
+                            isRejectedOrCancelled
+                              ? 'text-slate-500 line-through'
+                              : item.direction === 'credit'
+                              ? 'text-emerald-400'
+                              : item.direction === 'debit'
+                              ? 'text-slate-100'
+                              : 'text-amber-300'
+                          }`}
                         >
-                          <Eye className="w-3.5 h-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                          {item.direction === 'credit' && !isRejectedOrCancelled ? '+' : ''}
+                          {item.direction === 'debit' && !isRejectedOrCancelled ? '-' : ''}$
+                          {item.netAmount.toFixed(2)}
+                        </td>
+
+                        <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded border text-[10px] font-mono font-semibold ${statusMeta.badgeClass}`}
+                          >
+                            {statusMeta.label}
+                          </span>
+                        </td>
+
+                        <td className="py-3.5 px-3 text-right whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedItem(item);
+                            }}
+                            aria-label={`View details for ${item.title} ${item.id}`}
+                            className="p-1.5 rounded-lg border border-slate-800 bg-slate-950 text-slate-400 hover:text-amber-300 hover:border-amber-500/40 transition-colors"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
 
         {filteredItems.length > visibleCount && (

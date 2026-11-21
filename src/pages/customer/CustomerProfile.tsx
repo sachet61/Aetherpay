@@ -22,9 +22,12 @@ import {
   Sparkles,
   Camera,
   Loader2,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { storageService } from '../../services/storageService';
 import { validateImageFile } from '../../utils/uploadUtils';
+import { formatShortUuid } from '../../utils/uiCopyUtils';
 
 interface CustomerProfileProps {
   currentUser: UserProfile;
@@ -51,6 +54,26 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
   const avatarInputRef = React.useRef<HTMLInputElement>(null);
   const [isUploadingAvatar, setIsUploadingAvatar] = useState<boolean>(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<boolean>(false);
+
+  const handleCopyUserId = () => {
+    navigator.clipboard.writeText(currentUser.id);
+    setCopiedId(true);
+    setTimeout(() => setCopiedId(false), 2000);
+  };
+
+  const referrerDisplayName = React.useMemo(() => {
+    if (!currentUser.referredBy) return null;
+    const match = dataService
+      .getUsers()
+      .find(
+        (u) =>
+          u.id === currentUser.referredBy ||
+          u.referralCode === currentUser.referredBy ||
+          u.email === currentUser.referredBy
+      );
+    return match?.displayName || currentUser.referredBy;
+  }, [currentUser.referredBy]);
 
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -71,7 +94,7 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
       if (res.success && res.url) {
         await dataService.updateUserAvatar(currentUser.id, res.url);
         currentUser.avatarUrl = res.url;
-        setSuccessNote('Profile picture uploaded, compressed to WebP, and saved to database!');
+        setSuccessNote('Profile picture updated!');
         setTimeout(() => setSuccessNote(null), 5000);
       } else {
         setAvatarError(res.error || 'Failed to update profile picture. Please try again.');
@@ -136,17 +159,14 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
     dataService.registerUser(updatedUser);
     authSessionService.updateUserProfile(updatedUser);
     window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: 'user_verified' } }));
-    setSuccessNote('Email address successfully verified via OTP!');
+    setSuccessNote('Email address verified!');
     setTimeout(() => setSuccessNote(null), 5000);
   };
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto pb-12">
+    <div className="space-y-6 max-w-4xl mx-auto pb-24 md:pb-8">
       <div>
         <h1 className="text-2xl font-bold text-white tracking-tight">Profile &amp; Security Settings</h1>
-        <p className="text-xs text-slate-400 mt-1">
-          Manage your personal verification credentials, account security, and login sessions.
-        </p>
       </div>
 
       {successNote && (
@@ -225,8 +245,23 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
             </div>
             <div>
               <h2 className="text-lg font-bold text-white">{currentUser.displayName}</h2>
-              <div className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">
-                <span className="font-mono text-indigo-400">ID: {currentUser.id}</span>
+              <div className="text-xs text-slate-400 flex flex-wrap items-center gap-2 mt-0.5">
+                <span className="inline-flex items-center gap-1.5 font-mono text-indigo-400" title={currentUser.id}>
+                  <span>ID: {formatShortUuid(currentUser.id)}</span>
+                  <button
+                    type="button"
+                    onClick={handleCopyUserId}
+                    className="p-0.5 rounded bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 transition-colors"
+                    title="Copy full ID"
+                    aria-label="Copy full user ID"
+                  >
+                    {copiedId ? (
+                      <Check className="w-3 h-3 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3 h-3" />
+                    )}
+                  </button>
+                </span>
                 <span aria-hidden="true" className="text-slate-600">·</span>
                 {verificationUi.isVerified ? (
                   <span className="text-emerald-400 flex items-center gap-1">
@@ -283,10 +318,10 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
                   type="button"
                   onClick={() => setShowOtpModal(true)}
                   className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-indigo-600/20 active:scale-95"
-                  title="Verify email with 6-digit OTP code"
+                  title="Verify email with 6-digit verification code"
                 >
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Verify by OTP / Enter OTP</span>
+                  <span>Verify Email Code</span>
                 </button>
               </div>
             )}
@@ -320,10 +355,10 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
           <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
             <div className="text-slate-400 flex items-center gap-1.5">
               <KeyRound className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Referral Attribution</span>
+              <span>Joined via</span>
             </div>
-            <div className="font-medium text-white font-mono">
-              {currentUser.referredBy ? `Attributed to ${currentUser.referredBy}` : 'Organic Player'}
+            <div className="font-medium text-white">
+              {referrerDisplayName ? referrerDisplayName : 'Direct Sign-up'}
             </div>
           </div>
         </div>

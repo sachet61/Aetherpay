@@ -542,3 +542,31 @@ export interface PasswordResetToken {
   used: boolean;
   [key: string]: any;
 }
+
+export type PartnerPlatform = 'facebook' | 'instagram' | 'telegram';
+
+export interface OfficialPartner {
+  id: string;
+  name: string;
+  iconUrl: string | null;
+  platform: PartnerPlatform;
+  pageUrl: string;
+  messageLink: string | null;
+  gameId: string | null;
+  note: string | null;
+  isVisible: boolean;
+  sortOrder: number;
+  updatedBy?: string | null;
+  updatedAt: string;
+}
+
+export interface OfficialPartnerInput {
+  name: string;
+  iconUrl?: string | null;
+  platform: PartnerPlatform;
+  pageUrl: string;
+  messageLink?: string | null;
+  gameId?: string | null;
+  note?: string | null;
+  isVisible?: boolean;
+}

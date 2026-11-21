@@ -20,6 +20,10 @@ const loadCustomerRules = () =>
   import('../pages/customer/CustomerRules').then((mod) => ({ default: mod.CustomerRules }));
 const loadCustomerProfile = () =>
   import('../pages/customer/CustomerProfile').then((mod) => ({ default: mod.CustomerProfile }));
+const loadCustomerOfficialPartners = () =>
+  import('../pages/customer/CustomerOfficialPartners').then((mod) => ({
+    default: mod.CustomerOfficialPartners,
+  }));
 
 const loadAdminDashboard = () =>
   import('../pages/admin/AdminDashboard').then((mod) => ({ default: mod.AdminDashboard }));
@@ -47,6 +51,7 @@ export const LazyCustomerChat = React.lazy(loadCustomerChat);
 export const LazyCustomerReferrals = React.lazy(loadCustomerReferrals);
 export const LazyCustomerRules = React.lazy(loadCustomerRules);
 export const LazyCustomerProfile = React.lazy(loadCustomerProfile);
+export const LazyCustomerOfficialPartners = React.lazy(loadCustomerOfficialPartners);
 
 export const LazyAdminDashboard = React.lazy(loadAdminDashboard);
 export const LazyAdminRequests = React.lazy(loadAdminRequests);
@@ -67,6 +72,7 @@ const routeLoaderMap: Record<string, () => Promise<unknown>> = {
   referrals: loadCustomerReferrals,
   rules: loadCustomerRules,
   profile: loadCustomerProfile,
+  official_partners: loadCustomerOfficialPartners,
   ops_dashboard: loadAdminDashboard,
   ops_requests: loadAdminRequests,
   ops_chat: loadAdminChat,

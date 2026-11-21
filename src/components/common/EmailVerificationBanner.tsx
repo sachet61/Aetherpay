@@ -55,19 +55,19 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
   const handleInstantVerify = async () => {
     if (isInstantConfirming) return;
     setIsInstantConfirming(true);
-    setFeedback({ type: 'info', message: 'Confirming email directly in Supabase Auth...' });
+    setFeedback({ type: 'info', message: 'Confirming email verification...' });
     try {
       const res = await dataService.confirmEmailNow(currentUser.email);
       if (res.success) {
         setFeedback({
           type: 'success',
-          message: res.message || 'Email successfully verified in Supabase! Cashouts and referral bonuses unlocked.',
+          message: res.message || 'Email verified! Cashouts and referral bonuses unlocked.',
         });
         if (onStatusChanged) onStatusChanged(true);
       } else {
         setFeedback({
           type: 'error',
-          message: res.message || 'Instant verification error. You can also click Resend Link.',
+          message: res.message || 'Verification error. You can also click Send Code.',
         });
       }
     } catch (e: any) {
@@ -93,18 +93,18 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
         }
         setFeedback({
           type: 'success',
-          message: res.message || `Verification link dispatched to ${currentUser.email}. Check your inbox or click the direct link below.`,
+          message: res.message || `Verification email sent to ${currentUser.email}. Check your inbox or click the link below.`,
         });
       } else {
         setFeedback({
           type: 'error',
-          message: res.message || 'Failed to dispatch verification email from Supabase.',
+          message: res.message || 'Failed to send verification email.',
         });
       }
     } catch (e: any) {
       setFeedback({
         type: 'error',
-        message: e.message || 'Error dispatching verification link.',
+        message: e.message || 'Error sending verification email.',
       });
     } finally {
       setIsSending(false);
@@ -120,14 +120,14 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
       if (res.verified) {
         setFeedback({
           type: 'success',
-          message: res.message || 'Email verified successfully! Cashouts and referral bonuses unlocked.',
+          message: res.message || 'Email verified! Cashouts and referral bonuses unlocked.',
         });
         if (onStatusChanged) onStatusChanged(true);
         setTimeout(() => setIsDismissed(true), 2000);
       } else {
         setFeedback({
           type: 'error',
-          message: res.message || 'Email is still unverified in Supabase. Click "Verify Now" to confirm instantly.',
+          message: res.message || 'Email is not verified yet. Enter your code or click Send Code.',
         });
       }
     } catch (e: any) {
@@ -155,10 +155,10 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
               </span>
             </div>
             <p className="text-xs text-slate-300 leading-relaxed max-w-2xl">
-              Your registered email <span className="font-mono font-semibold text-amber-200">({currentUser.email})</span> is currently unverified. Cashouts and referral earnings are locked until OTP verification is confirmed.
+              Your email <span className="font-mono font-semibold text-amber-200">({currentUser.email})</span> is unverified. Cashouts and referral rewards unlock after email verification.
             </p>
             <p className="text-[11px] text-amber-300/80">
-              * Please check your Spam or Junk folder if the 6-digit OTP code does not arrive in your Inbox.
+              * Check your Spam or Junk folder if the 6-digit verification code does not arrive in your Inbox.
             </p>
           </div>
         </div>
@@ -172,16 +172,16 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
             title="Enter 6-digit verification code received in email"
           >
             <KeyRound className="w-3.5 h-3.5" />
-            <span>Enter OTP Code</span>
+            <span>Enter Verification Code</span>
           </button>
 
-          {/* Resend Supabase Email Code */}
+          {/* Resend Verification Email Code */}
           <button
             type="button"
             onClick={handleResend}
             disabled={isSending || cooldown > 0}
             className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-xs font-semibold transition disabled:opacity-50"
-            title="Send official Supabase confirmation email to your inbox"
+            title="Send verification code to your inbox"
           >
             {isSending ? (
               <span>Sending...</span>
@@ -199,7 +199,7 @@ export const EmailVerificationBanner: React.FC<EmailVerificationBannerProps> = (
             onClick={handleCheckStatus}
             disabled={isChecking}
             className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition disabled:opacity-50"
-            title="Check Supabase for confirmed email status"
+            title="Refresh email verification status"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? 'animate-spin' : ''}`} />
             <span>{isChecking ? 'Checking...' : 'Check Status'}</span>

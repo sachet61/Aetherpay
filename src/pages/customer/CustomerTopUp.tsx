@@ -9,6 +9,7 @@ import {
   saveTopUpDraft,
   validateImageFile,
 } from '../../utils/uploadUtils';
+import { formatTopUpSubmittedChatMessage } from '../../utils/uiCopyUtils';
 import {
   ArrowDownToLine,
   CreditCard,
@@ -262,6 +263,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=chime://send/${encodeURIComponent(chimeHandle)}`;
 
   const [showChimeQrModal, setShowChimeQrModal] = useState(false);
+  const [showRulesModal, setShowRulesModal] = useState(false);
   const [downloadingChimeQr, setDownloadingChimeQr] = useState(false);
 
   const handleDownloadChimeQr = async (e?: React.MouseEvent) => {
@@ -420,7 +422,11 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
             senderId: currentUser.id,
             senderName: currentUser.displayName,
             senderRole: 'customer',
-            text: `📷 Payment Proof Forwarded for ${currentMethod.name} -> Target Game: "${targetGameName}". Please review my payment receipt screenshot and credit my account.`,
+            text: formatTopUpSubmittedChatMessage({
+              amount: 0,
+              methodName: currentMethod.name,
+              gameName: targetGameName,
+            }),
             isInternalNote: false,
           });
         } catch (chatErr) {
@@ -430,7 +436,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
         // Forward alert to 24/7 Telegram Bot if active
         telegramService.notify({
           title: 'New Payment Proof Forwarded',
-          text: `Player ${currentUser.displayName} submitted payment proof for ${currentMethod.name} (Game: ${targetGameName}). Awaiting staff verification of deposit amount.`,
+          text: `Player ${currentUser.displayName} submitted payment proof for ${currentMethod.name} (Game: ${targetGameName}).`,
           customerName: currentUser.displayName,
           customerEmail: currentUser.email,
           actionType: 'topup',
@@ -440,7 +446,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
 
         setIsSubmitting(false);
         setSuccessMessage(
-          `Payment proof successfully forwarded! Our agent/admin desk will verify the amount from your receipt and credit your deposit (+${dynamicBonusPercent}% bonus) to ${targetGameName}.`
+          `Payment proof submitted! Your deposit (+${dynamicBonusPercent}% bonus) will be credited to ${targetGameName} shortly.`
         );
         setScreenshotFile(null);
         setScreenshotName('');
@@ -456,22 +462,17 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
   };
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto pb-12">
+    <div className="space-y-6 max-w-5xl mx-auto pb-24 md:pb-8">
       {/* Header with Gaming Theme */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
-              <Gamepad2 className="w-6 h-6 text-amber-400" />
-              <span>Game Top-Up (Cash-In)</span>
-            </h1>
-            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-              UP TO 30% BONUS
-            </span>
-          </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Choose your game, select from 4 supported payment channels, and attach proof for instant credit.
-          </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+            <Gamepad2 className="w-6 h-6 text-amber-400" />
+            <span>Top-Up</span>
+          </h1>
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+            UP TO 30% BONUS
+          </span>
         </div>
 
         {/* Mode Switcher */}
@@ -529,14 +530,14 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
         {/* Main Form (Col 7) */}
         <div className="lg:col-span-7 space-y-5">
           <form onSubmit={handleSubmit} className="p-6 rounded-2xl border border-slate-800 bg-slate-900 space-y-5 shadow-xl">
-            {/* Game Choose: ONLY show the clean Game Name (no current credit, no username) */}
+            {/* Step 1: Select Game */}
             <div className="space-y-2 p-3.5 rounded-xl bg-slate-950 border border-slate-800">
               <label className="text-xs font-semibold text-slate-200 flex items-center justify-between">
                 <span className="flex items-center gap-1.5">
                   <Gamepad2 className="w-4 h-4 text-amber-400" />
-                  <span>Choose Game</span>
+                  <span>1. Select Game</span>
                 </span>
-                <span className="text-[10px] text-amber-400 font-normal">Select game to credit</span>
+                <span className="text-[10px] text-amber-400 font-normal">Target account</span>
               </label>
 
               {/* Clean select box with only game titles */}
@@ -558,11 +559,11 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
               </div>
             </div>
 
-            {/* Exactly 4 Supported Payment Methods */}
+            {/* Step 2: Select Payment Method */}
             {fundingMode === 'gateway_payment' && (
               <div className="space-y-3">
                 <label className="text-xs font-semibold text-slate-300">
-                  Select Payment Method (Select to Unlock Bonus)
+                  2. Select Method (Choose Bonus Tier)
                 </label>
 
                 <div className="grid grid-cols-2 gap-2.5">
@@ -983,12 +984,12 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                   </div>
                 )}
 
-                {/* Screenshot Send Option to verify from admin */}
+                {/* Step 3: Pay & Upload Screenshot */}
                 <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3 text-xs">
                   <div className="flex items-center justify-between gap-2">
                     <label htmlFor="topup-proof-input" className="font-semibold text-white flex items-center gap-1.5">
                       <ImageIcon className="w-4 h-4 text-indigo-400" />
-                      <span>Send Payment Screenshot (Verify from Admin)</span>
+                      <span>3. Pay &amp; Upload Screenshot</span>
                     </label>
                     <span className="text-[10px] text-slate-400 shrink-0">Required</span>
                   </div>
@@ -1044,7 +1045,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                           </div>
                           <div className="text-[10px] text-emerald-400 flex items-center gap-1">
                             <Check className="w-3 h-3 shrink-0" />
-                            <span>Screenshot attached for admin review</span>
+                            <span>Screenshot attached</span>
                           </div>
                         </div>
                       </div>
@@ -1097,7 +1098,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                               Optimizing &amp; Uploading Screenshot...
                             </div>
                             <p className="text-[10px] text-slate-400 mt-0.5">
-                              Converting to WebP and saving securely
+                              Optimizing &amp; saving image
                             </p>
                           </>
                         ) : (
@@ -1143,7 +1144,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
               <span>
                 {isSubmitting
                   ? fundingMode === 'gateway_payment'
-                    ? 'Submitting Proof to Admin...'
+                    ? 'Submitting Proof...'
                     : 'Transferring Credits to Game...'
                   : fundingMode === 'free_play'
                   ? `Load $${parsedFreePlayAmount.toFixed(2)} Free-Play to Game`
@@ -1203,7 +1204,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                 <div className="flex items-center justify-between text-slate-300">
                   <span>Deposit Base Amount</span>
                   <span className="font-mono text-amber-300">
-                    Verified by Admin from Proof
+                    Verified from Proof
                   </span>
                 </div>
 
@@ -1218,15 +1219,6 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                         Amount + {dynamicBonusPercent}% Bonus
                       </span>
                     </div>
-                  </div>
-
-                  <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-400 space-y-1">
-                    <div className="font-semibold text-slate-200">How it works:</div>
-                    <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
-                      <li>Click link / scan QR / copy address to complete payment</li>
-                      <li>Upload your completed payment receipt screenshot</li>
-                      <li>Submit proof to agent/admin for instant verification and crediting</li>
-                    </ol>
                   </div>
                 </div>
               </div>
@@ -1250,44 +1242,27 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                     ${(fundingMode === 'free_play' ? parsedFreePlayAmount : parsedRefAmount).toFixed(2)}
                   </span>
                 </div>
-
-                <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-400 space-y-1">
-                  <div className="font-semibold text-slate-200">Free-Play &amp; Unload Policy:</div>
-                  <p className="leading-relaxed">
-                    Promotional credits load directly into your active Gaming ID at a 1:1 rate. Unloading returns tracked Free-Play credits back to your Free-Play Balance first before cashable balance.
-                  </p>
-                </div>
               </div>
             )}
 
-            {/* Anti-fraud info */}
-            <div className="p-3.5 rounded-xl bg-slate-950 border border-amber-500/30 text-xs text-slate-300 space-y-1.5">
-              <div className="font-semibold text-white flex items-center gap-1.5 text-[11px]">
-                <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
-                <span>Verified Payment Channel Rule</span>
-              </div>
-              <p className="text-[11px] text-slate-400 leading-relaxed">
-                Depositing via <strong className="text-amber-300">{currentMethod?.name}</strong> registers this channel. Cashouts will be processed through this same verified method.
-              </p>
-            </div>
-          </div>
+            <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => setShowRulesModal(true)}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-400 hover:text-amber-300 transition-colors cursor-pointer"
+              >
+                <Info className="w-3.5 h-3.5 shrink-0" />
+                <span>Bonus &amp; Payout Rules</span>
+              </button>
 
-          {/* Quick Chat Help */}
-          <div className="p-5 rounded-2xl border border-slate-800 bg-[#0E1726]/60 text-xs text-slate-400 space-y-2.5">
-            <div className="font-semibold text-white flex items-center gap-1.5">
-              <Info className="w-4 h-4 text-amber-400" />
-              <span>Need Help or Fast Credit?</span>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('chat')}
+                className="text-xs font-medium text-slate-300 hover:text-white transition-colors cursor-pointer"
+              >
+                Open Live Chat &rarr;
+              </button>
             </div>
-            <p className="text-[11px] leading-relaxed">
-              Message our support specialists directly in Live Chat. You can send your payment receipt directly in chat for instant balance activation.
-            </p>
-            <button
-              type="button"
-              onClick={() => onNavigateTab('chat')}
-              className="text-xs text-amber-400 hover:text-amber-300 font-semibold"
-            >
-              Direct Chat with Support &rarr;
-            </button>
           </div>
         </div>
       </div>
@@ -1300,7 +1275,46 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
             <span>Recent Top-Up History</span>
           </h2>
 
-          <div className="overflow-x-auto">
+          {/* Mobile Stacked Cards */}
+          <div className="md:hidden space-y-2.5">
+            {topUpHistory.slice(0, 5).map((req) => (
+              <div
+                key={req.id}
+                className="p-3.5 rounded-xl border border-slate-800 bg-slate-950/60 space-y-2"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-white truncate">
+                      {req.targetGameName || 'Game'}
+                    </div>
+                    <div className="text-xs text-slate-400 truncate">{req.methodName}</div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-md text-xs font-mono font-bold text-white bg-slate-800/90 border border-slate-700 shrink-0 tabular-nums">
+                    ${req.finalWalletCredit.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
+                  <span className="font-mono">
+                    {new Date(req.createdAt).toLocaleDateString()}
+                    {req.bonusAmount > 0 ? ` · +$${req.bonusAmount.toFixed(2)} bonus` : ''}
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-sans font-semibold ${
+                      req.status === 'completed'
+                        ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                        : req.status === 'rejected'
+                        ? 'bg-rose-950 text-rose-400 border border-rose-800'
+                        : 'bg-amber-950 text-amber-400 border border-amber-800'
+                    }`}
+                  >
+                    {req.status}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-xs text-left">
               <thead className="text-[11px] text-slate-400 border-b border-slate-800 font-mono">
                 <tr>
@@ -1414,6 +1428,82 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
               )}
               <span>{downloadingChimeQr ? 'Saving QR Image...' : 'Download QR Code (Save to Photos)'}</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Bonus & Payout Rules Modal */}
+      {showRulesModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150"
+          onClick={() => setShowRulesModal(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bonus-payout-rules-title"
+            onClick={(e) => e.stopPropagation()}
+            className="relative w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-5 sm:p-6 shadow-2xl space-y-4 text-xs text-slate-300"
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2 text-white font-bold text-sm">
+                <ShieldCheck className="w-4 h-4 text-amber-400" />
+                <h3 id="bonus-payout-rules-title">Bonus &amp; Payout Rules</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRulesModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                aria-label="Close bonus and payout rules"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 leading-relaxed">
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
+                <div className="font-semibold text-white">How Top-Ups Work</div>
+                <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
+                  <li>Select your target game and preferred payment method</li>
+                  <li>Send payment using the link, QR code, or wallet address</li>
+                  <li>Upload your receipt screenshot for review and crediting</li>
+                </ol>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-950 border border-amber-500/30 space-y-1">
+                <div className="font-semibold text-white">Same-Channel Payout Rule</div>
+                <p className="text-slate-400">
+                  Depositing via <strong className="text-amber-300">{currentMethod?.name}</strong> sets your verified payout channel. Cashouts are returned through your last deposit method.
+                </p>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
+                <div className="font-semibold text-white">Free-Play &amp; Bonus Credits</div>
+                <p className="text-slate-400">
+                  Promotional credits load at a 1:1 rate into active Gaming IDs. Unloading returns Free-Play credits to your Free-Play balance before cashable funds.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRulesModal(false);
+                  onNavigateTab('chat');
+                }}
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-semibold transition-colors"
+              >
+                Need help? Open Live Chat
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowRulesModal(false)}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition-colors"
+              >
+                Got It
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -1,6 +1,7 @@
 import { supabase } from './supabaseClient';
 import { compressImageToWebP } from '../utils/imageCompressor';
 import { validateImageFile } from '../utils/uploadUtils';
+import { validatePartnerIconFile } from '../utils/officialPartnersUtils';
 import { buildProxyStorageUrl, toProxyStorageUrl } from './storageUrlUtils';
 
 export interface StorageUploadResult {
@@ -434,6 +435,73 @@ class StorageService {
       return {
         success: false,
         error: err?.message || 'Image upload failed',
+      };
+    }
+  }
+
+  /**
+   * Uploads Official Partner icon to dedicated 'partner-icons' bucket.
+   * Enforces PNG/JPG/WebP only (no SVG) and 512 KB max size both client- and server-side.
+   */
+  public async uploadPartnerIcon(
+    file: File,
+    accessToken?: string | null
+  ): Promise<StorageUploadResult> {
+    try {
+      const validation = validatePartnerIconFile(file);
+      if (!validation.valid || !validation.mimeType) {
+        return { success: false, error: validation.error };
+      }
+
+      let token = accessToken ? accessToken.trim() : '';
+      if (!token) {
+        try {
+          const { data } = await supabase.auth.getSession();
+          token = data?.session?.access_token || '';
+        } catch {
+          token = '';
+        }
+      }
+
+      const fileBase64 = await fileToBase64(file);
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+        headers['x-supabase-token'] = token;
+      }
+
+      const res = await fetch('/api/admin/official-partners/icon', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          fileName: file.name,
+          contentType: validation.mimeType,
+          fileBase64,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success || !data?.url) {
+        return {
+          success: false,
+          error: data?.error || `Partner icon upload failed (${res.status}).`,
+        };
+      }
+
+      return {
+        success: true,
+        url: data.url,
+        name: file.name,
+        originalSize: file.size,
+        compressedSize: data.size || file.size,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Partner icon upload failed.',
       };
     }
   }

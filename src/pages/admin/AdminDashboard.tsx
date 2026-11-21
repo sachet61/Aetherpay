@@ -92,7 +92,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     .reduce((sum, t) => sum + t.amount, 0);
 
   return (
-    <div className="space-y-6 max-w-6xl mx-auto pb-12">
+    <div className="space-y-6 max-w-6xl mx-auto pb-24 md:pb-8">
       {/* Hero Banner */}
       <section
         aria-label={isAdmin ? 'Admin Overview' : 'Customer Support Command Desk'}
@@ -138,10 +138,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <h1 className="text-2xl sm:text-[28px] font-bold text-white tracking-tight leading-tight">
                 {isAdmin ? 'Admin Overview' : 'Customer Support Command Desk'}
               </h1>
-              <p className="text-sm text-slate-300/90 mt-1.5 max-w-2xl leading-relaxed">
+              <p className="text-sm text-slate-300/90 mt-1">
                 {isAdmin
-                  ? 'Manage games, player access, requests, fees, and audit activity.'
-                  : 'Answer player tickets, fulfill game ID & password requests, and verify deposits.'}
+                  ? 'Operations, queues, and system summary.'
+                  : 'Tickets, game IDs, and deposit reviews.'}
               </p>
             </div>
           </div>

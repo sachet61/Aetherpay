@@ -51,6 +51,9 @@ export function filterRealtimeRowsForUser(
     if (table === 'audit_logs' && activeUser.role !== 'admin') {
       return [];
     }
+    if (table === 'official_partners' && activeUser.role !== 'admin') {
+      return rows.filter((r) => Boolean(r && r.is_visible === true));
+    }
     return rows;
   }
 
@@ -59,6 +62,8 @@ export function filterRealtimeRowsForUser(
   const canonicalConvId = `conv_${uid}`;
 
   switch (table) {
+    case 'official_partners':
+      return rows.filter((r) => Boolean(r && r.is_visible === true));
     case 'messages':
       return rows.filter((r) => {
         if (!r || isRowInternalNote(r)) return false;
