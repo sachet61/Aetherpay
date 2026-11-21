@@ -190,7 +190,7 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
 
         <div className="p-5 rounded-xl border border-amber-500/30 bg-amber-950/20 shadow-md">
           <div className="flex items-center justify-between text-xs text-amber-300 mb-2">
-            <span>Referral Bonus (Game Only)</span>
+            <span>Referral Bonus</span>
             <Sparkles className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-2xl font-bold text-amber-300 font-mono tabular-nums">

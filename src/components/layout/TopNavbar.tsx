@@ -18,17 +18,13 @@ import {
   MessageSquare,
   KeyRound,
   Inbox,
-  ArrowDownToLine,
-  ArrowUpFromLine,
   User,
-  Gift,
-  FileText,
   ChevronDown,
-  MessageCircle,
 } from 'lucide-react';
 import { SwiftSweepsLogo } from '../common/SwiftSweepsLogo';
 import { PWAInstallButton } from '../common/PWAInstallButton';
 import { WheelGlyph } from '../customer/WheelGlyph';
+import { CustomerMobileDrawer } from './CustomerMobileDrawer';
 import { useWheelAvailability } from '../../hooks/useWheelAvailability';
 
 interface TopNavbarProps {
@@ -604,8 +600,23 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
         </div>
       </header>
 
-      {/* Hamburger Side Drawer (Available on mobile & tablet) */}
-      {isMobileDrawerOpen && (
+      {/* Redesigned Customer Mobile Side Drawer */}
+      {isCustomer && (
+        <CustomerMobileDrawer
+          isOpen={isMobileDrawerOpen}
+          onClose={() => setIsMobileDrawerOpen(false)}
+          currentUser={currentUser}
+          wallet={wallet}
+          activeTab={activeTab}
+          onNavigateTab={onNavigateTab}
+          onLogout={onLogout}
+          spinAvailable={effectiveSpinAvailable}
+          onOpenWheel={effectiveOpenWheel}
+        />
+      )}
+
+      {/* Staff Hamburger Side Drawer (Admin & Agent only) */}
+      {isMobileDrawerOpen && !isCustomer && (
         <div className="fixed inset-0 z-50 flex justify-end">
           <div
             className="fixed inset-0 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200"
@@ -889,122 +900,6 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                   >
                     <LayoutDashboard className="w-4 h-4" />
                     <span>Overview Dashboard</span>
-                  </button>
-                </>
-              )}
-
-              {/* CUSTOMER NAVIGATION */}
-              {isCustomer && (
-                <>
-                  <div className="px-2 pt-1 pb-1 text-[10px] font-mono uppercase tracking-wider text-slate-400 font-semibold">
-                    Player Portal
-                  </div>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('dashboard')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'dashboard' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <LayoutDashboard className="w-4 h-4 text-amber-400" />
-                    <span>Home Dashboard</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('wallet')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'wallet' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <Wallet className="w-4 h-4 text-emerald-400" />
-                    <span>Wallet &amp; Ledger</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('topup')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'topup' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <ArrowDownToLine className="w-4 h-4 text-amber-400" />
-                    <span>Instant Top-Up</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('withdrawal')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'withdrawal' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <ArrowUpFromLine className="w-4 h-4 text-indigo-400" />
-                    <span>Request Cashout</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('game_accounts')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'game_accounts' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <Gamepad2 className="w-4 h-4 text-amber-400" />
-                    <span>Gaming IDs &amp; Pins</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('chat')}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'chat' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <Headphones className="w-4 h-4 text-cyan-400" />
-                      <span>Live Support Chat</span>
-                    </div>
-                    {unreadCustomerMessages > 0 && (
-                      <span className="min-w-4 h-4 px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-bold tabular-nums flex items-center justify-center">
-                        {unreadCustomerMessages}
-                      </span>
-                    )}
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('profile')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'profile' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <User className="w-4 h-4 text-indigo-400" />
-                    <span>Account Profile</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('referrals')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'referrals' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <Gift className="w-4 h-4 text-pink-400" />
-                    <span>Referrals &amp; Rewards</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('rules')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'rules' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <FileText className="w-4 h-4 text-slate-400" />
-                    <span>Sweepstakes Rules</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('official_partners')}
-                    className={`w-full min-h-[44px] flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'official_partners' ? 'bg-amber-500/15 text-amber-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <MessageCircle className="w-4 h-4 text-amber-400" />
-                    <span>Official Partners</span>
                   </button>
                 </>
               )}

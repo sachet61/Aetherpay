@@ -516,3 +516,20 @@ export function movePartnerByStep(
   next.splice(targetIdx, 0, moved);
   return next.map((item, index) => ({ ...item, sortOrder: index }));
 }
+
+export function getDrawerPreviewPartners(
+  partners: OfficialPartner[],
+  maxCount = 3
+): OfficialPartner[] {
+  if (maxCount <= 0) return [];
+  const visible = partners.filter((partner) => partner.isVisible !== false);
+  return sortOfficialPartners(visible, 'manual').slice(0, maxCount);
+}
+
+export function getCustomerFirstName(displayName?: string | null): string {
+  const first = String(displayName || '')
+    .trim()
+    .split(/\s+/)
+    .find(Boolean);
+  return first || 'Player';
+}

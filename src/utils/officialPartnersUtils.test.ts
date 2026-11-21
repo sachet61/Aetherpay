@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   extractPlatformUsername,
+  getCustomerFirstName,
+  getDrawerPreviewPartners,
   getMessageLink,
   getPartnerDisplayDomain,
   getPartnerInitials,
@@ -235,4 +237,38 @@ test('sorting, domain formatting, initials, and reordering produce deterministic
   );
   assert.equal(getPartnerDisplayDomain('https://www.facebook.com/alpha'), 'facebook.com');
   assert.equal(getPartnerInitials('Official VIP Desk'), 'OV');
+});
+
+test('getDrawerPreviewPartners filters visible partners, respects admin sort order, caps at 3, and getCustomerFirstName formats first name', () => {
+  const mk = (id: string, sortOrder: number, isVisible: boolean): OfficialPartner => ({
+    id,
+    name: `Partner ${id}`,
+    iconUrl: null,
+    platform: 'facebook',
+    pageUrl: `https://facebook.com/${id}`,
+    messageLink: null,
+    gameId: null,
+    note: null,
+    isVisible,
+    sortOrder,
+    updatedAt: '2026-01-01T00:00:00Z',
+  });
+
+  const partners: OfficialPartner[] = [
+    mk('d', 3, true),
+    mk('b', 1, false),
+    mk('c', 2, true),
+    mk('e', 4, true),
+    mk('a', 0, true),
+  ];
+
+  assert.deepEqual(
+    getDrawerPreviewPartners(partners, 3).map((p) => p.id),
+    ['a', 'c', 'd']
+  );
+  assert.deepEqual(getDrawerPreviewPartners([mk('hidden', 0, false)]), []);
+
+  assert.equal(getCustomerFirstName('  Alex   Mercer '), 'Alex');
+  assert.equal(getCustomerFirstName('   '), 'Player');
+  assert.equal(getCustomerFirstName(null), 'Player');
 });

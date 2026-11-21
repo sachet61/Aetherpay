@@ -15,7 +15,6 @@ import { PartnerIcon, PlatformGlyph, getPlatformDisplayName } from '../../compon
 import {
   buildUnifiedWalletActivity,
   getActivityStatusMeta,
-  resolveDashboardTopUpDisplay,
 } from '../../services/walletActivityUtils';
 import {
   Wallet,
@@ -30,8 +29,6 @@ import {
   TrendingUp,
   Copy,
   Check,
-  Sparkles,
-  Zap,
 } from 'lucide-react';
 
 interface CustomerHomeProps {
@@ -122,9 +119,6 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [activeOverlayGameId]);
-  const topUpDisplay = resolveDashboardTopUpDisplay(wallet, topups, currentUser.id);
-  const displayTopUpAmount = topUpDisplay.amount;
-  const displayTopUpGame = topUpDisplay.gameName;
 
   // Sync referral summary & server evaluation when referral/wallet state updates
   useEffect(() => {
@@ -180,8 +174,6 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
     };
   }, [currentUser.id, currentUser.emailVerified, currentUser.referredBy]);
 
-  const effectiveFreePlayBalance = Number(wallet.freePlayBalance ?? 0);
-
   const welcomeBonus = referralSummary.welcomeBonus;
   const referrerRewardVal = referralSummary.referrerRewardValue ?? referralSummary.rewardPerReferral ?? 25;
   const refereeRewardVal = referralSummary.refereeRewardValue ?? 0;
@@ -215,94 +207,16 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
           <div className="absolute inset-0 bg-gradient-to-r from-[#0A0F1D] via-[#0A0F1D]/90 to-transparent" />
         </div>
 
-        <div className="relative z-10 p-6 sm:p-8 flex flex-col md:flex-row md:items-center justify-between gap-6">
-          <div className="space-y-2.5 max-w-xl">
-            <div className="flex items-center gap-2 text-xs text-amber-400 font-mono">
-              <ShieldCheck className="w-4 h-4 text-emerald-400" />
-              <span>Verified Sweeps Gaming Wallet</span>
-              <span aria-hidden="true" className="text-slate-600">·</span>
-              <span className="text-amber-400 font-bold">+20% to +30% RELOAD BONUSES</span>
-            </div>
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-              Hi, {(currentUser.displayName || '').trim().split(/\s+/)[0] || 'Player'}
-            </h1>
+        <div className="relative z-10 p-6 sm:p-8 flex flex-col gap-2.5 max-w-xl">
+          <div className="flex items-center gap-2 text-xs text-amber-400 font-mono">
+            <ShieldCheck className="w-4 h-4 text-emerald-400" />
+            <span>Verified Sweeps Gaming Wallet</span>
+            <span aria-hidden="true" className="text-slate-600">·</span>
+            <span className="text-amber-400 font-bold">+20% to +30% RELOAD BONUSES</span>
           </div>
-
-          {/* Quick Balance Snapshot Card */}
-          <div className="bg-[#0E1726]/90 border border-amber-500/20 rounded-2xl p-5 backdrop-blur-md min-w-[290px] space-y-2.5 shadow-xl">
-            <div className="flex items-center justify-between text-xs text-slate-400">
-              <span className="flex items-center gap-1.5 font-medium text-slate-300">
-                <Gamepad2 className="w-3.5 h-3.5 text-amber-400" />
-                <span>Latest Top-Up Amount</span>
-              </span>
-              <span
-                className={`text-[10px] px-1.5 py-0.5 rounded font-semibold font-mono border ${
-                  topUpDisplay.hasCompletedTopUp
-                    ? 'bg-emerald-950/80 border-emerald-700/60 text-emerald-400'
-                    : 'bg-slate-900 border-slate-700 text-slate-400'
-                }`}
-              >
-                {topUpDisplay.hasCompletedTopUp ? 'Game Loaded' : 'Awaiting Top-Up'}
-              </span>
-            </div>
-
-            <div className="text-3xl font-bold text-emerald-400 font-mono tabular-nums tracking-tight">
-              ${displayTopUpAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </div>
-
-            {topUpDisplay.hasCompletedTopUp && topUpDisplay.bonusAmount > 0 && (
-              <div className="text-[11px] font-mono text-slate-400">
-                ${topUpDisplay.baseAmount.toFixed(2)} deposit +{' '}
-                <span className="text-amber-300">${topUpDisplay.bonusAmount.toFixed(2)} bonus</span>
-              </div>
-            )}
-
-            <div className="text-[11px] text-slate-300 flex items-center justify-between gap-2 font-medium">
-              <div className="flex items-center gap-1 truncate">
-                <span className="text-slate-400">Target Game:</span>
-                <span className={displayTopUpGame ? 'text-amber-300 font-bold' : 'text-slate-500'}>
-                  {displayTopUpGame || 'No completed deposit yet'}
-                </span>
-              </div>
-              {topUpDisplay.completedAt && (
-                <span className="text-[10px] font-mono text-slate-500 shrink-0">
-                  {new Date(topUpDisplay.completedAt).toLocaleDateString([], {
-                    month: 'short',
-                    day: 'numeric',
-                  })}
-                </span>
-              )}
-            </div>
-
-            {/* Non-cashable Referral & Free-Play Balance Badges */}
-            {(wallet.referralBonusBalance || 0) > 0 && (
-              <div className="pt-1">
-                <div className="px-2.5 py-1.5 rounded-lg bg-amber-950/60 border border-amber-500/30 flex items-center justify-between text-xs">
-                  <span className="text-amber-300 flex items-center gap-1 text-[11px]">
-                    <Sparkles className="w-3 h-3 text-amber-400" />
-                    <span>Referral Bonus:</span>
-                  </span>
-                  <span className="font-mono font-bold text-amber-300">
-                    ${(wallet.referralBonusBalance || 0).toFixed(2)}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {effectiveFreePlayBalance > 0 && (
-              <div className="pt-0.5">
-                <div className="px-2.5 py-1.5 rounded-lg bg-emerald-950/60 border border-emerald-500/30 flex items-center justify-between text-xs">
-                  <span className="text-emerald-300 flex items-center gap-1 text-[11px]">
-                    <Zap className="w-3 h-3 text-emerald-400" />
-                    <span>Wheel Free-Play (Game Only):</span>
-                  </span>
-                  <span className="font-mono font-bold text-emerald-300">
-                    ${effectiveFreePlayBalance.toFixed(2)}
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+            Hi, {(currentUser.displayName || '').trim().split(/\s+/)[0] || 'Player'}
+          </h1>
         </div>
       </div>
 

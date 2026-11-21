@@ -276,6 +276,7 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
               const hasActiveCredentials = Boolean(account && account.status === 'active');
               const isPendingAssignment = Boolean(account && account.status === 'pending_assignment');
               const isPendingReset = Boolean(account && account.status === 'pending_reset');
+              const hasGameUrl = isSafeExternalHttpUrl(game.gameUrl);
               const hasDownloadLink = isSafeExternalHttpUrl(game.downloadUrl);
               const hasResetAction = Boolean(hasActiveCredentials && account);
               const hasMenuActions = hasDownloadLink || hasResetAction;
@@ -502,11 +503,24 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
                       </>
                     ) : (
                       <>
-                        <div className="flex-1" aria-hidden="true" />
+                        {hasGameUrl ? (
+                          <a
+                            href={game.gameUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            data-testid={`launch-game-unrequested-${game.id}`}
+                            className="flex-1 min-w-0 h-10 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700/80 text-slate-100 text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                            <span>Launch Game</span>
+                          </a>
+                        ) : (
+                          <div className="flex-1" aria-hidden="true" />
+                        )}
                         <button
                           type="button"
                           onClick={() => setShowRequestConfirmModal(game)}
-                          className="flex-1 min-w-[136px] h-10 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors shadow-sm shadow-indigo-600/25 whitespace-nowrap"
+                          className={`flex-1 ${hasGameUrl ? 'min-w-0' : 'min-w-[136px]'} h-10 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors shadow-sm shadow-indigo-600/25 whitespace-nowrap`}
                         >
                           <Sparkles className="w-3.5 h-3.5 shrink-0" />
                           <span>Request ID</span>
