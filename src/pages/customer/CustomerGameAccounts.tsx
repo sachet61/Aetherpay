@@ -212,9 +212,6 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Gaming IDs</h1>
-          <p className="text-xs text-slate-400 mt-1">
-            Active logins appear first. Request an ID for any game to play.
-          </p>
         </div>
         {isHydrating && playerAccounts.length === 0 && (
           <span className="text-[11px] text-slate-400 font-medium">Checking saved IDs...</span>

@@ -15,6 +15,7 @@ import { PartnerIcon, PlatformGlyph, getPlatformDisplayName } from '../../compon
 import {
   buildUnifiedWalletActivity,
   getActivityStatusMeta,
+  resolveDashboardTopUpDisplay,
 } from '../../services/walletActivityUtils';
 import {
   Wallet,
@@ -29,6 +30,8 @@ import {
   TrendingUp,
   Copy,
   Check,
+  Sparkles,
+  Zap,
 } from 'lucide-react';
 
 interface CustomerHomeProps {
@@ -183,6 +186,14 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   const referrerRewardText =
     referralMode === 'percent' ? `${referrerRewardVal}% bonus` : `$${referrerRewardVal.toFixed(2)} bonus`;
 
+  const topUpDisplay = useMemo(
+    () => resolveDashboardTopUpDisplay(wallet, topups, currentUser.id),
+    [wallet, topups, currentUser.id]
+  );
+  const displayTopUpAmount = topUpDisplay.amount;
+  const displayTopUpGame = topUpDisplay.gameName;
+  const effectiveFreePlayBalance = wallet.freePlayBalance || 0;
+
   const handleCopyReferral = () => {
     navigator.clipboard.writeText(referralSummary.referralLink);
     setCopiedRef(true);
@@ -207,16 +218,54 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
           <div className="absolute inset-0 bg-gradient-to-r from-[#0A0F1D] via-[#0A0F1D]/90 to-transparent" />
         </div>
 
-        <div className="relative z-10 p-6 sm:p-8 flex flex-col gap-2.5 max-w-xl">
-          <div className="flex items-center gap-2 text-xs text-amber-400 font-mono">
-            <ShieldCheck className="w-4 h-4 text-emerald-400" />
-            <span>Verified Sweeps Gaming Wallet</span>
-            <span aria-hidden="true" className="text-slate-600">·</span>
-            <span className="text-amber-400 font-bold">+20% to +30% RELOAD BONUSES</span>
+        <div className="relative z-10 p-6 sm:p-8 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+          <div className="flex flex-col gap-2.5 max-w-xl">
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+              Hi, {(currentUser.displayName || '').trim().split(/\s+/)[0] || 'Player'}
+            </h1>
           </div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-            Hi, {(currentUser.displayName || '').trim().split(/\s+/)[0] || 'Player'}
-          </h1>
+
+          {/* Quick Balance Snapshot Card */}
+          <div
+            data-testid="quick-balance-snapshot"
+            className="w-full lg:w-80 shrink-0 rounded-2xl bg-[#0A0F1D]/85 backdrop-blur-md border border-amber-500/25 p-4 space-y-3 shadow-xl"
+          >
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-800/80">
+              <div className="min-w-0">
+                <div className="text-[11px] font-medium text-slate-400">Latest Top-Up Amount</div>
+                <div className="text-2xl font-extrabold font-mono text-white tracking-tight mt-0.5 tabular-nums">
+                  ${displayTopUpAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+              </div>
+              {displayTopUpGame && (
+                <span className="px-2 py-0.5 rounded-md bg-amber-500/10 border border-amber-500/25 text-[11px] font-semibold text-amber-300 truncate max-w-[120px]">
+                  {displayTopUpGame}
+                </span>
+              )}
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-slate-300">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span>Referral Bonus:</span>
+                </span>
+                <span className="font-mono font-bold text-amber-300 tabular-nums">
+                  ${(wallet.referralBonusBalance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-slate-300">
+                  <Zap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>Wheel Free-Play:</span>
+                </span>
+                <span className="font-mono font-bold text-emerald-300 tabular-nums">
+                  ${effectiveFreePlayBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 

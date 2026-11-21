@@ -5,18 +5,17 @@ import {
   buildUnifiedWalletActivity,
   filterUnifiedWalletActivity,
   getActivityStatusMeta,
+  resolveDashboardTopUpDisplay,
   UnifiedWalletActivityItem,
   WalletActivityFilter,
 } from '../../services/walletActivityUtils';
 import {
-  Wallet,
   ArrowDownToLine,
   ArrowUpFromLine,
   Search,
   Download,
-  Clock,
-  Shield,
   Sparkles,
+  Zap,
   X,
   AlertCircle,
   Loader2,
@@ -63,6 +62,12 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
   const topups = dataService.getTopUpRequests(currentUser.id);
   const withdrawals = dataService.getWithdrawalRequests(currentUser.id);
   const transactions = dataService.getTransactions(currentUser.id);
+
+  const topUpDisplay = useMemo(
+    () => resolveDashboardTopUpDisplay(wallet, topups, currentUser.id),
+    [wallet, topups, currentUser.id]
+  );
+  const freePlayBalance = wallet.freePlayBalance || 0;
 
   const unifiedActivity = useMemo(
     () =>
@@ -175,17 +180,24 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
         </div>
       </div>
 
-      {/* Financial Health Snapshot Cards (4 columns) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Wallet Snapshot Cards (Latest Top-Up, Referral Bonus, Free-Play Bonus) */}
+      <div
+        data-testid="wallet-balance-cards"
+        className="grid grid-cols-1 sm:grid-cols-3 gap-4"
+      >
         <div className="p-5 rounded-xl border border-slate-800 bg-slate-900/90 shadow-md">
           <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
-            <span>Withdrawable Cash</span>
-            <Wallet className="w-4 h-4 text-emerald-400" />
+            <span>Latest Top-Up</span>
+            <ArrowDownToLine className="w-4 h-4 text-emerald-400" />
           </div>
-          <div className="text-2xl font-bold text-emerald-400 font-mono tabular-nums">
-            ${wallet.availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+          <div className="text-2xl font-bold text-white font-mono tabular-nums">
+            ${topUpDisplay.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
-          <div className="text-[11px] text-slate-400 mt-2">Immediately withdrawable to bank/crypto</div>
+          <div className="text-[11px] text-slate-400 mt-2 truncate">
+            {topUpDisplay.hasCompletedTopUp && topUpDisplay.gameName
+              ? `Credited to ${topUpDisplay.gameName}`
+              : 'Most recent completed top-up'}
+          </div>
         </div>
 
         <div className="p-5 rounded-xl border border-amber-500/30 bg-amber-950/20 shadow-md">
@@ -194,62 +206,35 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
             <Sparkles className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-2xl font-bold text-amber-300 font-mono tabular-nums">
-            ${(wallet.referralBonusBalance || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+            ${(wallet.referralBonusBalance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
           <div className="text-[11px] text-amber-300/80 mt-2">Non-cashable. Use to load directly to games</div>
         </div>
 
-        <div className="p-5 rounded-xl border border-slate-800 bg-[#0E1726] shadow-md">
-          <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
-            <span>Reserved for Cashout</span>
-            <Clock className="w-4 h-4 text-amber-400" />
+        <div className="p-5 rounded-xl border border-emerald-500/30 bg-emerald-950/20 shadow-md">
+          <div className="flex items-center justify-between text-xs text-emerald-300 mb-2">
+            <span>Free-Play Bonus</span>
+            <Zap className="w-4 h-4 text-emerald-400" />
           </div>
-          <div className="text-2xl font-bold text-amber-400 font-mono tabular-nums">
-            ${(wallet.reservedBalance || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+          <div className="text-2xl font-bold text-emerald-300 font-mono tabular-nums">
+            ${freePlayBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
-          <div className="text-[11px] text-slate-400 mt-2">Held safely in vault while payout is processed</div>
-        </div>
-
-        <div className="p-5 rounded-xl border border-slate-800 bg-[#0E1726] shadow-md">
-          <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
-            <span>Pending Deposits</span>
-            <Shield className="w-4 h-4 text-amber-400" />
+          <div className="flex items-center justify-between gap-2 mt-2">
+            <span className="text-[11px] text-emerald-200/75">
+              Non-cashable. Use to load directly to games
+            </span>
+            {freePlayBalance > 0 && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('game_accounts')}
+                className="text-[11px] font-bold text-emerald-300 hover:text-emerald-200 underline whitespace-nowrap shrink-0"
+              >
+                Load to Game
+              </button>
+            )}
           </div>
-          <div className="text-2xl font-bold text-slate-200 font-mono tabular-nums">
-            ${(wallet.pendingDepositBalance || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-          </div>
-          <div className="text-[11px] text-slate-400 mt-2">Awaiting treasury review or chain confirmation</div>
         </div>
       </div>
-
-      {/* Wheel of Luck Free-Play Balance Strip */}
-      {(wallet.freePlayBalance || 0) > 0 && (
-        <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-950/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shrink-0">
-              <Sparkles className="w-4 h-4" />
-            </div>
-            <div>
-              <div className="text-xs font-bold text-white flex items-center gap-2">
-                <span>Wheel of Luck Free-Play Balance</span>
-                <span className="font-mono text-emerald-400 font-extrabold">
-                  ${(wallet.freePlayBalance || 0).toFixed(2)}
-                </span>
-              </div>
-              <p className="text-[11px] text-emerald-200/75">
-                Non-cashable promotional credits. Load directly into any active Game ID to play.
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => onNavigateTab('game_accounts')}
-            className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs whitespace-nowrap shrink-0 transition-colors"
-          >
-            Load Free-Play to Game
-          </button>
-        </div>
-      )}
 
       {/* Filter and Search Bar */}
       <div className="p-4 rounded-xl border border-slate-800 bg-[#0E1726] flex flex-col md:flex-row md:items-center justify-between gap-4">
