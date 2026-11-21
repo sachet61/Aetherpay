@@ -13,7 +13,7 @@
   "11": "wheelOfLuckUtils.ts",
   "12": "compilerOptions",
   "13": "AdminChat.tsx",
-  "14": "supabaseAuthService.ts",
+  "14": "TopNavbar.tsx",
   "15": "react",
   "16": "lucide-react",
   "17": "WebPushClient",
@@ -28,14 +28,9 @@
   "26": "useVerificationResolution.ts",
   "27": "AuthSessionService",
   "28": "UserRole",
-  "29": "CustomerReferrals.tsx",
-  "30": "AdminGameCredentials.tsx",
   "31": "api/index.ts",
-  "32": "dataService.ts",
   "33": "AdminRequests.tsx",
-  "34": "uiCopyUtils.ts",
   "35": "UserRole",
   "36": "UserProfile",
-  "37": "WithdrawalRequest",
   "41": "LegalContent.tsx"
 }
