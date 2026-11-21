@@ -14,10 +14,6 @@ import {
   Settings,
   Users,
   Menu,
-  LayoutDashboard,
-  MessageSquare,
-  KeyRound,
-  Inbox,
   User,
   ChevronDown,
 } from 'lucide-react';
@@ -26,6 +22,7 @@ import { PWAInstallButton } from '../common/PWAInstallButton';
 import { WheelGlyph } from '../customer/WheelGlyph';
 import { CustomerMobileDrawer } from './CustomerMobileDrawer';
 import { AdminMobileDrawer } from './AdminMobileDrawer';
+import { AgentMobileDrawer } from './AgentMobileDrawer';
 import { useWheelAvailability } from '../../hooks/useWheelAvailability';
 
 interface TopNavbarProps {
@@ -674,157 +671,16 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
         />
       )}
 
-      {/* Agent Hamburger Side Drawer (Agent role only) */}
-      {isMobileDrawerOpen && isAgent && (
-        <div className="fixed inset-0 z-50 flex justify-end">
-          <div
-            className="fixed inset-0 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200"
-            onClick={closeMobileDrawer}
-          />
-          <aside className="relative w-full max-w-[300px] sm:max-w-xs bg-[#0A0F1D] border-l border-amber-500/20 h-full flex flex-col z-10 shadow-2xl animate-in slide-in-from-right duration-200">
-            {/* Drawer Header */}
-            <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-800/80 bg-[#0E1726]/60">
-              <SwiftSweepsLogo size="sm" />
-              <button
-                onClick={closeMobileDrawer}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-                aria-label="Close menu"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Profile Summary Card */}
-            <div className="p-3.5 mx-3 mt-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center font-bold text-amber-400 text-xs overflow-hidden shrink-0">
-                    {currentUser.avatarUrl ? (
-                      <img
-                        src={currentUser.avatarUrl}
-                        alt={currentUser.displayName}
-                        className="w-full h-full object-cover"
-                        referrerPolicy="no-referrer"
-                      />
-                    ) : (
-                      <span>{currentUser.displayName.charAt(0).toUpperCase()}</span>
-                    )}
-                  </div>
-                  <div>
-                    <div className="text-xs font-bold text-white leading-tight truncate max-w-[130px]">
-                      {currentUser.displayName}
-                    </div>
-                    <div className="text-[10px] text-slate-400 truncate max-w-[130px] font-mono">
-                      {currentUser.email}
-                    </div>
-                  </div>
-                </div>
-
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">
-                  Support
-                </span>
-              </div>
-            </div>
-
-            {/* Quick Sign Out Action (Immediately visible without scrolling) */}
-            {onLogout && (
-              <div className="px-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    closeMobileDrawer();
-                    onLogout();
-                  }}
-                  className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold text-rose-300 bg-rose-950/40 hover:bg-rose-950/70 border border-rose-900/50 transition-colors cursor-pointer shadow-sm"
-                >
-                  <LogOut className="w-4 h-4 text-rose-400" />
-                  <span>Sign Out</span>
-                </button>
-              </div>
-            )}
-
-            {/* Navigation Items (Scrollable) */}
-            <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1">
-              {/* AGENT NAVIGATION */}
-              <>
-                  <div className="px-2 pt-1 pb-1 text-[10px] font-mono uppercase tracking-wider text-slate-400 font-semibold">
-                    Support Operations
-                  </div>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_chat')}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_chat' ? 'bg-cyan-500/15 text-cyan-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <MessageSquare className="w-4 h-4 text-cyan-400" />
-                      <span>Support Live Inbox</span>
-                    </div>
-                    {unreadStaffMessages > 0 && (
-                      <span className="w-4 h-4 rounded-full bg-amber-500 text-[10px] font-black text-slate-950 flex items-center justify-center">
-                        {unreadStaffMessages}
-                      </span>
-                    )}
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_game_credentials')}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_game_credentials' ? 'bg-cyan-500/15 text-cyan-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <KeyRound className="w-4 h-4" />
-                      <span>Game IDs &amp; Passwords</span>
-                    </div>
-                    {pendingGameRequests > 0 && (
-                      <span className="w-4 h-4 rounded-full bg-amber-600 text-[10px] font-bold text-white flex items-center justify-center">
-                        {pendingGameRequests}
-                      </span>
-                    )}
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_requests')}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_requests' ? 'bg-cyan-500/15 text-cyan-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <Inbox className="w-4 h-4" />
-                      <span>Requests Queue</span>
-                    </div>
-                    {pendingOpsRequests > 0 && (
-                      <span className="px-1.5 py-0.5 rounded-full bg-slate-800 text-[10px] font-bold text-amber-400 border border-amber-700/50">
-                        {pendingOpsRequests}
-                      </span>
-                    )}
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_users')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_users' ? 'bg-cyan-500/15 text-cyan-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <Users className="w-4 h-4 text-cyan-400" />
-                    <span>User Directory</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleDrawerNavigate('ops_dashboard')}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                      activeTab === 'ops_dashboard' ? 'bg-cyan-500/15 text-cyan-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <LayoutDashboard className="w-4 h-4" />
-                    <span>Overview Dashboard</span>
-                  </button>
-              </>
-            </div>
-          </aside>
-        </div>
+      {/* Redesigned Support Agent Mobile Side Drawer (Agent role only) */}
+      {isAgent && (
+        <AgentMobileDrawer
+          isOpen={isMobileDrawerOpen}
+          onClose={closeMobileDrawer}
+          currentUser={currentUser}
+          activeTab={activeTab}
+          onNavigateTab={onNavigateTab}
+          onLogout={onLogout}
+        />
       )}
 
       {/* Notifications Drawer */}

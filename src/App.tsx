@@ -8,6 +8,7 @@ import { resolveGameImageUrl } from './utils/imageUtils';
 import { TopNavbar } from './components/layout/TopNavbar';
 import { CustomerMobileNav } from './components/layout/CustomerMobileNav';
 import { StaffMobileNav } from './components/layout/StaffMobileNav';
+import { isAgentAllowedReadOnlyTab } from './components/layout/agentMobileDrawerConfig';
 import { LegalContent } from './components/common/LegalContent';
 import { WheelOfLuckModal } from './components/customer/WheelOfLuckModal';
 import { WheelPopup } from './components/customer/WheelPopup';
@@ -388,7 +389,11 @@ export default function App() {
         nextTab = 'dashboard';
         setActiveTab('dashboard');
         window.history.replaceState({ tab: 'dashboard' }, '', '#dashboard');
-      } else if (currentUser.role !== 'customer' && !activeTab.startsWith('ops_')) {
+      } else if (
+        currentUser.role !== 'customer' &&
+        !activeTab.startsWith('ops_') &&
+        !isAgentAllowedReadOnlyTab(currentUser.role, activeTab)
+      ) {
         nextTab = currentUser.role === 'agent' ? 'ops_chat' : 'ops_dashboard';
         setActiveTab(nextTab);
         window.history.replaceState({ tab: nextTab }, '', `#${nextTab}`);
@@ -930,6 +935,26 @@ export default function App() {
                     <p className="text-xs text-amber-400/80">Only Platform Administrators have permission to review full system security audit logs.</p>
                   </div>
                 )
+              )}
+
+              {/* Support Agent Read-Only Reference Views */}
+              {isAgent && activeTab === 'official_partners' && (
+                <LazyCustomerOfficialPartners
+                  currentUser={currentUser}
+                  onNavigateTab={handleNavigateTab}
+                />
+              )}
+
+              {isAgent && activeTab === 'rules' && (
+                <LazyCustomerRules onNavigateTab={handleNavigateTab} />
+              )}
+
+              {isAgent && activeTab === 'privacy' && (
+                <LegalContent initialTab="privacy" onBack={handleGoBack} />
+              )}
+
+              {isAgent && activeTab === 'data_deletion' && (
+                <LegalContent initialTab="deletion" onBack={handleGoBack} />
               )}
             </>
           )}
