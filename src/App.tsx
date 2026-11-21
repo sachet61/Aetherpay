@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, Suspense } from 'react';
+import React, { useState, useEffect, useRef, useCallback, Suspense } from 'react';
 import { useDataService } from './hooks/useDataService';
 import { useVerificationResolution } from './hooks/useVerificationResolution';
 import { writeVerifiedCache } from './services/verificationStateUtils';
@@ -19,6 +19,15 @@ import {
   markWheelPopupDismissedToday,
   shouldShowWheelPopup,
 } from './utils/wheelOfLuckUtils';
+import {
+  type AppOverlayKey,
+  type OverlayStateSnapshot,
+  buildHistoryState,
+  readOverlayFromHistoryState,
+  resolveHistoryActionOnNavigate,
+  resolveHistoryActionOnOverlayOpen,
+  resolvePopStateTransition,
+} from './utils/overlayHistoryUtils';
 
 // Auth & Guest Landing
 import { AuthPage } from './pages/auth/AuthPage';
@@ -94,6 +103,149 @@ export default function App() {
   });
 
   const tabHistoryRef = useRef<string[]>([activeTab]);
+  const [tabMeta, setTabMeta] = useState<any>(null);
+  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [showMobileMoreDrawer, setShowMobileMoreDrawer] = useState(false);
+  const popupSessionDismissedRef = useRef<Set<string>>(new Set());
+  const [popupDismissedVersion, setPopupDismissedVersion] = useState(0);
+  const [isMobileChatActive, setIsMobileChatActive] = useState(false);
+  const [timeoutNotice, setTimeoutNotice] = useState<string | null>(null);
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState<string | null>(null);
+
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+  const currentUserRoleRef = useRef<string | undefined>(currentUser?.role);
+  currentUserRoleRef.current = currentUser?.role;
+  const wheelOfLuckRef = useRef(wheelOfLuck);
+  wheelOfLuckRef.current = wheelOfLuck;
+  const openOverlaysRef = useRef<OverlayStateSnapshot>({
+    drawerOpen: isMobileDrawerOpen,
+    notificationsOpen: showNotifications,
+    wheelOpen: wheelOfLuck.wheelModalOpen,
+    moreDrawerOpen: showMobileMoreDrawer,
+  });
+  openOverlaysRef.current = {
+    drawerOpen: isMobileDrawerOpen,
+    notificationsOpen: showNotifications,
+    wheelOpen: wheelOfLuck.wheelModalOpen,
+    moreDrawerOpen: showMobileMoreDrawer,
+  };
+
+  const pendingOverlayBackRef = useRef<AppOverlayKey | null>(null);
+  const pendingSyntheticBackCountRef = useRef<number>(0);
+
+  const cancelPendingOverlayBack = useCallback(() => {
+    pendingOverlayBackRef.current = null;
+  }, []);
+
+  const scheduleDismissHistoryCleanup = useCallback((overlayKey: AppOverlayKey) => {
+    pendingOverlayBackRef.current = overlayKey;
+    queueMicrotask(() => {
+      const target = pendingOverlayBackRef.current;
+      if (!target) return;
+      pendingOverlayBackRef.current = null;
+      if (
+        typeof window !== 'undefined' &&
+        readOverlayFromHistoryState(window.history.state) === target
+      ) {
+        pendingSyntheticBackCountRef.current += 1;
+        window.history.back();
+      }
+    });
+  }, []);
+
+  const openOverlayWithHistory = useCallback(
+    (overlayKey: AppOverlayKey) => {
+      cancelPendingOverlayBack();
+      if (typeof window === 'undefined') return;
+      const action = resolveHistoryActionOnOverlayOpen({
+        currentState: window.history.state,
+        activeTab: activeTabRef.current,
+        targetOverlay: overlayKey,
+      });
+      const urlHash = window.location.hash || `#${activeTabRef.current}`;
+      if (action.method === 'push') {
+        window.history.pushState(action.nextState, '', urlHash);
+      } else if (action.method === 'replace') {
+        window.history.replaceState(action.nextState, '', urlHash);
+      }
+    },
+    [cancelPendingOverlayBack]
+  );
+
+  const resetAllOverlaysLocally = useCallback(() => {
+    cancelPendingOverlayBack();
+    setIsMobileDrawerOpen(false);
+    setShowNotifications(false);
+    setShowMobileMoreDrawer(false);
+    wheelOfLuckRef.current.closeWheelModal();
+  }, [cancelPendingOverlayBack]);
+
+  const applyOverlayFromHistory = useCallback(
+    (overlay: AppOverlayKey | null) => {
+      cancelPendingOverlayBack();
+      const canShowCustomerOnly = currentUserRoleRef.current === 'customer';
+      setIsMobileDrawerOpen(overlay === 'drawer');
+      setShowNotifications(overlay === 'notifications');
+      setShowMobileMoreDrawer(canShowCustomerOnly && overlay === 'more_drawer');
+      if (canShowCustomerOnly && overlay === 'wheel') {
+        wheelOfLuckRef.current.openWheelModal();
+      } else {
+        wheelOfLuckRef.current.closeWheelModal();
+      }
+    },
+    [cancelPendingOverlayBack]
+  );
+
+  const handleOpenMobileDrawer = useCallback(() => {
+    openOverlayWithHistory('drawer');
+    setIsMobileDrawerOpen(true);
+    setShowNotifications(false);
+    setShowMobileMoreDrawer(false);
+    wheelOfLuckRef.current.closeWheelModal();
+  }, [openOverlayWithHistory]);
+
+  const handleCloseMobileDrawer = useCallback(() => {
+    setIsMobileDrawerOpen(false);
+    scheduleDismissHistoryCleanup('drawer');
+  }, [scheduleDismissHistoryCleanup]);
+
+  const handleCloseNotifications = useCallback(() => {
+    setShowNotifications(false);
+    scheduleDismissHistoryCleanup('notifications');
+  }, [scheduleDismissHistoryCleanup]);
+
+  const handleToggleNotifications = useCallback(() => {
+    if (openOverlaysRef.current.notificationsOpen) {
+      handleCloseNotifications();
+    } else {
+      openOverlayWithHistory('notifications');
+      setShowNotifications(true);
+      setIsMobileDrawerOpen(false);
+      setShowMobileMoreDrawer(false);
+      wheelOfLuckRef.current.closeWheelModal();
+    }
+  }, [handleCloseNotifications, openOverlayWithHistory]);
+
+  const handleOpenWheelModal = useCallback(() => {
+    if (currentUserRoleRef.current !== 'customer') return;
+    openOverlayWithHistory('wheel');
+    setIsMobileDrawerOpen(false);
+    setShowNotifications(false);
+    setShowMobileMoreDrawer(false);
+    wheelOfLuckRef.current.openWheelModal();
+  }, [openOverlayWithHistory]);
+
+  const handleCloseWheelModal = useCallback(() => {
+    wheelOfLuckRef.current.closeWheelModal();
+    scheduleDismissHistoryCleanup('wheel');
+  }, [scheduleDismissHistoryCleanup]);
+
+  const handleCloseMoreDrawer = useCallback(() => {
+    setShowMobileMoreDrawer(false);
+    scheduleDismissHistoryCleanup('more_drawer');
+  }, [scheduleDismissHistoryCleanup]);
 
   // Synchronize browser history and hash changes
   useEffect(() => {
@@ -101,13 +253,20 @@ export default function App() {
       const hash = window.location.hash;
       setCurrentHash(hash);
       const clean = hash.replace(/^#\/?/, '').trim();
-      if (clean && clean !== 'privacy' && clean !== 'data-deletion' && clean !== 'datadeletion' && clean !== activeTab) {
+      if (
+        clean &&
+        clean !== 'privacy' &&
+        clean !== 'data-deletion' &&
+        clean !== 'datadeletion' &&
+        clean !== activeTab
+      ) {
+        resetAllOverlaysLocally();
         setActiveTab(clean);
       }
     };
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
-  }, [activeTab]);
+  }, [activeTab, resetAllOverlaysLocally]);
 
   // Synchronize browser popstate events (Back / Forward buttons & mobile swipe-back gestures)
   useEffect(() => {
@@ -115,48 +274,58 @@ export default function App() {
       const currentWindowHash = window.location.hash;
       setCurrentHash(currentWindowHash);
 
-      if (currentWindowHash === '#privacy' || currentWindowHash === '#data-deletion' || currentWindowHash === '#datadeletion') {
+      const isSyntheticOverlayBack = pendingSyntheticBackCountRef.current > 0;
+      if (isSyntheticOverlayBack) {
+        pendingSyntheticBackCountRef.current -= 1;
+      }
+
+      const decision = resolvePopStateTransition({
+        eventState: event.state,
+        currentHash: currentWindowHash,
+        currentTab: activeTabRef.current,
+        defaultTab: getDefaultTab(currentUserRoleRef.current),
+        openOverlays: openOverlaysRef.current,
+        isSyntheticOverlayBack,
+      });
+
+      if (decision.kind === 'ignore_synthetic_overlay_back' || decision.kind === 'legal_hash') {
         return;
       }
 
-      const stateTab = event.state?.tab;
-      const hashTab = currentWindowHash.replace(/^#\/?/, '').trim();
-      const destinationTab = stateTab || (hashTab && hashTab !== 'privacy' ? hashTab : getDefaultTab(currentUser?.role));
+      if (decision.kind === 'sync_overlays_only') {
+        applyOverlayFromHistory(decision.overlayToShow);
+        return;
+      }
 
-      if (destinationTab) {
-        if (tabHistoryRef.current.length > 1) {
-          tabHistoryRef.current.pop();
-        }
-        setActiveTab(destinationTab);
-        setTabMeta(null);
-        if (destinationTab !== 'ops_chat') {
-          setIsMobileChatActive(false);
-        }
+      applyOverlayFromHistory(decision.overlayToShow);
+      if (decision.shouldPopTabHistory && tabHistoryRef.current.length > 1) {
+        tabHistoryRef.current.pop();
+      }
+      setActiveTab(decision.destinationTab);
+      setTabMeta(null);
+      if (decision.destinationTab !== 'ops_chat') {
+        setIsMobileChatActive(false);
       }
     };
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [currentUser?.role]);
+  }, [applyOverlayFromHistory]);
 
   // Ensure initial activeTab is properly recorded in history.state on mount
   useEffect(() => {
     if (currentUser && typeof window !== 'undefined') {
       const stateTab = window.history.state?.tab;
       if (!stateTab || stateTab !== activeTab) {
-        window.history.replaceState({ tab: activeTab }, '', `#${activeTab}`);
+        const preservedOverlay = readOverlayFromHistoryState(window.history.state);
+        window.history.replaceState(
+          buildHistoryState(activeTab, preservedOverlay),
+          '',
+          `#${activeTab}`
+        );
       }
     }
   }, [currentUser?.id, activeTab]);
-
-  const [tabMeta, setTabMeta] = useState<any>(null);
-  const [showMobileMoreDrawer, setShowMobileMoreDrawer] = useState(false);
-  const [topNavOverlayOpen, setTopNavOverlayOpen] = useState(false);
-  const popupSessionDismissedRef = useRef<Set<string>>(new Set());
-  const [popupDismissedVersion, setPopupDismissedVersion] = useState(0);
-  const [isMobileChatActive, setIsMobileChatActive] = useState(false);
-  const [timeoutNotice, setTimeoutNotice] = useState<string | null>(null);
-  const [sessionExpiredNotice, setSessionExpiredNotice] = useState<string | null>(null);
 
   useEffect(() => {
     const handleSessionExpired = (event: Event) => {
@@ -187,6 +356,14 @@ export default function App() {
   }, [logout]);
 
   const handleLogout = (reason?: string) => {
+    resetAllOverlaysLocally();
+    if (typeof window !== 'undefined' && readOverlayFromHistoryState(window.history.state)) {
+      window.history.replaceState(
+        buildHistoryState(activeTabRef.current),
+        '',
+        window.location.hash || `#${activeTabRef.current}`
+      );
+    }
     setBypassedHydrationUserId(null);
     const expiredBannerMsg = sessionExpiredNotice;
     setSessionExpiredNotice(null);
@@ -256,9 +433,9 @@ export default function App() {
     () => ({
       spinAvailable: wheelOfLuck.spinAvailable,
       isLoading: wheelOfLuck.isLoadingWheel,
-      openWheelModal: wheelOfLuck.openWheelModal,
+      openWheelModal: handleOpenWheelModal,
     }),
-    [wheelOfLuck.spinAvailable, wheelOfLuck.isLoadingWheel, wheelOfLuck.openWheelModal]
+    [wheelOfLuck.spinAvailable, wheelOfLuck.isLoadingWheel, handleOpenWheelModal]
   );
 
   const handleDismissWheelPopup = React.useCallback(() => {
@@ -272,8 +449,8 @@ export default function App() {
       markWheelPopupDismissedToday(currentUser.id, getLocalDayKey(), popupSessionDismissedRef.current);
       setPopupDismissedVersion((v) => v + 1);
     }
-    wheelOfLuck.openWheelModal();
-  }, [currentUser?.id, wheelOfLuck.openWheelModal]);
+    handleOpenWheelModal();
+  }, [currentUser?.id, handleOpenWheelModal]);
 
   if (currentHash === '#privacy') {
     return <LegalContent initialTab="privacy" onBack={() => { window.location.hash = ''; setCurrentHash(''); }} />;
@@ -294,6 +471,7 @@ export default function App() {
         <AuthPage
           key="auth"
           onLoginSuccess={(user) => {
+            resetAllOverlaysLocally();
             setBypassedHydrationUserId(null);
             void dataService.hydrateForSession(user);
             setTimeoutNotice(null);
@@ -301,7 +479,7 @@ export default function App() {
             const defaultTab = getDefaultTab(user.role);
             setActiveTab(defaultTab);
             prefetchPagesForSession(user.role, defaultTab);
-            window.history.replaceState({ tab: defaultTab }, '', `#${defaultTab}`);
+            window.history.replaceState(buildHistoryState(defaultTab), '', `#${defaultTab}`);
             tabHistoryRef.current = [defaultTab];
           }}
           timeoutNotice={timeoutNotice}
@@ -344,6 +522,7 @@ export default function App() {
   const activeWallet = wallet || dataService.getWallet(currentUser.id);
 
   const handleSwitchUser = (userId: string) => {
+    resetAllOverlaysLocally();
     setBypassedHydrationUserId(null);
     switchUser(userId);
     const targetUser = dataService.getUserById(userId);
@@ -352,7 +531,7 @@ export default function App() {
       const defaultTab = getDefaultTab(targetUser.role);
       setActiveTab(defaultTab);
       prefetchPagesForSession(targetUser.role, defaultTab);
-      window.history.replaceState({ tab: defaultTab }, '', `#${defaultTab}`);
+      window.history.replaceState(buildHistoryState(defaultTab), '', `#${defaultTab}`);
       tabHistoryRef.current = [defaultTab];
     }
   };
@@ -363,7 +542,11 @@ export default function App() {
     options?: { replace?: boolean; isBack?: boolean }
   ) => {
     if (tab === 'menu') {
+      openOverlayWithHistory('more_drawer');
       setShowMobileMoreDrawer(true);
+      setIsMobileDrawerOpen(false);
+      setShowNotifications(false);
+      wheelOfLuckRef.current.closeWheelModal();
       return;
     }
 
@@ -396,20 +579,42 @@ export default function App() {
       return;
     }
 
+    const activeOverlayInHistory =
+      typeof window !== 'undefined'
+        ? readOverlayFromHistoryState(window.history.state)
+        : null;
+
+    resetAllOverlaysLocally();
     setTabMeta(meta || null);
     setActiveTab(targetTab);
 
     // Synchronize browser history and hash
     if (!options?.isBack && typeof window !== 'undefined') {
-      if (options?.replace) {
-        window.history.replaceState({ tab: targetTab }, '', `#${targetTab}`);
+      const historyAction = resolveHistoryActionOnNavigate({
+        currentState: window.history.state,
+        currentTab: activeTab,
+        targetTab,
+        replace: options?.replace,
+        isBack: options?.isBack,
+      });
+
+      if (historyAction.method === 'replace') {
+        window.history.replaceState(historyAction.nextState, '', `#${targetTab}`);
+      } else if (historyAction.method === 'push') {
+        window.history.pushState(historyAction.nextState, '', `#${targetTab}`);
+      } else if (targetTab === activeTab && activeOverlayInHistory) {
+        // Navigating to the current tab while an overlay entry sits on top of history:
+        // pop the synthetic overlay entry so browser history remains clean.
+        scheduleDismissHistoryCleanup(activeOverlayInHistory);
+      }
+
+      if (historyAction.shouldRecordTabHistory === 'replace') {
         if (tabHistoryRef.current.length > 0) {
           tabHistoryRef.current[tabHistoryRef.current.length - 1] = targetTab;
         } else {
           tabHistoryRef.current.push(targetTab);
         }
-      } else if (targetTab !== activeTab) {
-        window.history.pushState({ tab: targetTab }, '', `#${targetTab}`);
+      } else if (historyAction.shouldRecordTabHistory === 'push') {
         tabHistoryRef.current.push(targetTab);
       }
     }
@@ -442,7 +647,7 @@ export default function App() {
     activeTab,
     spinAvailable: wheelOfLuck.spinAvailable,
     wheelModalOpen: wheelOfLuck.wheelModalOpen,
-    hasOtherOpenModal: showMobileMoreDrawer || topNavOverlayOpen,
+    hasOtherOpenModal: showMobileMoreDrawer || isMobileDrawerOpen || showNotifications,
     dismissedToday: isWheelPopupDismissedToday,
   });
 
@@ -488,8 +693,13 @@ export default function App() {
               activeTab={activeTab}
               onNavigateTab={handleNavigateTab}
               spinAvailable={wheelOfLuck.spinAvailable}
-              onOpenWheel={wheelOfLuck.openWheelModal}
-              onOverlayChange={setTopNavOverlayOpen}
+              onOpenWheel={handleOpenWheelModal}
+              isMobileDrawerOpen={isMobileDrawerOpen}
+              onOpenMobileDrawer={handleOpenMobileDrawer}
+              onCloseMobileDrawer={handleCloseMobileDrawer}
+              showNotifications={showNotifications}
+              onToggleNotifications={handleToggleNotifications}
+              onCloseNotifications={handleCloseNotifications}
             />
             {/* Continuous News-Style Horizontal Live Cashouts Marquee Ticker */}
             <LiveCashoutTicker />
@@ -561,7 +771,7 @@ export default function App() {
                   wallet={activeWallet}
                   onNavigateTab={handleNavigateTab}
                   spinAvailable={wheelOfLuck.spinAvailable}
-                  onOpenWheel={wheelOfLuck.openWheelModal}
+                  onOpenWheel={handleOpenWheelModal}
                 />
               )}
 
@@ -746,7 +956,7 @@ export default function App() {
       {isCustomer && (
         <WheelOfLuckModal
           isOpen={wheelOfLuck.wheelModalOpen}
-          onClose={wheelOfLuck.closeWheelModal}
+          onClose={handleCloseWheelModal}
           currentUser={currentUser}
           wallet={activeWallet}
           wheelStatus={wheelOfLuck.isRetryingWheel ? null : wheelOfLuck.wheelStatus}
@@ -773,7 +983,7 @@ export default function App() {
         <div className="fixed inset-0 z-50 flex flex-col justify-end">
           <div
             className="fixed inset-0 bg-black/70 backdrop-blur-sm"
-            onClick={() => setShowMobileMoreDrawer(false)}
+            onClick={handleCloseMoreDrawer}
           />
           <div className="relative w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-5 z-10 space-y-4 pb-safe animate-in slide-in-from-bottom duration-200">
             <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto -mt-1 mb-2" />
@@ -781,7 +991,7 @@ export default function App() {
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-sm font-bold text-white">More Services</h3>
               <button
-                onClick={() => setShowMobileMoreDrawer(false)}
+                onClick={handleCloseMoreDrawer}
                 className="p-1 rounded-md text-slate-400 hover:text-white"
               >
                 <X className="w-4 h-4" />

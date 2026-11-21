@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { UserProfile, UserWallet } from '../../types';
 import { RoleSwitcher } from '../common/RoleSwitcher';
 import { dataService } from '../../services/dataService';
@@ -37,6 +37,12 @@ interface TopNavbarProps {
   spinAvailable?: boolean;
   onOpenWheel?: () => void;
   onOverlayChange?: (isOpen: boolean) => void;
+  isMobileDrawerOpen?: boolean;
+  onOpenMobileDrawer?: () => void;
+  onCloseMobileDrawer?: () => void;
+  showNotifications?: boolean;
+  onToggleNotifications?: () => void;
+  onCloseNotifications?: () => void;
 }
 
 export const TopNavbar: React.FC<TopNavbarProps> = ({
@@ -49,15 +55,55 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   spinAvailable,
   onOpenWheel,
   onOverlayChange,
+  isMobileDrawerOpen: controlledMobileDrawerOpen,
+  onOpenMobileDrawer,
+  onCloseMobileDrawer,
+  showNotifications: controlledShowNotifications,
+  onToggleNotifications,
+  onCloseNotifications,
 }) => {
   const wheelContext = useWheelAvailability();
   const effectiveSpinAvailable = spinAvailable ?? wheelContext.spinAvailable;
   const effectiveOpenWheel = onOpenWheel ?? wheelContext.openWheelModal;
-  const [showNotifications, setShowNotifications] = useState(false);
-  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+  const [internalShowNotifications, setInternalShowNotifications] = useState(false);
+  const [internalIsMobileDrawerOpen, setInternalIsMobileDrawerOpen] = useState(false);
+  const showNotifications = controlledShowNotifications ?? internalShowNotifications;
+  const isMobileDrawerOpen = controlledMobileDrawerOpen ?? internalIsMobileDrawerOpen;
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [, setStateTick] = useState(0);
   const moreMenuRef = useRef<HTMLDivElement>(null);
+
+  const openMobileDrawer = useCallback(() => {
+    if (onOpenMobileDrawer) {
+      onOpenMobileDrawer();
+    } else {
+      setInternalIsMobileDrawerOpen(true);
+    }
+  }, [onOpenMobileDrawer]);
+
+  const closeMobileDrawer = useCallback(() => {
+    if (onCloseMobileDrawer) {
+      onCloseMobileDrawer();
+    } else {
+      setInternalIsMobileDrawerOpen(false);
+    }
+  }, [onCloseMobileDrawer]);
+
+  const toggleNotifications = useCallback(() => {
+    if (onToggleNotifications) {
+      onToggleNotifications();
+    } else {
+      setInternalShowNotifications((prev) => !prev);
+    }
+  }, [onToggleNotifications]);
+
+  const closeNotifications = useCallback(() => {
+    if (onCloseNotifications) {
+      onCloseNotifications();
+    } else {
+      setInternalShowNotifications(false);
+    }
+  }, [onCloseNotifications]);
 
   useEffect(() => {
     onOverlayChange?.(showNotifications || isMobileDrawerOpen);
@@ -82,8 +128,8 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setShowMoreMenu(false);
-        setShowNotifications(false);
-        setIsMobileDrawerOpen(false);
+        if (showNotifications) closeNotifications();
+        if (isMobileDrawerOpen) closeMobileDrawer();
       }
     };
     document.addEventListener('mousedown', handlePointerDown);
@@ -92,7 +138,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       document.removeEventListener('mousedown', handlePointerDown);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, []);
+  }, [showNotifications, isMobileDrawerOpen, closeNotifications, closeMobileDrawer]);
 
   const notifications = dataService.getNotifications(currentUser.id);
   const unreadCount = notifications.filter((n) => !n.isRead).length;
@@ -132,7 +178,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   };
 
   const handleDrawerNavigate = (tab: string) => {
-    setIsMobileDrawerOpen(false);
+    closeMobileDrawer();
     setShowMoreMenu(false);
     onNavigateTab(tab);
   };
@@ -547,7 +593,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             {/* Notifications button */}
             <button
               type="button"
-              onClick={() => setShowNotifications(!showNotifications)}
+              onClick={toggleNotifications}
               className="relative flex items-center justify-center w-11 h-11 sm:w-9 sm:h-9 rounded-lg bg-[#0E1726] border border-slate-700/80 hover:border-slate-600 text-slate-300 hover:text-white transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0F1D]"
               aria-label="Notifications"
               title="Notifications"
@@ -589,7 +635,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             {/* Hamburger Menu Button (Mobile & Tablet below lg) */}
             <button
               type="button"
-              onClick={() => setIsMobileDrawerOpen(true)}
+              onClick={openMobileDrawer}
               className="lg:hidden flex items-center justify-center w-9 h-9 rounded-lg bg-[#0E1726] border border-amber-500/30 text-amber-300 hover:text-white hover:border-amber-500/60 transition-colors active:scale-95 shrink-0"
               title="Navigation Menu"
               aria-label="Open Navigation Drawer"
@@ -604,7 +650,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       {isCustomer && (
         <CustomerMobileDrawer
           isOpen={isMobileDrawerOpen}
-          onClose={() => setIsMobileDrawerOpen(false)}
+          onClose={closeMobileDrawer}
           currentUser={currentUser}
           wallet={wallet}
           activeTab={activeTab}
@@ -620,14 +666,14 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
         <div className="fixed inset-0 z-50 flex justify-end">
           <div
             className="fixed inset-0 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200"
-            onClick={() => setIsMobileDrawerOpen(false)}
+            onClick={closeMobileDrawer}
           />
           <aside className="relative w-full max-w-[300px] sm:max-w-xs bg-[#0A0F1D] border-l border-amber-500/20 h-full flex flex-col z-10 shadow-2xl animate-in slide-in-from-right duration-200">
             {/* Drawer Header */}
             <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-800/80 bg-[#0E1726]/60">
               <SwiftSweepsLogo size="sm" />
               <button
-                onClick={() => setIsMobileDrawerOpen(false)}
+                onClick={closeMobileDrawer}
                 className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
                 aria-label="Close menu"
               >
@@ -694,7 +740,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setIsMobileDrawerOpen(false);
+                    closeMobileDrawer();
                     onLogout();
                   }}
                   className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold text-rose-300 bg-rose-950/40 hover:bg-rose-950/70 border border-rose-900/50 transition-colors cursor-pointer shadow-sm"
@@ -913,7 +959,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       {/* Notifications Drawer */}
       {showNotifications && (
         <div className="fixed inset-0 z-50 flex justify-end">
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowNotifications(false)} />
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={closeNotifications} />
           <div className="relative w-full max-w-sm bg-slate-900 border-l border-slate-800 h-full p-4 flex flex-col z-10 shadow-2xl animate-in slide-in-from-right duration-200">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
@@ -935,8 +981,9 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                   </button>
                 )}
                 <button
-                  onClick={() => setShowNotifications(false)}
+                  onClick={closeNotifications}
                   className="p-1 rounded-md text-slate-400 hover:text-white"
+                  aria-label="Close notifications"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -957,7 +1004,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                     onClick={() => {
                       dataService.markNotificationAsRead(notif.id);
                       if (notif.linkTab) onNavigateTab(notif.linkTab);
-                      setShowNotifications(false);
+                      closeNotifications();
                     }}
                     className={`p-3 rounded-xl border text-left cursor-pointer transition-all ${
                       notif.isRead
