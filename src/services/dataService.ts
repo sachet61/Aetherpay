@@ -118,6 +118,11 @@ import {
   reconcileWalletWithTopups,
 } from './walletActivityUtils';
 import { toProxyStorageUrl } from './storageUrlUtils';
+import {
+  applyGameCatalogRealtimeEvents,
+  mapGameCatalogItemToDbRow,
+  mergeCatalogFromServerRows,
+} from './gameCatalogUtils';
 
 export type RealtimeSyncStatus = 'connected' | 'syncing' | 'sleeping' | 'disconnected' | 'reconnecting';
 
@@ -487,6 +492,9 @@ class DataService {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'official_partners' }, (p) => {
         this.queueRealtimeMutation('official_partners', p.eventType, p.new, p.old);
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'game_catalog' }, (p) => {
+        this.queueRealtimeMutation('game_catalog', p.eventType, p.new, p.old);
+      })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           this.syncStatus = 'connected';
@@ -608,6 +616,27 @@ class DataService {
       tablesModified.add('official_partners');
     }
 
+    const gameCatalogEvents = queued.filter((item) => item.table === 'game_catalog');
+    if (gameCatalogEvents.length > 0) {
+      const scopedEvents = gameCatalogEvents.filter((evt) => {
+        if (String(evt.eventType || '').toUpperCase() === 'DELETE') {
+          return Boolean(evt.oldRow?.id);
+        }
+        return filterRealtimeRowsForUser('game_catalog', evt.newRow ? [evt.newRow] : [], activeUser).length > 0;
+      });
+      if (scopedEvents.length > 0) {
+        const currentCatalog = this.getGameCatalog();
+        const nextCatalog = applyGameCatalogRealtimeEvents(
+          currentCatalog,
+          scopedEvents,
+          INITIAL_GAME_CATALOG
+        );
+        this.cache[STORAGE_KEYS.GAME_CATALOG] = nextCatalog;
+        this.saveToLocalStorage(STORAGE_KEYS.GAME_CATALOG, nextCatalog);
+        tablesModified.add('game_catalog');
+      }
+    }
+
     if (tablesModified.size > 0) {
       window.dispatchEvent(
         new CustomEvent('aetherpay_state_changed', {
@@ -642,13 +671,12 @@ class DataService {
       // Load public live ticker cashouts (limit 15)
       const cashoutsPromise = supabase.from('faked_cashouts').select('*').order('timestamp', { ascending: false }).limit(15);
 
-      // Load game catalog if not in local cache
-      let catPromise: Promise<any> = Promise.resolve({ data: null });
-      if (!this.cache[STORAGE_KEYS.GAME_CATALOG] || (this.cache[STORAGE_KEYS.GAME_CATALOG] as any[]).length === 0) {
-        catPromise = Promise.resolve(
-          supabase.from('game_catalog').select('*').order('created_at', { ascending: true }).limit(30)
-        );
-      }
+      // Always load authoritative game catalog from Supabase (avoid stale seed/localStorage cache)
+      const catPromise = supabase
+        .from('game_catalog')
+        .select('*')
+        .order('created_at', { ascending: true })
+        .limit(100);
 
       if (isAdmin) {
         // Staff/Admin session: bounded administrative queue queries (Users fetched on-demand on tab open)
@@ -666,7 +694,9 @@ class DataService {
 
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
         if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
-        if (catRes?.data && catRes.data.length > 0) this.applyCatalogRows(catRes.data);
+        if (!catRes?.error && Array.isArray(catRes?.data) && catRes.data.length > 0) {
+          this.applyCatalogRows(catRes.data);
+        }
         if (topupsRes.data) this.applyTopupRows(topupsRes.data, true);
         if (withdrawalsRes.data) this.applyWithdrawalRows(withdrawalsRes.data, true);
         if (walletsRes.data) this.applyWalletRows(walletsRes.data);
@@ -742,7 +772,9 @@ class DataService {
 
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
         if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
-        if (catRes?.data && catRes.data.length > 0) this.applyCatalogRows(catRes.data);
+        if (!catRes?.error && Array.isArray(catRes?.data) && catRes.data.length > 0) {
+          this.applyCatalogRows(catRes.data);
+        }
         if (userRes?.data) {
           const dbUser = userRes.data;
           const users = this.getUsers();
@@ -878,7 +910,9 @@ class DataService {
         ]);
         if (appConfigRes?.data?.data) this.applyAppConfig(appConfigRes.data.data);
         if (cashoutsRes.data) this.applyCashoutRows(cashoutsRes.data, true);
-        if (catRes?.data && catRes.data.length > 0) this.applyCatalogRows(catRes.data);
+        if (!catRes?.error && Array.isArray(catRes?.data) && catRes.data.length > 0) {
+          this.applyCatalogRows(catRes.data);
+        }
       }
 
       this.lastSyncTimestamp = new Date().toISOString();
@@ -928,16 +962,21 @@ class DataService {
               .order('created_at', { ascending: false })
               .limit(50);
 
-        const [walletRes, topupsRes, withdrawalsRes, transactionsRes, gameAccsRes, msgsRes] = await Promise.all([
+        const [walletRes, topupsRes, withdrawalsRes, transactionsRes, gameAccsRes, catRes, msgsRes] = await Promise.all([
           supabase.from('wallets').select('*').eq('customer_id', currentUserId).maybeSingle(),
           supabase.from('topups').select('*').eq('customer_id', currentUserId).order('updated_at', { ascending: false }).limit(15),
           supabase.from('withdrawals').select('*').eq('customer_id', currentUserId).order('updated_at', { ascending: false }).limit(15),
           supabase.from('transactions').select('*').eq('customer_id', currentUserId).order('created_at', { ascending: false }).limit(25),
           supabase.from('game_accounts').select('*').eq('customer_id', currentUserId).limit(30),
+          supabase.from('game_catalog').select('*').order('created_at', { ascending: true }).limit(100),
           msgQuery,
         ]);
 
         // Apply requests & ledger BEFORE wallet reconciliation
+        if (!catRes.error && Array.isArray(catRes.data) && catRes.data.length > 0) {
+          this.applyCatalogRows(catRes.data);
+          changed = true;
+        }
         if (!topupsRes.error && topupsRes.data && topupsRes.data.length > 0) {
           this.applyTopupRows(topupsRes.data, false);
           changed = true;
@@ -982,13 +1021,18 @@ class DataService {
               .order('created_at', { ascending: false })
               .limit(50);
 
-        const [topupsRes, withdrawalsRes, convsRes, msgsRes] = await Promise.all([
+        const [topupsRes, withdrawalsRes, convsRes, catRes, msgsRes] = await Promise.all([
           supabase.from('topups').select('*').order('created_at', { ascending: false }).limit(15),
           supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(15),
           supabase.from('conversations').select('*').order('last_message_at', { ascending: false }).limit(25),
+          supabase.from('game_catalog').select('*').order('created_at', { ascending: true }).limit(100),
           adminMsgQuery,
         ]);
 
+        if (!catRes.error && Array.isArray(catRes.data) && catRes.data.length > 0) {
+          this.applyCatalogRows(catRes.data);
+          changed = true;
+        }
         if (topupsRes.data && topupsRes.data.length > 0) {
           this.applyTopupRows(topupsRes.data, false);
           changed = true;
@@ -1881,18 +1925,8 @@ class DataService {
   }
 
   private applyCatalogRows(rows: any[]): void {
-    const updated = rows.map((g: any) => ({
-      id: g.id,
-      title: g.title,
-      platform: g.category || 'General',
-      gameUrl: '#',
-      description: g.description || '',
-      enabled: g.is_active !== false,
-      iconUrl: g.icon_url,
-      imageUrl: g.image_url,
-      createdAt: g.created_at || new Date().toISOString(),
-      updatedAt: g.created_at || new Date().toISOString(),
-    }));
+    const existing = this.getGameCatalog();
+    const updated = mergeCatalogFromServerRows(rows, INITIAL_GAME_CATALOG, existing);
     this.cache[STORAGE_KEYS.GAME_CATALOG] = updated;
     this.saveToLocalStorage(STORAGE_KEYS.GAME_CATALOG, updated);
   }
@@ -2178,20 +2212,16 @@ class DataService {
         }));
         await supabase.from('withdrawals').upsert(withdrawalsToUpsert);
       } else if (key === STORAGE_KEYS.GAME_CATALOG && Array.isArray(value) && value.length > 0) {
-        const g = value[0];
-        if (g && g.id) {
-          await supabase.from('game_catalog').upsert({
-            id: g.id,
-            title: g.title,
-            category: g.platform || 'General',
-            description: g.description || null,
-            min_load: 5.0,
-            bonus_pct: 0.0,
-            is_active: g.enabled !== false,
-            icon_url: g.iconUrl || null,
-            image_url: g.imageUrl || null,
-            created_at: g.createdAt || new Date().toISOString(),
-          });
+        const rows = (value as GameCatalogItem[])
+          .filter((g) => Boolean(g && g.id))
+          .map((g) => mapGameCatalogItemToDbRow(g));
+        if (rows.length > 0) {
+          const { error } = await supabase
+            .from('game_catalog')
+            .upsert(rows, { onConflict: 'id' });
+          if (error) {
+            console.warn('Supabase game_catalog upsert notice:', error.message);
+          }
         }
       } else if (key === STORAGE_KEYS.GAME_ACCOUNTS && Array.isArray(value) && value.length > 0) {
         const accountsToUpsert = (value as GameAccount[]).slice(0, 15).map((a) => ({
@@ -5435,6 +5465,226 @@ class DataService {
     });
   }
 
+  public async fetchGameCatalogFromServer(): Promise<{
+    success: boolean;
+    catalog: GameCatalogItem[];
+    error?: string;
+  }> {
+    if (!supabase || !isSupabaseConfigured()) {
+      return {
+        success: false,
+        catalog: this.getGameCatalog(),
+        error: 'Database connection is not configured.',
+      };
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('game_catalog')
+        .select('*')
+        .order('created_at', { ascending: true })
+        .limit(100);
+
+      if (error) {
+        return {
+          success: false,
+          catalog: this.getGameCatalog(),
+          error: error.message || 'Failed to load game catalog from database.',
+        };
+      }
+
+      if (Array.isArray(data) && data.length > 0) {
+        this.applyCatalogRows(data);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('aetherpay_state_changed', {
+              detail: { key: STORAGE_KEYS.GAME_CATALOG },
+            })
+          );
+        }
+      }
+
+      return {
+        success: true,
+        catalog: this.getGameCatalog(),
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        catalog: this.getGameCatalog(),
+        error: err?.message || 'Unable to refresh game catalog from database.',
+      };
+    }
+  }
+
+  public async saveGameCatalogConfig(
+    items: GameCatalogItem[],
+    actorId: string,
+    actorName: string
+  ): Promise<{ success: boolean; savedCount: number; error?: string }> {
+    if (!supabase || !isSupabaseConfigured()) {
+      return {
+        success: false,
+        savedCount: 0,
+        error: 'Database connection is not configured. Cannot save game catalog config.',
+      };
+    }
+
+    const now = new Date().toISOString();
+    const normalizedItems: GameCatalogItem[] = items
+      .filter((item) => Boolean(item && item.id))
+      .map((item) => {
+        const resolvedIcon = resolveGameImageUrl(item.iconUrl || item.imageUrl);
+        const resolvedImage = resolveGameImageUrl(item.imageUrl || item.iconUrl);
+        return {
+          ...item,
+          platform: (item.platform || 'General').trim() || 'General',
+          iconUrl: resolvedIcon,
+          imageUrl: resolvedImage,
+          enabled: item.enabled !== false,
+          createdAt: item.createdAt || now,
+          updatedAt: now,
+        };
+      });
+
+    if (normalizedItems.length === 0) {
+      return {
+        success: false,
+        savedCount: 0,
+        error: 'Game catalog cannot be empty.',
+      };
+    }
+
+    const rows = normalizedItems.map((item) => mapGameCatalogItemToDbRow(item));
+
+    try {
+      const { data, error } = await supabase
+        .from('game_catalog')
+        .upsert(rows, { onConflict: 'id' })
+        .select('*');
+
+      if (error) {
+        return {
+          success: false,
+          savedCount: 0,
+          error: error.message || 'Failed to save game catalog configuration to database.',
+        };
+      }
+
+      const persisted = Array.isArray(data) && data.length > 0
+        ? mergeCatalogFromServerRows(data, INITIAL_GAME_CATALOG, normalizedItems)
+        : normalizedItems;
+
+      this.save(STORAGE_KEYS.GAME_CATALOG, persisted, true);
+
+      const disabledTitles = persisted
+        .filter((g) => g.enabled === false)
+        .map((g) => g.title);
+      this.logAudit({
+        actorId,
+        actorName,
+        actorRole: 'admin',
+        action: 'GAME_CATALOG_CONFIG_SAVED',
+        entityType: 'settings',
+        entityId: 'game_catalog',
+        details: `Admin saved master game catalog config (${persisted.length} games, ${disabledTitles.length} disabled${disabledTitles.length > 0 ? `: ${disabledTitles.join(', ')}` : ''}).`,
+      });
+
+      return {
+        success: true,
+        savedCount: persisted.length,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        savedCount: 0,
+        error: err?.message || 'Unexpected database error while saving game catalog config.',
+      };
+    }
+  }
+
+  public async saveGameCatalogItemToServer(
+    item: Omit<GameCatalogItem, 'id' | 'createdAt' | 'updatedAt'> & { id?: string },
+    actorId: string,
+    actorName: string
+  ): Promise<{ success: boolean; item?: GameCatalogItem; error?: string }> {
+    if (!supabase || !isSupabaseConfigured()) {
+      return {
+        success: false,
+        error: 'Database connection is not configured. Cannot save game.',
+      };
+    }
+
+    const list = this.getGameCatalog();
+    const existingIndex = item.id ? list.findIndex((g) => g.id === item.id) : -1;
+    const isNew = existingIndex === -1;
+    const now = new Date().toISOString();
+    const resolvedIcon = resolveGameImageUrl(item.iconUrl || item.imageUrl);
+    const resolvedImage = resolveGameImageUrl(item.imageUrl || item.iconUrl);
+
+    const candidateItem: GameCatalogItem = isNew
+      ? {
+          ...item,
+          platform: (item.platform || 'General').trim() || 'General',
+          iconUrl: resolvedIcon,
+          imageUrl: resolvedImage,
+          enabled: item.enabled !== false,
+          id: item.id || `gc_${Date.now()}`,
+          createdAt: now,
+          updatedAt: now,
+        }
+      : {
+          ...list[existingIndex],
+          ...item,
+          platform: (item.platform || list[existingIndex].platform || 'General').trim() || 'General',
+          iconUrl: resolvedIcon,
+          imageUrl: resolvedImage,
+          enabled: item.enabled !== false,
+          updatedAt: now,
+        };
+
+    const dbRow = mapGameCatalogItemToDbRow(candidateItem);
+
+    try {
+      const { error } = await supabase
+        .from('game_catalog')
+        .upsert(dbRow, { onConflict: 'id' });
+
+      if (error) {
+        return {
+          success: false,
+          error: error.message || 'Failed to save game to database.',
+        };
+      }
+
+      if (isNew) {
+        list.unshift(candidateItem);
+      } else {
+        list[existingIndex] = candidateItem;
+      }
+      this.save(STORAGE_KEYS.GAME_CATALOG, list, true);
+
+      this.logAudit({
+        actorId,
+        actorName,
+        actorRole: 'admin',
+        action: isNew ? 'GAME_CATALOG_CREATED' : 'GAME_CATALOG_UPDATED',
+        entityType: 'settings',
+        entityId: candidateItem.id,
+        details: isNew
+          ? `Admin added game "${candidateItem.title}" to platform catalog.`
+          : `Admin updated game "${candidateItem.title}" (${candidateItem.enabled ? 'Active' : 'Disabled'}) in platform catalog.`,
+      });
+
+      return { success: true, item: candidateItem };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Unexpected error saving game to database.',
+      };
+    }
+  }
+
   public saveGameCatalogItem(
     item: Omit<GameCatalogItem, 'id' | 'createdAt' | 'updatedAt'> & { id?: string },
     actorId: string,
@@ -5452,14 +5702,16 @@ class DataService {
     if (isNew) {
       const newItem: GameCatalogItem = {
         ...item,
+        platform: (item.platform || 'General').trim() || 'General',
         iconUrl: resolvedIcon,
         imageUrl: resolvedImage,
+        enabled: item.enabled !== false,
         id: item.id || `gc_${Date.now()}`,
         createdAt: now,
         updatedAt: now,
       };
       list.unshift(newItem);
-      this.save(STORAGE_KEYS.GAME_CATALOG, list);
+      this.save(STORAGE_KEYS.GAME_CATALOG, list, true);
       this.logAudit({
         actorId,
         actorName,
@@ -5474,11 +5726,13 @@ class DataService {
       list[existingIndex] = {
         ...list[existingIndex],
         ...item,
+        platform: (item.platform || list[existingIndex].platform || 'General').trim() || 'General',
         iconUrl: resolvedIcon,
         imageUrl: resolvedImage,
+        enabled: item.enabled !== false,
         updatedAt: now,
       };
-      this.save(STORAGE_KEYS.GAME_CATALOG, list);
+      this.save(STORAGE_KEYS.GAME_CATALOG, list, true);
       this.logAudit({
         actorId,
         actorName,
@@ -5491,43 +5745,39 @@ class DataService {
       savedItem = list[existingIndex];
     }
 
-    // Persist to Supabase if configured
-    try {
-      if (supabase) {
-        supabase
-          .from('game_catalog')
-          .upsert({
-            id: savedItem.id,
-            title: savedItem.title,
-            platform: savedItem.platform,
-            enabled: savedItem.enabled,
-          })
-          .then(
-            () => {},
-            (err) => console.warn('Supabase game_catalog sync notice:', err)
-          );
-      }
-    } catch {}
+    // Persist single row to Supabase with verified schema columns
+    if (supabase && isSupabaseConfigured()) {
+      supabase
+        .from('game_catalog')
+        .upsert(mapGameCatalogItemToDbRow(savedItem), { onConflict: 'id' })
+        .then(
+          ({ error }) => {
+            if (error) {
+              console.warn('Supabase game_catalog sync notice:', error.message);
+            }
+          },
+          (err) => console.warn('Supabase game_catalog sync notice:', err)
+        );
+    }
 
     return savedItem;
   }
 
   public async deleteGameCatalogItem(gameId: string, actorId: string, actorName: string): Promise<void> {
+    if (!supabase || !isSupabaseConfigured()) {
+      throw new Error('Database connection is not configured.');
+    }
+
     const list = this.getGameCatalog();
     const target = list.find((g) => g.id === gameId);
-    const updated = list.filter((g) => g.id !== gameId);
-    this.cache[STORAGE_KEYS.GAME_CATALOG] = updated;
-    window.dispatchEvent(new CustomEvent('aetherpay_state_changed', { detail: { key: STORAGE_KEYS.GAME_CATALOG } }));
 
-    // Delete from Supabase if configured
-    try {
-      if (supabase) {
-        supabase.from('game_catalog').delete().eq('id', gameId).then(
-          () => {},
-          () => {}
-        );
-      }
-    } catch {}
+    const { error } = await supabase.from('game_catalog').delete().eq('id', gameId);
+    if (error) {
+      throw new Error(error.message || 'Failed to delete game from database.');
+    }
+
+    const updated = list.filter((g) => g.id !== gameId);
+    this.save(STORAGE_KEYS.GAME_CATALOG, updated, true);
 
     this.logAudit({
       actorId,

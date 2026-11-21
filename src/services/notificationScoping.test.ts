@@ -26,6 +26,10 @@ test('filterRealtimeRowsForUser drops all user-scoped tables when logged out whi
     filterRealtimeRowsForUser('app_config', [{ id: 'main', data: {} }], null),
     [{ id: 'main', data: {} }]
   );
+  assert.deepEqual(
+    filterRealtimeRowsForUser('game_catalog', [{ id: 'gc_juwa', is_active: false }], null),
+    [{ id: 'gc_juwa', is_active: false }]
+  );
 });
 
 test('filterRealtimeRowsForUser isolates customer realtime messages, conversations, and wallet rows strictly to active user', () => {

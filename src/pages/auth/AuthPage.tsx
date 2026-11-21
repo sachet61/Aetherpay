@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { UserProfile, UserRole, GameCatalogItem } from '../../types';
 import { dataService } from '../../services/dataService';
+import { filterEnabledGames } from '../../services/gameCatalogUtils';
 import { supabaseAuthService } from '../../services/supabaseAuthService';
 import {
   DEFAULT_GAME_ICON,
@@ -96,8 +97,10 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
   const [games, setGames] = useState<GameCatalogItem[]>([]);
 
   useEffect(() => {
-    const catalog = dataService.getGameCatalog().filter((g) => g.enabled !== false);
-    setGames(catalog);
+    const syncCatalog = () => {
+      setGames(filterEnabledGames(dataService.getGameCatalog()));
+    };
+    syncCatalog();
 
     // Password recovery listener
     const handleRecovery = () => {
@@ -106,6 +109,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
       setInfoMessage('Password recovery session initiated. Please set your new password below.');
     };
 
+    window.addEventListener('aetherpay_state_changed', syncCatalog);
     window.addEventListener('supabase_password_recovery', handleRecovery);
 
     // Also check window hash and ?ref= query parameter directly on mount
@@ -130,7 +134,10 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
       }
     }
 
-    return () => window.removeEventListener('supabase_password_recovery', handleRecovery);
+    return () => {
+      window.removeEventListener('aetherpay_state_changed', syncCatalog);
+      window.removeEventListener('supabase_password_recovery', handleRecovery);
+    };
   }, []);
 
 

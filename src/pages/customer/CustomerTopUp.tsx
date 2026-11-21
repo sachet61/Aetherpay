@@ -1,6 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { UserProfile, UserWallet, PaymentMethodType } from '../../types';
 import { dataService } from '../../services/dataService';
+import {
+  filterEnabledGameAccounts,
+  filterEnabledGames,
+} from '../../services/gameCatalogUtils';
 import { telegramService } from '../../services/telegramService';
 import { storageService } from '../../services/storageService';
 import {
@@ -51,9 +55,10 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
   preselectedGameCatalogId,
 }) => {
   const config = dataService.getAppConfig();
-  const gameCatalog = dataService.getGameCatalog();
+  const rawGameCatalog = dataService.getGameCatalog();
+  const gameCatalog = filterEnabledGames(rawGameCatalog);
   const gameAccounts = dataService.getGameAccounts(currentUser.id);
-  const activeGameAccounts = gameAccounts.filter((g) => g.status === 'active');
+  const activeGameAccounts = filterEnabledGameAccounts(gameAccounts, rawGameCatalog);
 
   const initialDraft = React.useMemo(
     () =>
@@ -67,15 +72,24 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     () => initialDraft?.fundingMode || 'gateway_payment'
   );
 
-  // Game Choose: User selects game. Can select from registered game accounts or catalog
-  const [selectedGameCatalogId, setSelectedGameCatalogId] = useState<string>(
-    () =>
-      preselectedGameCatalogId ||
-      initialDraft?.selectedGameCatalogId ||
-      activeGameAccounts[0]?.gameCatalogId ||
-      gameCatalog[0]?.id ||
-      ''
-  );
+  // Game Choose: User selects game. Can select from registered game accounts or catalog (enabled games only)
+  const [selectedGameCatalogId, setSelectedGameCatalogId] = useState<string>(() => {
+    const candidate = preselectedGameCatalogId || initialDraft?.selectedGameCatalogId;
+    if (candidate && gameCatalog.some((g) => g.id === candidate)) {
+      return candidate;
+    }
+    return activeGameAccounts[0]?.gameCatalogId || gameCatalog[0]?.id || '';
+  });
+
+  useEffect(() => {
+    if (gameCatalog.length === 0) {
+      if (selectedGameCatalogId) setSelectedGameCatalogId('');
+      return;
+    }
+    if (!gameCatalog.some((g) => g.id === selectedGameCatalogId)) {
+      setSelectedGameCatalogId(activeGameAccounts[0]?.gameCatalogId || gameCatalog[0].id);
+    }
+  }, [gameCatalog, activeGameAccounts, selectedGameCatalogId]);
 
   // Exactly 4 supported methods
   const [selectedMethodType, setSelectedMethodType] = useState<PaymentMethodType>(
@@ -290,6 +304,11 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     e.preventDefault();
     setErrorMessage(null);
     setSuccessMessage(null);
+
+    if (!selectedGameCatalogId || !targetCatalogGame) {
+      setErrorMessage('No active game is currently selected or available for top-up.');
+      return;
+    }
 
     // Branch A1: Wheel of Luck Free-Play Load
     if (fundingMode === 'free_play') {
@@ -536,16 +555,21 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                 <select
                   value={selectedGameCatalogId}
                   onChange={(e) => setSelectedGameCatalogId(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-xs text-white font-semibold focus:outline-none focus:border-amber-400"
+                  disabled={gameCatalog.length === 0}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-xs text-white font-semibold focus:outline-none focus:border-amber-400 disabled:opacity-60"
                 >
-                  {gameCatalog.map((game) => (
-                    <option key={game.id} value={game.id}>
-                      {game.title}
-                    </option>
-                  ))}
+                  {gameCatalog.length > 0 ? (
+                    gameCatalog.map((game) => (
+                      <option key={game.id} value={game.id}>
+                        {game.title}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">No active games available</option>
+                  )}
                 </select>
                 <p className="text-[11px] text-slate-400">
-                  Game selected: <strong className="text-amber-300">{targetGameName}</strong>
+                  Game selected: <strong className="text-amber-300">{selectedGameCatalogId ? targetGameName : 'None available'}</strong>
                 </p>
               </div>
             </div>

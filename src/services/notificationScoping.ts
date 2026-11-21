@@ -24,7 +24,7 @@ function isRowInternalNote(row: any): boolean {
   );
 }
 
-const PUBLIC_REALTIME_TABLES = new Set(['faked_cashouts', 'app_config']);
+const PUBLIC_REALTIME_TABLES = new Set(['faked_cashouts', 'app_config', 'game_catalog']);
 
 /**
  * Filters raw Supabase Realtime postgres_changes rows strictly by the active logged-in user.

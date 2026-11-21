@@ -1,6 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { UserProfile, UserWallet, WithdrawalRequest } from '../../types';
 import { dataService } from '../../services/dataService';
+import {
+  filterEnabledGameAccounts,
+  filterEnabledGames,
+} from '../../services/gameCatalogUtils';
 import { useVerificationResolution } from '../../hooks/useVerificationResolution';
 import { LiveCashoutFeedList } from '../../components/common/LiveCashoutFeedList';
 import {
@@ -38,10 +42,12 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
   preselectedGameCatalogId,
 }) => {
   const verificationUi = useVerificationResolution(currentUser);
-  const gameCatalog = dataService.getGameCatalog();
-  const registeredGameAccounts = dataService
-    .getGameAccounts(currentUser.id)
-    .filter((g) => g.status === 'active');
+  const rawGameCatalog = dataService.getGameCatalog();
+  const gameCatalog = filterEnabledGames(rawGameCatalog);
+  const registeredGameAccounts = filterEnabledGameAccounts(
+    dataService.getGameAccounts(currentUser.id),
+    rawGameCatalog
+  );
 
   // Check which method the last payment was made through
   const registeredInfo = dataService.getUserRegisteredMethod(currentUser.id);
@@ -54,10 +60,27 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
         (g) => g.gameCatalogId === preselectedGameCatalogId || g.id === preselectedGameCatalogId
       );
       if (match) return match.id;
-      return preselectedGameCatalogId;
+      if (gameCatalog.some((g) => g.id === preselectedGameCatalogId)) {
+        return preselectedGameCatalogId;
+      }
     }
     return registeredGameAccounts[0]?.id || gameCatalog[0]?.id || '';
   });
+
+  useEffect(() => {
+    const validIds = new Set<string>(
+      registeredGameAccounts.length > 0
+        ? registeredGameAccounts.map((ga) => ga.id)
+        : gameCatalog.map((gc) => gc.id)
+    );
+    if (validIds.size === 0) {
+      if (selectedGameId) setSelectedGameId('');
+      return;
+    }
+    if (!validIds.has(selectedGameId)) {
+      setSelectedGameId(registeredGameAccounts[0]?.id || gameCatalog[0]?.id || '');
+    }
+  }, [gameCatalog, registeredGameAccounts, selectedGameId]);
   const [amount, setAmount] = useState<string>(prefilledAmount ? String(prefilledAmount) : '100');
   const [playerNotes, setPlayerNotes] = useState('');
 
@@ -90,6 +113,11 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
     e.preventDefault();
     setErrorMessage(null);
     setSuccessMessage(null);
+
+    if (!selectedGameId) {
+      setErrorMessage('No active game is currently available for cashout.');
+      return;
+    }
 
     if (parsedAmount <= 0) {
       setErrorMessage('Please enter a valid amount to withdraw.');
@@ -294,7 +322,8 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
               <select
                 value={selectedGameId}
                 onChange={(e) => setSelectedGameId(e.target.value)}
-                className="w-full bg-[#0A0F1D] border border-slate-700 rounded-lg px-3.5 py-2.5 text-xs text-white font-semibold focus:outline-none focus:border-amber-400"
+                disabled={registeredGameAccounts.length === 0 && gameCatalog.length === 0}
+                className="w-full bg-[#0A0F1D] border border-slate-700 rounded-lg px-3.5 py-2.5 text-xs text-white font-semibold focus:outline-none focus:border-amber-400 disabled:opacity-60"
               >
                 {registeredGameAccounts.length > 0 ? (
                   registeredGameAccounts.map((ga) => (
@@ -302,16 +331,18 @@ export const CustomerWithdrawal: React.FC<CustomerWithdrawalProps> = ({
                       {ga.gameName}
                     </option>
                   ))
-                ) : (
+                ) : gameCatalog.length > 0 ? (
                   gameCatalog.map((gc) => (
                     <option key={gc.id} value={gc.id}>
                       {gc.title}
                     </option>
                   ))
+                ) : (
+                  <option value="">No active games available</option>
                 )}
               </select>
               <p className="text-[11px] text-slate-400">
-                Cashout requested from: <strong className="text-amber-300">{selectedGameTitle}</strong>
+                Cashout requested from: <strong className="text-amber-300">{selectedGameId ? selectedGameTitle : 'None available'}</strong>
               </p>
             </div>
 

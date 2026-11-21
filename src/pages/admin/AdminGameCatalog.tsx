@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, GameCatalogItem, GameLink } from '../../types';
 import { dataService } from '../../services/dataService';
+import {
+  countUnsavedCatalogChanges,
+} from '../../services/gameCatalogUtils';
 import { storageService } from '../../services/storageService';
 import { validateImageFile } from '../../utils/uploadUtils';
 import {
@@ -24,6 +27,7 @@ import {
   Loader2,
   Sparkles,
   Upload,
+  RotateCcw,
 } from 'lucide-react';
 
 interface AdminGameCatalogProps {
@@ -41,10 +45,16 @@ const PRESET_GAME_ICONS = [
 
 export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser }) => {
   const isAdmin = currentUser.role === 'admin';
-  const [catalog, setCatalog] = useState<GameCatalogItem[]>(dataService.getGameCatalog());
+  const [persistedCatalog, setPersistedCatalog] = useState<GameCatalogItem[]>(() => dataService.getGameCatalog());
+  const [catalog, setCatalog] = useState<GameCatalogItem[]>(() => dataService.getGameCatalog());
   const [editingItem, setEditingItem] = useState<GameCatalogItem | null>(null);
   const [isNewItem, setIsNewItem] = useState(false);
   const [notificationMsg, setNotificationMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [isRefreshingServer, setIsRefreshingServer] = useState(false);
+  const [isSavingGame, setIsSavingGame] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
 
   // Deletion modal state
   const [gameToDelete, setGameToDelete] = useState<GameCatalogItem | null>(null);
@@ -59,6 +69,11 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
   const [enabled, setEnabled] = useState(true);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const unsavedCount = React.useMemo(
+    () => countUnsavedCatalogChanges(catalog, persistedCatalog),
+    [catalog, persistedCatalog]
+  );
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const input = e.currentTarget;
@@ -94,13 +109,39 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
     { label: 'Web Play', url: 'https://games.swiftsweeps.com' },
   ]);
 
-  // Keep catalog synchronized in real-time with Supabase changes
+  // Fetch authoritative catalog from Supabase on mount and stay synchronized
   useEffect(() => {
+    let active = true;
+    setIsRefreshingServer(true);
+    void dataService.fetchGameCatalogFromServer().then((res) => {
+      if (!active) return;
+      setIsRefreshingServer(false);
+      if (res.success) {
+        setPersistedCatalog((prevPersisted) => {
+          setCatalog((prevDraft) =>
+            countUnsavedCatalogChanges(prevDraft, prevPersisted) === 0 ? res.catalog : prevDraft
+          );
+          return res.catalog;
+        });
+      } else if (res.error) {
+        setErrorMsg(res.error);
+      }
+    });
+
     const handleSync = () => {
-      setCatalog(dataService.getGameCatalog());
+      const latest = dataService.getGameCatalog();
+      setPersistedCatalog((prevPersisted) => {
+        setCatalog((prevDraft) =>
+          countUnsavedCatalogChanges(prevDraft, prevPersisted) === 0 ? latest : prevDraft
+        );
+        return latest;
+      });
     };
     window.addEventListener('aetherpay_state_changed', handleSync);
-    return () => window.removeEventListener('aetherpay_state_changed', handleSync);
+    return () => {
+      active = false;
+      window.removeEventListener('aetherpay_state_changed', handleSync);
+    };
   }, []);
 
   const handleOpenNewGameModal = () => {
@@ -117,6 +158,7 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
     ]);
     setEnabled(true);
     setUploadError(null);
+    setModalError(null);
   };
 
   const handleOpenEditGameModal = (game: GameCatalogItem) => {
@@ -135,8 +177,57 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
             ...(game.downloadUrl ? [{ label: 'Download Link', url: game.downloadUrl }] : []),
           ]
     );
-    setEnabled(game.enabled);
+    setEnabled(game.enabled !== false);
     setUploadError(null);
+    setModalError(null);
+  };
+
+  const handleToggleGameEnabled = (gameIdToToggle: string) => {
+    if (!isAdmin) return;
+    setErrorMsg(null);
+    setNotificationMsg(null);
+    setCatalog((prev) =>
+      prev.map((g) =>
+        g.id === gameIdToToggle ? { ...g, enabled: g.enabled === false } : g
+      )
+    );
+  };
+
+  const handleDiscardDraftChanges = () => {
+    setCatalog(persistedCatalog);
+    setErrorMsg(null);
+    setNotificationMsg(null);
+  };
+
+  const handleSaveConfig = async () => {
+    if (!isAdmin) {
+      setErrorMsg('Only Administrators can save the master game catalog configuration.');
+      return;
+    }
+
+    setIsSavingConfig(true);
+    setErrorMsg(null);
+    setNotificationMsg(null);
+
+    const res = await dataService.saveGameCatalogConfig(
+      catalog,
+      currentUser.id,
+      currentUser.displayName
+    );
+    setIsSavingConfig(false);
+
+    if (!res.success) {
+      setErrorMsg(res.error || 'Failed to save game catalog configuration to database.');
+      return;
+    }
+
+    const authoritative = dataService.getGameCatalog();
+    setPersistedCatalog(authoritative);
+    setCatalog(authoritative);
+    setNotificationMsg(
+      `Game catalog config saved to database (${res.savedCount} games synchronized across all devices).`
+    );
+    setTimeout(() => setNotificationMsg(null), 4500);
   };
 
   const handleAddLink = () => {
@@ -145,9 +236,10 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
 
   const handleRemoveLink = (index: number) => {
     if (links.length <= 1) {
-      alert('A game must have at least one link.');
+      setModalError('A game must have at least one link.');
       return;
     }
+    setModalError(null);
     setLinks(links.filter((_, i) => i !== index));
   };
 
@@ -157,15 +249,18 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
     setLinks(updated);
   };
 
-  const handleSaveGame = (e: React.FormEvent) => {
+  const handleSaveGame = async (e: React.FormEvent) => {
     e.preventDefault();
+    setModalError(null);
+    setErrorMsg(null);
+
     if (!isAdmin) {
-      alert('Only Administrators can modify the master game catalog.');
+      setModalError('Only Administrators can modify the master game catalog.');
       return;
     }
 
     if (!title.trim()) {
-      alert('Please enter a Game Name.');
+      setModalError('Please enter a Game Name.');
       return;
     }
 
@@ -173,7 +268,8 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
     const downloadLink = links.find((l) => l.label.toLowerCase().includes('download'))?.url || links[1]?.url || primaryGameUrl;
     const normalizedIcon = resolveGameImageUrl(iconUrl.trim());
 
-    dataService.saveGameCatalogItem(
+    setIsSavingGame(true);
+    const res = await dataService.saveGameCatalogItemToServer(
       {
         id: editingItem?.id || (isNewItem && gameId ? gameId : undefined),
         title: title.trim(),
@@ -189,34 +285,48 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
       currentUser.id,
       currentUser.displayName
     );
+    setIsSavingGame(false);
 
-    setCatalog(dataService.getGameCatalog());
+    if (!res.success || !res.item) {
+      setModalError(res.error || 'Failed to save game title to database.');
+      return;
+    }
+
+    const savedItem = res.item;
+    const authoritative = dataService.getGameCatalog();
+    setPersistedCatalog(authoritative);
+    setCatalog((prev) => {
+      const exists = prev.some((g) => g.id === savedItem.id);
+      if (!exists) return [savedItem, ...prev];
+      return prev.map((g) => (g.id === savedItem.id ? savedItem : g));
+    });
     setEditingItem(null);
     setIsNewItem(false);
-    setCatalog(dataService.getGameCatalog());
-    setEditingItem(null);
-    setIsNewItem(false);
-    setNotificationMsg(`Game title "${title}" successfully saved with ${links.length} link(s) to Supabase.`);
-    setTimeout(() => setNotificationMsg(null), 3500);
+    setNotificationMsg(`Game title "${savedItem.title}" saved to database (${savedItem.enabled ? 'Active' : 'Disabled'}).`);
+    setTimeout(() => setNotificationMsg(null), 4000);
   };
 
   const handleConfirmDelete = async () => {
     if (!gameToDelete) return;
     if (!isAdmin) {
-      alert('Only Administrators can remove games from the catalog.');
+      setErrorMsg('Only Administrators can remove games from the catalog.');
       return;
     }
 
     setIsDeleting(true);
+    setErrorMsg(null);
     try {
       await dataService.deleteGameCatalogItem(gameToDelete.id, currentUser.id, currentUser.displayName);
-      setCatalog(dataService.getGameCatalog());
-      setNotificationMsg(`Game title "${gameToDelete.title}" permanently removed from catalog and Supabase.`);
+      const authoritative = dataService.getGameCatalog();
+      setPersistedCatalog(authoritative);
+      setCatalog((prev) => prev.filter((g) => g.id !== gameToDelete.id));
+      setNotificationMsg(`Game title "${gameToDelete.title}" permanently removed from catalog and database.`);
       setTimeout(() => setNotificationMsg(null), 3500);
       setGameToDelete(null);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to delete game:', err);
-      alert('Error deleting game from Supabase. Please try again.');
+      setErrorMsg(err?.message || 'Error deleting game from database. Please try again.');
+      setGameToDelete(null);
     } finally {
       setIsDeleting(false);
     }
@@ -234,17 +344,50 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
             <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-950/60 text-amber-400 border border-amber-800/60 font-semibold">
               Admin Exclusive
             </span>
+            {isRefreshingServer && (
+              <span className="text-[11px] text-slate-400 inline-flex items-center gap-1">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                <span>Syncing catalog...</span>
+              </span>
+            )}
           </div>
         </div>
 
         {isAdmin ? (
-          <button
-            onClick={handleOpenNewGameModal}
-            className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-indigo-600/20"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add New Game</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              onClick={handleSaveConfig}
+              disabled={isSavingConfig}
+              className={`min-h-[44px] px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-colors shadow-md disabled:opacity-50 ${
+                unsavedCount > 0
+                  ? 'bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 shadow-amber-500/25'
+                  : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/20'
+              }`}
+            >
+              {isSavingConfig ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Saving Config...</span>
+                </>
+              ) : (
+                <>
+                  <Save className="w-4 h-4" />
+                  <span>
+                    {unsavedCount > 0 ? `Save Config (${unsavedCount})` : 'Save Config'}
+                  </span>
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenNewGameModal}
+              className="min-h-[44px] px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-indigo-600/20"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add New Game</span>
+            </button>
+          </div>
         ) : (
           <div className="text-xs text-amber-400 flex items-center gap-1.5 p-2 rounded-lg bg-amber-950/30 border border-amber-800/40">
             <AlertTriangle className="w-3.5 h-3.5" />
@@ -252,6 +395,59 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
           </div>
         )}
       </div>
+
+      {isAdmin && unsavedCount > 0 && (
+        <div
+          role="status"
+          className="p-3.5 rounded-xl bg-amber-950/50 border border-amber-500/40 text-amber-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+            <span>
+              You have <strong>{unsavedCount}</strong> unsaved game status change{unsavedCount === 1 ? '' : 's'}. Click <strong>Save Config</strong> to publish to database and all player devices.
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleDiscardDraftChanges}
+              disabled={isSavingConfig}
+              className="min-h-[36px] px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1.5 transition-colors"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Discard</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleSaveConfig}
+              disabled={isSavingConfig}
+              className="min-h-[36px] px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>Save Config</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {errorMsg && (
+        <div
+          role="alert"
+          className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-700/70 text-rose-200 text-xs flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span>{errorMsg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorMsg(null)}
+            className="text-rose-200 hover:text-white font-semibold shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {notificationMsg && (
         <div className="p-3.5 rounded-xl bg-emerald-950/60 border border-emerald-800 text-emerald-300 text-xs flex items-center gap-2 animate-in fade-in duration-200">
@@ -289,15 +485,31 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
                       <div className="text-[11px] text-slate-400 truncate">{game.platform}</div>
                     </div>
                   </div>
-                  <span
-                    className={`shrink-0 px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold border ${
-                      game.enabled
-                        ? 'bg-emerald-950 text-emerald-400 border-emerald-800'
-                        : 'bg-slate-800 text-slate-500 border-slate-700'
-                    }`}
-                  >
-                    {game.enabled ? 'Active' : 'Disabled'}
-                  </span>
+                  {isAdmin ? (
+                    <button
+                      type="button"
+                      onClick={() => handleToggleGameEnabled(game.id)}
+                      aria-pressed={game.enabled !== false}
+                      aria-label={`Toggle ${game.title} availability (${game.enabled !== false ? 'Active' : 'Disabled'})`}
+                      className={`shrink-0 min-h-[36px] px-3 py-1 rounded-lg text-xs font-mono font-semibold border transition-colors ${
+                        game.enabled !== false
+                          ? 'bg-emerald-950 text-emerald-300 border-emerald-700 hover:bg-emerald-900/70'
+                          : 'bg-slate-800 text-slate-300 border-slate-600 hover:bg-slate-700'
+                      }`}
+                    >
+                      {game.enabled !== false ? 'Active' : 'Disabled'}
+                    </button>
+                  ) : (
+                    <span
+                      className={`shrink-0 px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold border ${
+                        game.enabled !== false
+                          ? 'bg-emerald-950 text-emerald-400 border-emerald-800'
+                          : 'bg-slate-800 text-slate-500 border-slate-700'
+                      }`}
+                    >
+                      {game.enabled !== false ? 'Active' : 'Disabled'}
+                    </span>
+                  )}
                 </div>
 
                 <div className="flex items-center justify-between gap-2 text-[11px]">
@@ -308,14 +520,27 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
                 </div>
 
                 {isAdmin && (
-                  <button
-                    type="button"
-                    onClick={() => handleOpenEditGameModal(game)}
-                    className="w-full py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors"
-                  >
-                    <Edit2 className="w-3.5 h-3.5" />
-                    <span>Edit Game</span>
-                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleGameEnabled(game.id)}
+                      className={`min-h-[44px] py-2 px-3 rounded-lg font-semibold text-xs border transition-colors ${
+                        game.enabled !== false
+                          ? 'bg-slate-800 hover:bg-slate-700 text-amber-300 border-slate-700'
+                          : 'bg-emerald-950/70 hover:bg-emerald-900/70 text-emerald-300 border-emerald-700/70'
+                      }`}
+                    >
+                      {game.enabled !== false ? 'Disable Game' : 'Enable Game'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEditGameModal(game)}
+                      className="min-h-[44px] py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                      <span>Edit Game</span>
+                    </button>
+                  </div>
                 )}
               </div>
             );
@@ -401,15 +626,31 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
                     </td>
 
                     <td className="py-3 px-4">
-                      <span
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                          game.enabled
-                            ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                            : 'bg-slate-800 text-slate-500 border border-slate-700'
-                        }`}
-                      >
-                        {game.enabled ? 'Active' : 'Disabled'}
-                      </span>
+                      {isAdmin ? (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleGameEnabled(game.id)}
+                          aria-pressed={game.enabled !== false}
+                          aria-label={`Toggle ${game.title} availability (${game.enabled !== false ? 'Active' : 'Disabled'})`}
+                          className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors ${
+                            game.enabled !== false
+                              ? 'bg-emerald-950 text-emerald-300 border-emerald-700 hover:bg-emerald-900/70'
+                              : 'bg-slate-800 text-slate-300 border-slate-600 hover:bg-slate-700'
+                          }`}
+                        >
+                          {game.enabled !== false ? 'Active' : 'Disabled'}
+                        </button>
+                      ) : (
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                            game.enabled !== false
+                              ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                              : 'bg-slate-800 text-slate-500 border border-slate-700'
+                          }`}
+                        >
+                          {game.enabled !== false ? 'Active' : 'Disabled'}
+                        </span>
+                      )}
                     </td>
 
                     <td className="py-3 px-4 text-right">
@@ -535,6 +776,15 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
             </div>
 
             <form onSubmit={handleSaveGame} className="space-y-4 text-xs">
+              {modalError && (
+                <div
+                  role="alert"
+                  className="p-3 rounded-xl bg-rose-950/60 border border-rose-700/70 text-rose-200 text-xs flex items-center gap-2"
+                >
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                  <span>{modalError}</span>
+                </div>
+              )}
               {/* Game Name & Game ID */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1">
@@ -797,20 +1047,31 @@ export const AdminGameCatalog: React.FC<AdminGameCatalogProps> = ({ currentUser 
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
                 <button
                   type="button"
+                  disabled={isSavingGame}
                   onClick={() => {
                     setEditingItem(null);
                     setIsNewItem(false);
                   }}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition-colors"
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition-colors disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs flex items-center gap-2 transition-colors shadow-md shadow-indigo-600/20"
+                  disabled={isSavingGame}
+                  className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs flex items-center gap-2 transition-colors shadow-md shadow-indigo-600/20 disabled:opacity-50"
                 >
-                  <Save className="w-4 h-4" />
-                  <span>Save Game Title</span>
+                  {isSavingGame ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-4 h-4" />
+                      <span>Save Game Title</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>
