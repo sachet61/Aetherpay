@@ -723,15 +723,6 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                   </span>
                 )}
               </div>
-
-              {isCustomer && (
-                <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-xs">
-                  <span className="text-slate-400 text-[11px]">Wallet Balance:</span>
-                  <span className="font-mono font-bold text-emerald-400">
-                    ${wallet.availableBalance.toFixed(2)}
-                  </span>
-                </div>
-              )}
             </div>
 
             {/* Quick Sign Out Action (Immediately visible without scrolling) */}

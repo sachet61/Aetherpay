@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { UserProfile, UserRole, UserWallet } from '../../types';
-import { dataService } from '../../services/dataService';
 import { useVerificationResolution } from '../../hooks/useVerificationResolution';
 import {
   Shield,
@@ -10,7 +9,6 @@ import {
   LogOut,
   CheckCircle2,
   Phone,
-  Wallet,
   ExternalLink,
   IdCard,
   MessageCircle,
@@ -26,7 +24,6 @@ interface AuthenticatedUserMenuProps {
 
 export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
   currentUser,
-  wallet,
   onLogout,
   onNavigateTab,
 }) => {
@@ -41,8 +38,6 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isOpen]);
-
-  const activeWallet = wallet || dataService.getWallet(currentUser.id);
 
   const getRoleIcon = (role: UserRole) => {
     switch (role) {
@@ -181,18 +176,6 @@ export const RoleSwitcher: React.FC<AuthenticatedUserMenuProps> = ({
                     {currentUser.phone || 'Not linked'}
                   </span>
                 </div>
-
-                {currentUser.role === 'customer' && activeWallet && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] text-slate-400 flex items-center gap-1.5">
-                      <Wallet className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Wallet Balance</span>
-                    </span>
-                    <span className="font-mono font-bold text-emerald-400">
-                      ${activeWallet.availableBalance.toFixed(2)}
-                    </span>
-                  </div>
-                )}
               </div>
             </div>
 

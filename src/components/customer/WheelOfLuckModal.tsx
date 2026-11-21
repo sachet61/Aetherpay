@@ -24,14 +24,11 @@ import {
   ChevronUp,
   Clock,
   Crown,
-  Gamepad2,
   Gift,
   History,
   Loader2,
-  PartyPopper,
   RefreshCw,
   Sparkles,
-  Trophy,
   X,
 } from 'lucide-react';
 
@@ -422,7 +419,11 @@ export const WheelOfLuckModal: React.FC<WheelOfLuckModalProps> = ({
                   {config.title}
                 </h2>
                 <p className="text-[11px] sm:text-xs text-slate-400 leading-snug mt-0.5 break-words">
-                  {config.subtitle}
+                  {!config.subtitle ||
+                  config.subtitle ===
+                    'Spin once every 24 hours for instant non-cashable Free-Play credits.'
+                    ? 'Try your luck for instant Freeplay'
+                    : config.subtitle}
                 </p>
               </div>
             </div>
@@ -460,33 +461,6 @@ export const WheelOfLuckModal: React.FC<WheelOfLuckModalProps> = ({
 
         {/* Dedicated Scrollable Modal Content Area */}
         <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain p-3.5 sm:p-6 space-y-4 sm:space-y-5">
-          {/* Simulated Promotional Showcase Strip (Strictly Display-Only) */}
-          {config.simulatedWinDisplay?.enabled && config.simulatedWinDisplay.amount > 0 && (
-            <div className="px-3.5 py-2.5 sm:px-4 sm:py-3 rounded-xl bg-gradient-to-r from-amber-950/55 via-[#141D33] to-indigo-950/45 border border-amber-500/35 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="flex items-start sm:items-center gap-2.5 sm:gap-3 min-w-0">
-                <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
-                  <Trophy className="w-4 h-4 text-amber-400" />
-                </div>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-                    <span className="text-xs sm:text-sm font-bold text-amber-200 break-words">
-                      {config.simulatedWinDisplay.label || 'Featured Showcase Prize (Simulated Demo)'}
-                    </span>
-                    <span className="px-1.5 py-0.5 rounded bg-slate-950/90 border border-amber-500/40 text-[9px] font-mono font-bold text-amber-300 uppercase tracking-wide shrink-0">
-                      SIMULATED — NOT CREDITED
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
-                    Promotional display teaser only — actual credited winnings match the landed wheel slice.
-                  </p>
-                </div>
-              </div>
-              <div className="font-mono text-base sm:text-xl font-extrabold text-amber-300 tabular-nums shrink-0 sm:text-right pl-10 sm:pl-0">
-                ${config.simulatedWinDisplay.amount.toFixed(2)}
-              </div>
-            </div>
-          )}
-
           {/* Main 2-Column Stage: Left Wheel | Right Status & Result Panel */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-6 items-center">
             {/* Left Column: Isolated Wheel Stage cleanly positioned below header */}
@@ -870,8 +844,8 @@ export const WheelOfLuckModal: React.FC<WheelOfLuckModalProps> = ({
                         : 'bg-[#0A0F1D] border-slate-800'
                     }`}
                   >
-                    {/* Line 1: Outcome & Landed Slice (full width, no truncation collisions) */}
-                    <div className="flex items-center gap-2.5 pb-2 border-b border-slate-800/80">
+                    {/* Outcome & Landed Slice (full width, no truncation collisions) */}
+                    <div className="flex items-center gap-2.5">
                       <div className="w-8 h-8 rounded-lg bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
                         <Gift className="w-4 h-4 text-amber-400" />
                       </div>
@@ -880,52 +854,7 @@ export const WheelOfLuckModal: React.FC<WheelOfLuckModalProps> = ({
                       </div>
                     </div>
 
-                    {/* Line 2: Actual Reward Amount */}
-                    <div className="flex items-baseline justify-between gap-3">
-                      <span className="text-xs text-slate-400">Actual Reward</span>
-                      <span className="text-xl font-extrabold font-mono text-amber-300 tabular-nums shrink-0">
-                        ${latestSpinVm.actualRewardAmount.toFixed(2)}
-                      </span>
-                    </div>
-
-                    {/* Line 3: Reward Type & Credit Status */}
-                    <div className="space-y-1">
-                      <div className="flex items-baseline justify-between gap-3 text-xs">
-                        <span className="text-slate-400 shrink-0">Reward Type</span>
-                        <span className="font-semibold text-slate-200 text-right break-words">
-                          {latestSpinVm.rewardTypeLabel}
-                        </span>
-                      </div>
-                      <div
-                        className={`text-[11px] font-medium ${
-                          latestSpinVm.isWinningSpin ? 'text-emerald-400' : 'text-slate-400'
-                        }`}
-                      >
-                        {latestSpinVm.creditStatusLabel}
-                      </div>
-                    </div>
-
-                    {/* Line 4: Simulated Display Amount (strictly separated, if applicable) */}
-                    {latestSpinVm.showSimulatedDisplay && (
-                      <div className="p-2.5 rounded-lg bg-slate-950/90 border border-amber-500/25 space-y-1">
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <span className="text-[11px] text-slate-400">Simulated Display</span>
-                          <span className="text-[10px] font-mono font-extrabold text-amber-300 uppercase tracking-wide">
-                            {latestSpinVm.simulatedBadgeLabel}
-                          </span>
-                        </div>
-                        <div className="flex items-baseline justify-between gap-2 text-xs">
-                          <span className="font-mono font-bold text-slate-200 tabular-nums">
-                            ${latestSpinVm.simulatedDisplayAmount.toFixed(2)}
-                          </span>
-                          <span className="text-[10px] font-mono text-slate-400">
-                            $0.00 balance impact
-                          </span>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Line 5: Spin Timestamp */}
+                    {/* Spin Timestamp */}
                     <div className="pt-2 border-t border-slate-800/80 text-[11px] font-mono text-slate-400 break-words">
                       Spun on: {new Date(latestSpinVm.createdAt).toLocaleString()}
                     </div>
@@ -958,65 +887,6 @@ export const WheelOfLuckModal: React.FC<WheelOfLuckModalProps> = ({
                   </div>
                 )}
               </div>
-            </div>
-          </div>
-
-          {/* Bottom Celebration / Action Footer Strip (Only displays spin success after confirmed credit) */}
-          <div className="px-3.5 py-3 sm:px-4 sm:py-3.5 rounded-2xl bg-gradient-to-r from-[#141A33] via-[#171E3B] to-[#111827] border border-indigo-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
-                {confirmedSpinResult ? (
-                  <PartyPopper className="w-4 h-4 sm:w-5 sm:h-5 text-amber-400" />
-                ) : (
-                  <Gamepad2 className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-300" />
-                )}
-              </div>
-              <div className="min-w-0">
-                <div className="text-xs sm:text-sm font-bold text-amber-200 break-words">
-                  {confirmedSpinResult
-                    ? confirmedSpinResult.actualRewardAmount > 0
-                      ? 'Enjoy your Free Play!'
-                      : 'Daily spin complete!'
-                    : freePlayBalance > 0
-                    ? 'Free-Play Balance Ready to Use'
-                    : 'Non-Cashable Promotional Free Play'}
-                </div>
-                <div className="text-[11px] sm:text-xs text-slate-300 leading-snug">
-                  {confirmedSpinResult
-                    ? confirmedSpinResult.actualRewardAmount > 0
-                      ? `Credited $${confirmedSpinResult.actualRewardAmount.toFixed(2)} directly to your Free-Play Balance.`
-                      : 'No Free-Play credits won this round — come back in 24 hours.'
-                    : freePlayBalance > 0
-                    ? `Load up to $${freePlayBalance.toFixed(2)} directly into any active Game ID.`
-                    : 'Free-Play credits can be loaded into active Game IDs and remain non-cashable.'}
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto">
-              {freePlayBalance > 0 ? (
-                <button
-                  type="button"
-                  disabled={isSpinning}
-                  onClick={() => {
-                    onClose();
-                    onNavigateTab('game_accounts');
-                  }}
-                  className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-45 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-colors shadow-md whitespace-nowrap"
-                >
-                  <Gamepad2 className="w-4 h-4" />
-                  <span>Load Free-Play (${freePlayBalance.toFixed(2)})</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={isSpinning}
-                  onClick={onClose}
-                  className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-45 text-white font-bold text-xs transition-colors whitespace-nowrap"
-                >
-                  Done
-                </button>
-              )}
             </div>
           </div>
         </div>

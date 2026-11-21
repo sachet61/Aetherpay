@@ -695,15 +695,6 @@ export const CustomerWallet: React.FC<CustomerWalletProps> = ({
                 </span>
               </div>
 
-              {selectedItem.balanceAfter !== undefined && selectedItem.balanceAfter > 0 && (
-                <div className="flex justify-between gap-4 py-1.5 border-b border-slate-800/60">
-                  <span className="text-slate-400">Wallet Balance After:</span>
-                  <span className="font-mono text-slate-200 tabular-nums">
-                    ${selectedItem.balanceAfter.toFixed(2)}
-                  </span>
-                </div>
-              )}
-
               {selectedItem.reviewerName && (
                 <div className="flex justify-between gap-4 py-1.5 border-b border-slate-800/60">
                   <span className="text-slate-400">Reviewed By:</span>

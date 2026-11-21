@@ -13,7 +13,6 @@ import {
   Eye,
   KeyRound,
   Gamepad2,
-  Wallet,
   Clock,
   Sparkles,
   Lock,
@@ -543,7 +542,6 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
             {/* Mobile Stacked Cards (< 768px) */}
             <div className="md:hidden divide-y divide-slate-800/80">
               {filteredUsers.map((u) => {
-                const wallet = (u as any).wallet || dataService.getWallet(u.id);
                 const isParentAdmin =
                   u.role === 'admin' &&
                   (dataService.isProtectedParentAdmin(u.email, u) ||
@@ -575,11 +573,9 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
 
                     <div className="flex items-center justify-between gap-2 text-xs">
                       <div className="font-mono text-slate-300">
-                        <span className="text-slate-500">Bal: </span>
-                        <span className="font-bold text-white">${(wallet?.availableBalance || 0).toFixed(2)}</span>
                         {u.createdAt && (
-                          <span className="text-[10px] text-slate-500 ml-2">
-                            {new Date(u.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                          <span className="text-[10px] text-slate-400">
+                            Joined {new Date(u.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
                           </span>
                         )}
                       </div>
@@ -614,7 +610,6 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                   <tr className="border-b border-slate-800 bg-slate-950/50 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                     <th className="py-3.5 px-4">User / Handle</th>
                     <th className="py-3.5 px-4">Role &amp; Governance</th>
-                    <th className="py-3.5 px-4">Wallet Balance</th>
                     <th className="py-3.5 px-4">Active Games</th>
                     <th className="py-3.5 px-4">Verification</th>
                     <th className="py-3.5 px-4 text-center">Actions</th>
@@ -622,7 +617,6 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 text-slate-300">
                   {filteredUsers.map((u) => {
-                    const wallet = (u as any).wallet || dataService.getWallet(u.id);
                     const gameAccounts = (u as any).gameAccounts || dataService.getGameAccounts(u.id);
                     const isParentAdmin =
                       u.role === 'admin' &&
@@ -723,18 +717,6 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                             >
                               {u.role}
                             </span>
-                          )}
-                        </td>
-
-                        {/* Wallet Balance */}
-                        <td className="py-3.5 px-4">
-                          <div className="font-mono font-bold text-white">
-                            ${(wallet?.availableBalance || 0).toFixed(2)}
-                          </div>
-                          {(wallet?.reservedBalance || 0) > 0 && (
-                            <div className="text-[10px] text-amber-400 font-mono">
-                              ${wallet.reservedBalance.toFixed(2)} in vault
-                            </div>
                           )}
                         </td>
 
@@ -921,29 +903,6 @@ export const AdminUsers: React.FC<AdminUsersProps> = ({ currentUser, onNavigateT
                   )}
                 </div>
               )}
-
-              {/* Balances & Stats Grid */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-                  <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-semibold">
-                    <span>Available Balance</span>
-                    <Wallet className="w-3 h-3 text-emerald-400" />
-                  </div>
-                  <div className="text-base font-bold font-mono text-emerald-400 mt-0.5">
-                    ${(((selectedUser as any).wallet?.availableBalance ?? dataService.getWallet(selectedUser.id)?.availableBalance) || 0).toFixed(2)}
-                  </div>
-                </div>
-
-                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-                  <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-semibold">
-                    <span>Reserved In Vault</span>
-                    <Clock className="w-3 h-3 text-amber-400" />
-                  </div>
-                  <div className="text-base font-bold font-mono text-amber-400 mt-0.5">
-                    ${(((selectedUser as any).wallet?.reservedBalance ?? dataService.getWallet(selectedUser.id)?.reservedBalance) || 0).toFixed(2)}
-                  </div>
-                </div>
-              </div>
 
               {/* ROLE & OPERATIONAL ACCESS GOVERNANCE SECTION */}
               <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">

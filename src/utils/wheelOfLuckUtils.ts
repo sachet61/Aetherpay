@@ -88,7 +88,7 @@ export const DEFAULT_WHEEL_SEGMENTS: WheelSegment[] = [
 export const DEFAULT_WHEEL_OF_LUCK_CONFIG: WheelOfLuckConfig = {
   enabled: true,
   title: 'Daily Wheel of Luck',
-  subtitle: 'Spin once every 24 hours for instant non-cashable Free-Play credits.',
+  subtitle: 'Try your luck for instant Freeplay',
   segments: DEFAULT_WHEEL_SEGMENTS.map((s) => ({ ...s })),
   simulatedWinDisplay: {
     enabled: true,

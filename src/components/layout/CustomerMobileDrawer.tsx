@@ -224,10 +224,10 @@ export const CustomerMobileDrawer: React.FC<CustomerMobileDrawerProps> = ({
           </button>
         </div>
 
-        {/* 2. Compact profile row: avatar, first name, wallet balance on the right (one line, no Player badge, no email) */}
+        {/* 2. Compact profile row: avatar and first name (one line, no Player badge, no email) */}
         <div
           data-testid="customer-drawer-profile-row"
-          className="shrink-0 mx-3 mt-3 px-3 py-2.5 rounded-xl bg-[#0E1726] border border-slate-800 flex items-center justify-between gap-2.5"
+          className="shrink-0 mx-3 mt-3 px-3 py-2.5 rounded-xl bg-[#0E1726] border border-slate-800 flex items-center gap-2.5"
         >
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-8 h-8 rounded-full bg-amber-500/15 border border-amber-500/35 flex items-center justify-center font-bold text-amber-300 text-sm overflow-hidden shrink-0">
@@ -246,10 +246,6 @@ export const CustomerMobileDrawer: React.FC<CustomerMobileDrawerProps> = ({
               {firstName}
             </span>
           </div>
-
-          <span className="text-sm font-mono font-bold text-emerald-400 tabular-nums shrink-0">
-            ${wallet.availableBalance.toFixed(2)}
-          </span>
         </div>
 
         {/* 3. Menu list (scrollable only if height requires; fits cleanly on 390x844) */}

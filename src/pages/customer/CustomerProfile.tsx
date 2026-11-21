@@ -279,13 +279,6 @@ export const CustomerProfile: React.FC<CustomerProfileProps> = ({
               </div>
             </div>
           </div>
-
-          <div className="text-right">
-            <div className="text-xs text-slate-400">Available Vault</div>
-            <div className="text-lg font-bold text-white font-mono tabular-nums">
-              ${wallet.availableBalance.toFixed(2)}
-            </div>
-          </div>
         </div>
 
         {/* Credentials Grid */}

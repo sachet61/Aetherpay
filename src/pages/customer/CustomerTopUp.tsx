@@ -150,7 +150,6 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     config.paymentMethods.find((m) => m.type === selectedMethodType) ||
     config.paymentMethods[0];
 
-  const parsedAmount = parseFloat(amount) || 0;
   const parsedFreePlayAmount = Number((parseFloat(freePlayAmount) || 0).toFixed(2));
   const parsedRefAmount = Number((parseFloat(referralAmount) || 0).toFixed(2));
 
@@ -165,12 +164,6 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
     selectedMethodType === 'payment_link' ? 20 :
     selectedMethodType === 'chime' ? 15 : 0
   );
-
-  const calculatedBonusAmount =
-    parsedAmount > 0 && dynamicBonusPercent > 0
-      ? (parsedAmount * dynamicBonusPercent) / 100
-      : 0;
-  const netCreditToGame = parsedAmount + calculatedBonusAmount;
 
   const topUpHistory = dataService.getTopUpRequests(currentUser.id);
 
@@ -462,7 +455,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
   };
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto pb-24 md:pb-8">
+    <div className="space-y-6 max-w-3xl mx-auto pb-24 md:pb-8">
       {/* Header with Gaming Theme */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
@@ -526,10 +519,8 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Main Form (Col 7) */}
-        <div className="lg:col-span-7 space-y-5">
-          <form onSubmit={handleSubmit} className="p-6 rounded-2xl border border-slate-800 bg-slate-900 space-y-5 shadow-xl">
+      {/* Single-Column Top-Up Form */}
+      <form onSubmit={handleSubmit} className="p-6 rounded-2xl border border-slate-800 bg-slate-900 space-y-5 shadow-xl">
             {/* Step 1: Select Game */}
             <div className="space-y-2 p-3.5 rounded-xl bg-slate-950 border border-slate-800">
               <label className="text-xs font-semibold text-slate-200 flex items-center justify-between">
@@ -1153,97 +1144,6 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                   : 'Submit'}
               </span>
             </button>
-          </form>
-        </div>
-
-        {/* Right Column: Dynamic Bonus Breakdown & Anti-Fraud (Col 5) */}
-        <div className="lg:col-span-5 space-y-5">
-          {/* Dynamic Bonus Breakdown Card */}
-          <div className="p-6 rounded-2xl border border-slate-800 bg-slate-900 shadow-xl space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Zap className="w-4 h-4 text-amber-400" />
-                <h2 className="text-sm font-bold text-white">
-                  {fundingMode === 'free_play'
-                    ? 'Wheel Free-Play Transfer'
-                    : fundingMode === 'referral_rewards'
-                    ? 'Referral Bonus Transfer'
-                    : 'Promotional Bonus Details'}
-                </h2>
-              </div>
-              {fundingMode === 'gateway_payment' ? (
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] font-bold border border-emerald-500/30">
-                  +{dynamicBonusPercent}% EXTRA
-                </span>
-              ) : (
-                <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-bold border border-amber-500/30">
-                  GAME-ONLY CREDIT
-                </span>
-              )}
-            </div>
-
-            {fundingMode === 'gateway_payment' ? (
-              <div className="space-y-3 text-xs">
-                <div className="flex items-center justify-between text-slate-300">
-                  <span>Game Platform</span>
-                  <span className="font-semibold text-white">{targetGameName}</span>
-                </div>
-
-                <div className="flex items-center justify-between text-slate-300">
-                  <span>Payment Channel</span>
-                  <span className="font-semibold text-amber-300">{currentMethod?.name}</span>
-                </div>
-
-                <div className="flex items-center justify-between text-slate-300">
-                  <span>Promotional Bonus</span>
-                  <span className="font-mono font-bold text-emerald-400">
-                    +{dynamicBonusPercent}% Extra Credits
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between text-slate-300">
-                  <span>Deposit Base Amount</span>
-                  <span className="font-mono text-amber-300">
-                    Verified from Proof
-                  </span>
-                </div>
-
-                <div className="pt-3 border-t border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-xs font-bold text-white">Total Game Credits Loaded</div>
-                      <div className="text-[10px] text-slate-400">Direct game account credit</div>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-sm font-bold font-mono text-emerald-400">
-                        Amount + {dynamicBonusPercent}% Bonus
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-3 text-xs">
-                <div className="flex items-center justify-between text-slate-300">
-                  <span>Game Platform</span>
-                  <span className="font-semibold text-white">{targetGameName}</span>
-                </div>
-
-                <div className="flex items-center justify-between text-slate-300">
-                  <span>Funding Source</span>
-                  <span className="font-semibold text-amber-300">
-                    {fundingMode === 'free_play' ? 'Wheel of Luck Free-Play' : 'Referral Bonus Wallet'}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between text-slate-300">
-                  <span>Transfer Amount</span>
-                  <span className="font-mono font-bold text-emerald-400">
-                    ${(fundingMode === 'free_play' ? parsedFreePlayAmount : parsedRefAmount).toFixed(2)}
-                  </span>
-                </div>
-              </div>
-            )}
 
             <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-3">
               <button
@@ -1263,9 +1163,7 @@ export const CustomerTopUp: React.FC<CustomerTopUpProps> = ({
                 Open Live Chat &rarr;
               </button>
             </div>
-          </div>
-        </div>
-      </div>
+          </form>
 
       {/* Top-up History */}
       {topUpHistory.length > 0 && (
