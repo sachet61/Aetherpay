@@ -3,6 +3,7 @@ import { UserProfile, UserRole, GameCatalogItem } from '../../types';
 import { dataService } from '../../services/dataService';
 import { filterEnabledGames } from '../../services/gameCatalogUtils';
 import { supabaseAuthService } from '../../services/supabaseAuthService';
+import { validateRegistrationForm } from '../../utils/authValidationUtils';
 import {
   DEFAULT_GAME_ICON,
   TOP_PRIORITY_GAME_COUNT,
@@ -25,6 +26,8 @@ import {
   X,
   ShieldCheck,
   User,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { ForgotPassword } from '../../components/auth/ForgotPassword';
 import { ResetPassword } from '../../components/auth/ResetPassword';
@@ -55,6 +58,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
   const [signupName, setSignupName] = useState('');
   const [signupEmail, setSignupEmail] = useState('');
   const [signupPassword, setSignupPassword] = useState('');
+  const [signupConfirmPassword, setSignupConfirmPassword] = useState('');
   const [signupPhone, setSignupPhone] = useState('');
   const [signupReferral, setSignupReferral] = useState(() => {
     if (typeof window === 'undefined') return '';
@@ -88,7 +92,16 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
   // Live support notice modal
   const [showSupportModal, setShowSupportModal] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [showSignupPassword, setShowSignupPassword] = useState(false);
+  const [showSignupConfirmPassword, setShowSignupConfirmPassword] = useState(false);
   const [activePolicyModal, setActivePolicyModal] = useState<'privacy' | 'terms' | 'deposit' | 'deletion' | null>(null);
+
+  const signupValidation = validateRegistrationForm({
+    displayName: signupName,
+    email: signupEmail,
+    password: signupPassword,
+    confirmPassword: signupConfirmPassword,
+  });
 
   // Ref to scroll to the auth card when a user clicks "Play Now" on mobile or large screens
   const authCardRef = useRef<HTMLDivElement>(null);
@@ -194,13 +207,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
     setErrorMessage(null);
     setInfoMessage(null);
 
-    if (!signupName.trim() || !signupEmail.trim() || !signupPassword) {
-      setErrorMessage('Please complete all required fields.');
-      return;
-    }
-
-    if (signupPassword.length < 8) {
-      setErrorMessage('Password must be at least 8 characters long with letters and numbers.');
+    if (!signupValidation.valid) {
+      setErrorMessage(signupValidation.error || 'Please complete all required fields.');
       return;
     }
 
@@ -572,17 +580,14 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
                         <button
                           type="button"
                           onClick={() => setShowPassword(!showPassword)}
-                          className="absolute right-3 top-3 text-slate-500 hover:text-slate-300"
+                          aria-label={showPassword ? 'Hide sign in password' : 'Show sign in password'}
+                          aria-pressed={showPassword}
+                          className="absolute right-3 top-2.5 p-0.5 text-slate-400 hover:text-slate-200 transition-colors"
                         >
                           {showPassword ? (
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
-                            </svg>
+                            <EyeOff className="w-4 h-4" />
                           ) : (
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                            </svg>
+                            <Eye className="w-4 h-4" />
                           )}
                         </button>
                       </div>
@@ -626,15 +631,99 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
                   </div>
 
                   <div className="space-y-1">
-                    <label className="text-xs font-medium text-slate-300">Create Password (8+ characters)</label>
-                    <input
-                      type="password"
-                      required
-                      value={signupPassword}
-                      onChange={(e) => setSignupPassword(e.target.value)}
-                      placeholder="••••••••"
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 font-mono transition"
-                    />
+                    <label htmlFor="signup-password" className="text-xs font-medium text-slate-300">
+                      Create Password (8+ characters)
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+                      <input
+                        id="signup-password"
+                        type={showSignupPassword ? 'text' : 'password'}
+                        required
+                        minLength={8}
+                        value={signupPassword}
+                        onChange={(e) => setSignupPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full bg-[#0A0F1D] border border-slate-800 rounded-xl pl-9 pr-10 py-2 text-xs text-white focus:outline-none focus:border-amber-400 font-mono transition"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowSignupPassword(!showSignupPassword)}
+                        aria-label={showSignupPassword ? 'Hide create password' : 'Show create password'}
+                        aria-pressed={showSignupPassword}
+                        className="absolute right-3 top-2 p-0.5 text-slate-400 hover:text-slate-200 transition-colors"
+                      >
+                        {showSignupPassword ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                    {signupPassword.length > 0 && !signupValidation.passwordMinLengthOk && (
+                      <p className="text-[11px] text-amber-300">
+                        Password must be at least 8 characters.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-1">
+                    <label htmlFor="signup-confirm-password" className="text-xs font-medium text-slate-300">
+                      Confirm Password
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+                      <input
+                        id="signup-confirm-password"
+                        type={showSignupConfirmPassword ? 'text' : 'password'}
+                        required
+                        minLength={8}
+                        value={signupConfirmPassword}
+                        onChange={(e) => setSignupConfirmPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className={`w-full bg-[#0A0F1D] border rounded-xl pl-9 pr-10 py-2 text-xs text-white focus:outline-none font-mono transition ${
+                          signupConfirmPassword.length > 0 && !signupValidation.passwordsMatch
+                            ? 'border-rose-500/80 focus:border-rose-400'
+                            : signupValidation.passwordsMatch
+                            ? 'border-emerald-500/70 focus:border-emerald-400'
+                            : 'border-slate-800 focus:border-amber-400'
+                        }`}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowSignupConfirmPassword(!showSignupConfirmPassword)}
+                        aria-label={
+                          showSignupConfirmPassword ? 'Hide confirm password' : 'Show confirm password'
+                        }
+                        aria-pressed={showSignupConfirmPassword}
+                        className="absolute right-3 top-2 p-0.5 text-slate-400 hover:text-slate-200 transition-colors"
+                      >
+                        {showSignupConfirmPassword ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                    {signupConfirmPassword.length > 0 && (
+                      <p
+                        className={`text-[11px] flex items-center gap-1 ${
+                          signupValidation.passwordsMatch ? 'text-emerald-400' : 'text-rose-400'
+                        }`}
+                      >
+                        {signupValidation.passwordsMatch ? (
+                          <>
+                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                            <span>Passwords match</span>
+                          </>
+                        ) : (
+                          <>
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                            <span>Passwords do not match</span>
+                          </>
+                        )}
+                      </p>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
@@ -675,8 +764,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onLoginSuccess, timeoutNotic
 
                   <button
                     type="submit"
-                    disabled={isLoading}
-                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-500 via-yellow-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 mt-2"
+                    disabled={isLoading || !signupValidation.valid}
+                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-500 via-yellow-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold text-xs transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 mt-2"
                   >
                     {isLoading ? 'Creating Account...' : 'Complete Registration'}
                     <ArrowRight className="w-4 h-4" />
