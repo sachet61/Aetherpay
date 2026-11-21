@@ -28,6 +28,8 @@ import {
 } from 'lucide-react';
 import { SwiftSweepsLogo } from '../common/SwiftSweepsLogo';
 import { PWAInstallButton } from '../common/PWAInstallButton';
+import { WheelGlyph } from '../customer/WheelGlyph';
+import { useWheelAvailability } from '../../hooks/useWheelAvailability';
 
 interface TopNavbarProps {
   currentUser: UserProfile;
@@ -36,6 +38,9 @@ interface TopNavbarProps {
   onLogout?: () => void;
   activeTab: string;
   onNavigateTab: (tab: string) => void;
+  spinAvailable?: boolean;
+  onOpenWheel?: () => void;
+  onOverlayChange?: (isOpen: boolean) => void;
 }
 
 export const TopNavbar: React.FC<TopNavbarProps> = ({
@@ -45,12 +50,22 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   onLogout,
   activeTab,
   onNavigateTab,
+  spinAvailable,
+  onOpenWheel,
+  onOverlayChange,
 }) => {
+  const wheelContext = useWheelAvailability();
+  const effectiveSpinAvailable = spinAvailable ?? wheelContext.spinAvailable;
+  const effectiveOpenWheel = onOpenWheel ?? wheelContext.openWheelModal;
   const [showNotifications, setShowNotifications] = useState(false);
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [, setStateTick] = useState(0);
   const moreMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    onOverlayChange?.(showNotifications || isMobileDrawerOpen);
+  }, [showNotifications, isMobileDrawerOpen, onOverlayChange]);
 
   useEffect(() => {
     const handleSync = () => setStateTick((prev) => prev + 1);
@@ -502,15 +517,42 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           </nav>
 
           {/* Zone 3: Notifications, Account Controls & Logout */}
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
             {/* PWA App Install (keeps single Bell in navbar; push alerts live in Notifications drawer) */}
             <PWAInstallButton currentUser={currentUser} showPushButton={false} />
+
+            {/* Permanent Wheel of Luck header button (Customers only, immediately left of Bell) */}
+            {isCustomer && (
+              <button
+                type="button"
+                onClick={effectiveOpenWheel}
+                data-testid="header-wheel-button"
+                aria-label={effectiveSpinAvailable ? 'Wheel of Luck, spin ready' : 'Wheel of Luck'}
+                title={effectiveSpinAvailable ? 'Wheel of Luck, spin ready' : 'Wheel of Luck'}
+                className={`relative flex items-center justify-center w-11 h-11 sm:w-9 sm:h-9 rounded-lg bg-[#0E1726] border transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0F1D] ${
+                  effectiveSpinAvailable
+                    ? 'border-amber-500/45 text-amber-300 hover:border-amber-400 hover:bg-[#131C2E]'
+                    : 'border-slate-700/80 text-slate-400 hover:border-slate-600 hover:text-slate-200'
+                }`}
+              >
+                <span className="relative inline-flex items-center justify-center w-5 h-5">
+                  <WheelGlyph active={effectiveSpinAvailable} className="w-5 h-5" />
+                  {effectiveSpinAvailable && (
+                    <span
+                      data-testid="header-wheel-dot"
+                      aria-hidden="true"
+                      className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-amber-400 ring-2 ring-[#0E1726]"
+                    />
+                  )}
+                </span>
+              </button>
+            )}
 
             {/* Notifications button */}
             <button
               type="button"
               onClick={() => setShowNotifications(!showNotifications)}
-              className="relative flex items-center justify-center w-9 h-9 rounded-lg bg-[#0E1726] border border-slate-700/80 hover:border-slate-600 text-slate-300 hover:text-white transition-colors shrink-0"
+              className="relative flex items-center justify-center w-11 h-11 sm:w-9 sm:h-9 rounded-lg bg-[#0E1726] border border-slate-700/80 hover:border-slate-600 text-slate-300 hover:text-white transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0F1D]"
               aria-label="Notifications"
               title="Notifications"
             >

@@ -886,4 +886,96 @@ export function buildStickyWheelButtonState(params: {
   };
 }
 
+export function isSpinAvailableForCustomer(params: {
+  isCustomer: boolean;
+  enabled: boolean;
+  isLoading: boolean;
+  hasStatus: boolean;
+  statusError: string | null;
+  uiState: WheelUiState;
+}): boolean {
+  if (!params.isCustomer || !params.enabled) return false;
+  if (params.statusError) return false;
+  if (params.isLoading && !params.hasStatus) return false;
+  return params.uiState === 'eligible';
+}
 
+export function getLocalDayKey(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function getWheelPopupStorageKey(userId: string, dayKey: string): string {
+  return `wheel_popup_${userId}_${dayKey}`;
+}
+
+function getSafeBrowserLocalStorage(
+  explicitStorage?: Pick<Storage, 'getItem' | 'setItem'> | null
+): Pick<Storage, 'getItem' | 'setItem'> | null {
+  if (explicitStorage !== undefined) return explicitStorage;
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function hasDismissedWheelPopupToday(
+  userId: string,
+  dayKey: string,
+  sessionFallback?: Set<string>,
+  storage?: Pick<Storage, 'getItem' | 'setItem'> | null
+): boolean {
+  if (!userId || !dayKey) return true;
+  const key = getWheelPopupStorageKey(userId, dayKey);
+  if (sessionFallback?.has(key)) return true;
+
+  const targetStorage = getSafeBrowserLocalStorage(storage);
+  if (!targetStorage) return false;
+
+  try {
+    return targetStorage.getItem(key) === '1';
+  } catch {
+    return sessionFallback?.has(key) ?? false;
+  }
+}
+
+export function markWheelPopupDismissedToday(
+  userId: string,
+  dayKey: string,
+  sessionFallback?: Set<string>,
+  storage?: Pick<Storage, 'getItem' | 'setItem'> | null
+): void {
+  if (!userId || !dayKey) return;
+  const key = getWheelPopupStorageKey(userId, dayKey);
+  sessionFallback?.add(key);
+
+  const targetStorage = getSafeBrowserLocalStorage(storage);
+  if (!targetStorage) return;
+
+  try {
+    targetStorage.setItem(key, '1');
+  } catch {
+    // Ignore storage quota/privacy-mode errors; sessionFallback already preserves once-per-session dismissal.
+  }
+}
+
+export function shouldShowWheelPopup(params: {
+  isCustomer: boolean;
+  activeTab: string;
+  spinAvailable: boolean;
+  wheelModalOpen: boolean;
+  hasOtherOpenModal?: boolean;
+  dismissedToday: boolean;
+}): boolean {
+  if (!params.isCustomer) return false;
+  if (params.activeTab !== 'dashboard') return false;
+  if (!params.spinAvailable) return false;
+  if (params.wheelModalOpen) return false;
+  if (params.hasOtherOpenModal) return false;
+  if (params.dismissedToday) return false;
+  return true;
+}

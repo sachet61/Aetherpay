@@ -5,26 +5,20 @@ import {
   ArrowUpFromLine,
   Gamepad2,
   Headphones,
-  Clock,
 } from 'lucide-react';
 import { dataService } from '../../services/dataService';
 import { UserProfile } from '../../types';
-import type { StickyWheelButtonState } from '../../utils/wheelOfLuckUtils';
 
 interface CustomerMobileNavProps {
   activeTab: string;
   onNavigateTab: (tab: string) => void;
   currentUser: UserProfile;
-  wheelStickyState?: StickyWheelButtonState;
-  onOpenWheel?: () => void;
 }
 
 export const CustomerMobileNav: React.FC<CustomerMobileNavProps> = ({
   activeTab,
   onNavigateTab,
   currentUser,
-  wheelStickyState,
-  onOpenWheel,
 }) => {
   const [unreadChatCount, setUnreadChatCount] = React.useState<number>(() => {
     const conv = dataService.getConversations().find((c) => c.customerId === currentUser.id);
@@ -46,11 +40,8 @@ export const CustomerMobileNav: React.FC<CustomerMobileNavProps> = ({
     };
   }, [currentUser.id]);
 
-  const hasWheel = Boolean(wheelStickyState?.visible && onOpenWheel);
-
   return (
-    <>
-      <div className="fixed bottom-0 left-0 right-0 z-40 pointer-events-none pb-safe md:hidden">
+    <div className="fixed bottom-0 left-0 right-0 z-40 pointer-events-none pb-safe md:hidden">
         <div className="max-w-lg mx-auto px-0 sm:px-4 sm:mb-3 pointer-events-auto">
           <nav
             aria-label="Bottom Navigation"
@@ -210,70 +201,5 @@ export const CustomerMobileNav: React.FC<CustomerMobileNavProps> = ({
           </nav>
         </div>
       </div>
-
-      {/* Wheel of Fortune: fixed with clear breathing room above mobile bottom nav; bottom-right corner on tablet/desktop */}
-      {hasWheel && wheelStickyState && onOpenWheel && (
-        <button
-          type="button"
-          onClick={onOpenWheel}
-          data-testid="sticky-wheel-of-luck-btn"
-          data-wheel-state={wheelStickyState.state}
-          aria-label={wheelStickyState.ariaLabel}
-          title={wheelStickyState.ariaLabel}
-          className={`fixed bottom-[calc(env(safe-area-inset-bottom,0px)+84px)] right-3 md:bottom-6 md:right-6 z-[45] w-12 h-12 md:w-14 md:h-14 rounded-full flex items-center justify-center bg-[#0B1221]/95 md:bg-[#0E1726]/95 backdrop-blur-xl border transition-all duration-150 hover:scale-105 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0F1D] ${
-            wheelStickyState.state === 'ready'
-              ? 'border-amber-400/85 shadow-[0_0_20px_rgba(245,158,11,0.38)]'
-              : 'border-amber-500/40 shadow-2xl shadow-black/90'
-          }`}
-        >
-              <svg
-                viewBox="0 0 44 44"
-                className={`w-[82%] h-[82%] ${
-                  wheelStickyState.state === 'cooldown' ? 'opacity-90' : 'opacity-100'
-                }`}
-                aria-hidden="true"
-              >
-                <circle cx="22" cy="22" r="20" fill="#0B1221" stroke="#F59E0B" strokeWidth="1.5" />
-                <g stroke="#0B1221" strokeWidth="0.9">
-                  <path d="M22,22 L22,4 A18,18 0 0,1 34.73,9.27 Z" fill="#F59E0B" />
-                  <path d="M22,22 L34.73,9.27 A18,18 0 0,1 40,22 Z" fill="#4F46E5" />
-                  <path d="M22,22 L40,22 A18,18 0 0,1 34.73,34.73 Z" fill="#10B981" />
-                  <path d="M22,22 L34.73,34.73 A18,18 0 0,1 22,40 Z" fill="#D97706" />
-                  <path d="M22,22 L22,40 A18,18 0 0,1 9.27,34.73 Z" fill="#0EA5E9" />
-                  <path d="M22,22 L9.27,34.73 A18,18 0 0,1 4,22 Z" fill="#7C3AED" />
-                  <path d="M22,22 L4,22 A18,18 0 0,1 9.27,9.27 Z" fill="#14B8A6" />
-                  <path d="M22,22 L9.27,9.27 A18,18 0 0,1 22,4 Z" fill="#E11D48" />
-                </g>
-                <circle cx="22" cy="22" r="17.5" fill="none" stroke="#FDE68A" strokeOpacity="0.45" strokeWidth="0.7" />
-                <circle cx="22" cy="22" r="5" fill="#FBBF24" stroke="#0B1221" strokeWidth="1.3" />
-                <circle cx="22" cy="22" r="2" fill="#0B1221" />
-                <polygon points="22,6 19.2,1 24.8,1" fill="#FDE047" stroke="#0B1221" strokeWidth="0.65" />
-              </svg>
-
-              {wheelStickyState.state === 'ready' ? (
-                <span
-                  aria-hidden="true"
-                  className="absolute -top-0.5 -right-0.5 min-w-[20px] h-[20px] px-1 rounded-full bg-emerald-500 text-slate-950 border-2 border-[#0A0F1D] text-[10px] font-black leading-none flex items-center justify-center shadow-md"
-                >
-                  {wheelStickyState.badgeText || '1'}
-                </span>
-              ) : wheelStickyState.state === 'error' ? (
-                <span
-                  aria-hidden="true"
-                  className="absolute -top-0.5 -right-0.5 min-w-[20px] h-[20px] px-1 rounded-full bg-rose-600 text-white border-2 border-[#0A0F1D] text-[10px] font-black leading-none flex items-center justify-center shadow-md"
-                >
-                  !
-                </span>
-              ) : (
-                <span
-                  aria-hidden="true"
-                  className="absolute -top-0.5 -right-0.5 w-[20px] h-[20px] rounded-full bg-[#0E1726] text-amber-300 border border-amber-500/75 flex items-center justify-center shadow-md"
-                >
-                  <Clock className="w-2.5 h-2.5" />
-                </span>
-              )}
-            </button>
-          )}
-    </>
   );
 };

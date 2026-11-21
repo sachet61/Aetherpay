@@ -7,6 +7,8 @@ import {
 } from '../../utils/imageUtils';
 import { LiveCashoutFeedList } from '../../components/common/LiveCashoutFeedList';
 import { GamePlatformCard } from '../../components/customer/GamePlatformCard';
+import { WheelStrip } from '../../components/customer/WheelStrip';
+import { useWheelAvailability } from '../../hooks/useWheelAvailability';
 import { toggleGameCardOverlay } from '../../utils/gameCardUtils';
 import { getMessageLink, sortOfficialPartners } from '../../utils/officialPartnersUtils';
 import { PartnerIcon, PlatformGlyph, getPlatformDisplayName } from '../../components/common/PartnerVisuals';
@@ -36,13 +38,21 @@ interface CustomerHomeProps {
   currentUser: UserProfile;
   wallet: UserWallet;
   onNavigateTab: (tab: string, meta?: any) => void;
+  spinAvailable?: boolean;
+  onOpenWheel?: () => void;
 }
 
 export const CustomerHome: React.FC<CustomerHomeProps> = ({
   currentUser,
   wallet,
   onNavigateTab,
+  spinAvailable,
+  onOpenWheel,
 }) => {
+  const wheelAvailability = useWheelAvailability();
+  const isWheelSpinAvailable =
+    currentUser.role === 'customer' && (spinAvailable ?? wheelAvailability.spinAvailable);
+  const handleOpenWheel = onOpenWheel ?? wheelAvailability.openWheelModal;
   const [copiedRef, setCopiedRef] = React.useState(false);
   const hydratedAccountsForRef = useRef<string | null>(null);
 
@@ -340,6 +350,9 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
           <span>24/7 Support Chat</span>
         </button>
       </div>
+
+      {/* Dashboard Wheel of Luck Reminder Strip (Only rendered when spin is available) */}
+      <WheelStrip visible={isWheelSpinAvailable} onOpenWheel={handleOpenWheel} />
 
       {/* Referee Welcome Bonus Card (Visible when player signed up via referral or was linked by support) */}
       {welcomeBonus?.hasReferrer && (

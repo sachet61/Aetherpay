@@ -10,7 +10,15 @@ import { CustomerMobileNav } from './components/layout/CustomerMobileNav';
 import { StaffMobileNav } from './components/layout/StaffMobileNav';
 import { LegalContent } from './components/common/LegalContent';
 import { WheelOfLuckModal } from './components/customer/WheelOfLuckModal';
+import { WheelPopup } from './components/customer/WheelPopup';
+import { WheelAvailabilityProvider } from './hooks/useWheelAvailability';
 import { useWheelOfLuckStatus } from './hooks/useWheelOfLuckStatus';
+import {
+  getLocalDayKey,
+  hasDismissedWheelPopupToday,
+  markWheelPopupDismissedToday,
+  shouldShowWheelPopup,
+} from './utils/wheelOfLuckUtils';
 
 // Auth & Guest Landing
 import { AuthPage } from './pages/auth/AuthPage';
@@ -143,6 +151,9 @@ export default function App() {
 
   const [tabMeta, setTabMeta] = useState<any>(null);
   const [showMobileMoreDrawer, setShowMobileMoreDrawer] = useState(false);
+  const [topNavOverlayOpen, setTopNavOverlayOpen] = useState(false);
+  const popupSessionDismissedRef = useRef<Set<string>>(new Set());
+  const [popupDismissedVersion, setPopupDismissedVersion] = useState(0);
   const [isMobileChatActive, setIsMobileChatActive] = useState(false);
   const [timeoutNotice, setTimeoutNotice] = useState<string | null>(null);
   const [sessionExpiredNotice, setSessionExpiredNotice] = useState<string | null>(null);
@@ -240,6 +251,29 @@ export default function App() {
         .map((g) => resolveGameImageUrl(g.iconUrl || g.imageUrl)),
     [hydrationState.hydratedUserId]
   );
+
+  const wheelAvailabilityValue = React.useMemo(
+    () => ({
+      spinAvailable: wheelOfLuck.spinAvailable,
+      isLoading: wheelOfLuck.isLoadingWheel,
+      openWheelModal: wheelOfLuck.openWheelModal,
+    }),
+    [wheelOfLuck.spinAvailable, wheelOfLuck.isLoadingWheel, wheelOfLuck.openWheelModal]
+  );
+
+  const handleDismissWheelPopup = React.useCallback(() => {
+    if (!currentUser?.id) return;
+    markWheelPopupDismissedToday(currentUser.id, getLocalDayKey(), popupSessionDismissedRef.current);
+    setPopupDismissedVersion((v) => v + 1);
+  }, [currentUser?.id]);
+
+  const handleSpinNowFromPopup = React.useCallback(() => {
+    if (currentUser?.id) {
+      markWheelPopupDismissedToday(currentUser.id, getLocalDayKey(), popupSessionDismissedRef.current);
+      setPopupDismissedVersion((v) => v + 1);
+    }
+    wheelOfLuck.openWheelModal();
+  }, [currentUser?.id, wheelOfLuck.openWheelModal]);
 
   if (currentHash === '#privacy') {
     return <LegalContent initialTab="privacy" onBack={() => { window.location.hash = ''; setCurrentHash(''); }} />;
@@ -397,8 +431,23 @@ export default function App() {
     }
   };
 
+  const localDayKey = getLocalDayKey();
+  void popupDismissedVersion;
+  const isWheelPopupDismissedToday = isCustomer
+    ? hasDismissedWheelPopupToday(currentUser.id, localDayKey, popupSessionDismissedRef.current)
+    : true;
+
+  const isWheelPopupVisible = shouldShowWheelPopup({
+    isCustomer,
+    activeTab,
+    spinAvailable: wheelOfLuck.spinAvailable,
+    wheelModalOpen: wheelOfLuck.wheelModalOpen,
+    hasOtherOpenModal: showMobileMoreDrawer || topNavOverlayOpen,
+    dismissedToday: isWheelPopupDismissedToday,
+  });
+
   return (
-    <>
+    <WheelAvailabilityProvider value={wheelAvailabilityValue}>
       {/* Branded Startup Loading Screen tracking required assets for active workspace */}
       <StartupSplash
         target={isCustomer ? 'customer_dashboard' : 'staff_ops'}
@@ -438,6 +487,9 @@ export default function App() {
               onLogout={() => handleLogout('manual')}
               activeTab={activeTab}
               onNavigateTab={handleNavigateTab}
+              spinAvailable={wheelOfLuck.spinAvailable}
+              onOpenWheel={wheelOfLuck.openWheelModal}
+              onOverlayChange={setTopNavOverlayOpen}
             />
             {/* Continuous News-Style Horizontal Live Cashouts Marquee Ticker */}
             <LiveCashoutTicker />
@@ -508,6 +560,8 @@ export default function App() {
                   currentUser={currentUser}
                   wallet={activeWallet}
                   onNavigateTab={handleNavigateTab}
+                  spinAvailable={wheelOfLuck.spinAvailable}
+                  onOpenWheel={wheelOfLuck.openWheelModal}
                 />
               )}
 
@@ -672,14 +726,20 @@ export default function App() {
         </Suspense>
       </main>
 
-      {/* Persistent Android-Style Bottom Navigation & Sticky Wheel of Luck for Customer (Hidden during full-screen support chat) */}
+      {/* Persistent Android-Style Bottom Navigation for Customer (Hidden during full-screen support chat) */}
       {isCustomer && !isCustomerChatOpen && (
         <CustomerMobileNav
           activeTab={activeTab}
           onNavigateTab={handleNavigateTab}
           currentUser={currentUser}
-          wheelStickyState={wheelOfLuck.stickyWheelState}
-          onOpenWheel={wheelOfLuck.openWheelModal}
+        />
+      )}
+
+      {isCustomer && (
+        <WheelPopup
+          isOpen={isWheelPopupVisible}
+          onSpinNow={handleSpinNowFromPopup}
+          onDismiss={handleDismissWheelPopup}
         />
       )}
 
@@ -802,6 +862,6 @@ export default function App() {
         </div>
       )}
     </div>
-    </>
+    </WheelAvailabilityProvider>
   );
 }

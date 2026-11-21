@@ -3,9 +3,9 @@ import type { UserProfile, WheelStatusResponse } from '../types';
 import { dataService } from '../services/dataService';
 import {
   DEFAULT_WHEEL_OF_LUCK_CONFIG,
-  buildStickyWheelButtonState,
   computeServerAnchoredRemainingMs,
   deriveWheelUiState,
+  isSpinAvailableForCustomer,
 } from '../utils/wheelOfLuckUtils';
 
 export function useWheelOfLuckStatus(currentUser: UserProfile | null) {
@@ -99,10 +99,12 @@ export function useWheelOfLuckStatus(currentUser: UserProfile | null) {
     nowMs: wheelClockMs,
   });
 
+  const hasStatus = Boolean(wheelStatus) && !isRetryingWheel;
+
   const wheelUi = deriveWheelUiState({
     enabled: Boolean(activeWheelConfig.enabled),
     isLoading: isLoadingWheel,
-    hasStatus: Boolean(wheelStatus) && !isRetryingWheel,
+    hasStatus,
     statusError: wheelStatusError,
     isSpinning: false,
     eligibility: wheelStatus?.eligibility,
@@ -142,13 +144,17 @@ export function useWheelOfLuckStatus(currentUser: UserProfile | null) {
     setWheelClockMs(now);
   }, []);
 
-  const stickyWheelState = buildStickyWheelButtonState({
-    enabled: isCustomer && Boolean(activeWheelConfig.enabled),
+  const spinAvailable = isSpinAvailableForCustomer({
+    isCustomer,
+    enabled: Boolean(activeWheelConfig.enabled),
+    isLoading: isLoadingWheel,
+    hasStatus,
+    statusError: wheelStatusError,
     uiState: wheelUi.uiState,
-    remainingMs: wheelCooldownRemainingMs,
   });
 
   return {
+    isCustomer,
     wheelModalOpen,
     openWheelModal,
     closeWheelModal,
@@ -159,6 +165,7 @@ export function useWheelOfLuckStatus(currentUser: UserProfile | null) {
     wheelStatusError,
     refreshWheelStatus,
     handleStatusUpdated,
-    stickyWheelState,
+    wheelUi,
+    spinAvailable,
   };
 }

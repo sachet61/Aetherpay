@@ -208,7 +208,7 @@ export const CustomerGameAccounts: React.FC<CustomerGameAccountsProps> = ({
   };
 
   return (
-    <div className="space-y-4 max-w-5xl mx-auto pb-[calc(env(safe-area-inset-bottom,0px)+9.5rem)] md:pb-24">
+    <div className="space-y-4 max-w-5xl mx-auto pb-24 md:pb-8">
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Gaming IDs</h1>

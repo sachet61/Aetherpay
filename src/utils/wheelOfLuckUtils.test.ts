@@ -16,9 +16,15 @@ import {
   formatCountdownDuration,
   formatWheelHttpError,
   formatWheelSliceLines,
+  getLocalDayKey,
+  getWheelPopupStorageKey,
+  hasDismissedWheelPopupToday,
   isHtmlFallbackResponse,
+  isSpinAvailableForCustomer,
+  markWheelPopupDismissedToday,
   normalizeWheelConfig,
   selectWeightedWheelSegment,
+  shouldShowWheelPopup,
   validateWheelConfig,
 } from './wheelOfLuckUtils.ts';
 
@@ -507,3 +513,194 @@ test('buildStickyWheelButtonState keeps button visible in ready and cooldown sta
   assert.equal(disabled.visible, false);
 });
 
+test('isSpinAvailableForCustomer returns true strictly when customer, enabled, healthy, and eligible', () => {
+  assert.equal(
+    isSpinAvailableForCustomer({
+      isCustomer: true,
+      enabled: true,
+      isLoading: false,
+      hasStatus: true,
+      statusError: null,
+      uiState: 'eligible',
+    }),
+    true
+  );
+
+  // Loading without prior status or error shows nothing (no dot, no strip, no popup)
+  assert.equal(
+    isSpinAvailableForCustomer({
+      isCustomer: true,
+      enabled: true,
+      isLoading: true,
+      hasStatus: false,
+      statusError: null,
+      uiState: 'eligible',
+    }),
+    false
+  );
+  assert.equal(
+    isSpinAvailableForCustomer({
+      isCustomer: true,
+      enabled: true,
+      isLoading: false,
+      hasStatus: true,
+      statusError: 'Network failure',
+      uiState: 'eligible',
+    }),
+    false
+  );
+
+  // Cooldown, disabled, or staff roles never show spin available
+  assert.equal(
+    isSpinAvailableForCustomer({
+      isCustomer: true,
+      enabled: true,
+      isLoading: false,
+      hasStatus: true,
+      statusError: null,
+      uiState: 'cooldown',
+    }),
+    false
+  );
+  assert.equal(
+    isSpinAvailableForCustomer({
+      isCustomer: true,
+      enabled: false,
+      isLoading: false,
+      hasStatus: true,
+      statusError: null,
+      uiState: 'eligible',
+    }),
+    false
+  );
+  assert.equal(
+    isSpinAvailableForCustomer({
+      isCustomer: false,
+      enabled: true,
+      isLoading: false,
+      hasStatus: true,
+      statusError: null,
+      uiState: 'eligible',
+    }),
+    false
+  );
+});
+
+test('wheel popup dismissal key uses local calendar day and falls back safely when localStorage fails', () => {
+  const dayKey = getLocalDayKey(new Date(2026, 10, 5, 23, 55, 0));
+  assert.equal(dayKey, '2026-11-05');
+  assert.equal(getWheelPopupStorageKey('usr_9', dayKey), 'wheel_popup_usr_9_2026-11-05');
+
+  const store = new Map<string, string>();
+  const mockStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      store.set(k, v);
+    },
+  };
+  const sessionFallback = new Set<string>();
+  assert.equal(hasDismissedWheelPopupToday('usr_9', dayKey, sessionFallback, mockStorage), false);
+  markWheelPopupDismissedToday('usr_9', dayKey, sessionFallback, mockStorage);
+  assert.equal(hasDismissedWheelPopupToday('usr_9', dayKey, new Set(), mockStorage), true);
+  assert.equal(store.get('wheel_popup_usr_9_2026-11-05'), '1');
+
+  // When storage throws (e.g., private mode / blocked cookies), no exception escapes and session fallback tracks dismissal
+  const throwingStorage = {
+    getItem: () => {
+      throw new Error('SecurityError');
+    },
+    setItem: () => {
+      throw new Error('QuotaExceededError');
+    },
+  };
+  const sessionOnly = new Set<string>();
+  assert.equal(hasDismissedWheelPopupToday('usr_10', dayKey, sessionOnly, throwingStorage), false);
+  markWheelPopupDismissedToday('usr_10', dayKey, sessionOnly, throwingStorage);
+  assert.equal(hasDismissedWheelPopupToday('usr_10', dayKey, sessionOnly, throwingStorage), true);
+});
+
+test('shouldShowWheelPopup only triggers on customer dashboard when spin is available and no other modal is open', () => {
+  assert.equal(
+    shouldShowWheelPopup({
+      isCustomer: true,
+      activeTab: 'dashboard',
+      spinAvailable: true,
+      wheelModalOpen: false,
+      hasOtherOpenModal: false,
+      dismissedToday: false,
+    }),
+    true
+  );
+
+  // Blocked on deep links / payment & upload flows / chat / wallet
+  for (const tab of ['topup', 'withdrawal', 'chat', 'wallet', 'game_accounts', 'referrals']) {
+    assert.equal(
+      shouldShowWheelPopup({
+        isCustomer: true,
+        activeTab: tab,
+        spinAvailable: true,
+        wheelModalOpen: false,
+        hasOtherOpenModal: false,
+        dismissedToday: false,
+      }),
+      false
+    );
+  }
+
+  // Blocked for staff roles, unavailable spins, open modals, or already dismissed today
+  assert.equal(
+    shouldShowWheelPopup({
+      isCustomer: false,
+      activeTab: 'dashboard',
+      spinAvailable: true,
+      wheelModalOpen: false,
+      hasOtherOpenModal: false,
+      dismissedToday: false,
+    }),
+    false
+  );
+  assert.equal(
+    shouldShowWheelPopup({
+      isCustomer: true,
+      activeTab: 'dashboard',
+      spinAvailable: false,
+      wheelModalOpen: false,
+      hasOtherOpenModal: false,
+      dismissedToday: false,
+    }),
+    false
+  );
+  assert.equal(
+    shouldShowWheelPopup({
+      isCustomer: true,
+      activeTab: 'dashboard',
+      spinAvailable: true,
+      wheelModalOpen: true,
+      hasOtherOpenModal: false,
+      dismissedToday: false,
+    }),
+    false
+  );
+  assert.equal(
+    shouldShowWheelPopup({
+      isCustomer: true,
+      activeTab: 'dashboard',
+      spinAvailable: true,
+      wheelModalOpen: false,
+      hasOtherOpenModal: true,
+      dismissedToday: false,
+    }),
+    false
+  );
+  assert.equal(
+    shouldShowWheelPopup({
+      isCustomer: true,
+      activeTab: 'dashboard',
+      spinAvailable: true,
+      wheelModalOpen: false,
+      hasOtherOpenModal: false,
+      dismissedToday: true,
+    }),
+    false
+  );
+});
